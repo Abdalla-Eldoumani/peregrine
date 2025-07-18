@@ -31,7 +31,8 @@ if platform.system() == "Windows":
         '/fp:fast',  
         '/Qopenmp',  
         '/Qopenmp-simd',
-        '/Qpar', 
+        '/Qpar',
+        '/O2', '/arch:AVX2', '/fp:fast', '/GL'
     ])
     extra_link_args.extend([
         '/LTCG',     # Link-time Code Generation
