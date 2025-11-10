@@ -5,67 +5,50 @@ import platform
 extra_compile_args = []
 extra_link_args = []
 
-# CPU-specific optimization flags for Windows
-cpu_specific_flags = [
-    '/arch:AVX2',
-    '/favor:INTEL64',
-    '/GA',
-    '/O2',
-    '/Oi',
-    '/Ot',
-    '/Oy',
-    '/fp:fast',
-    '/GL',
-    '/Gw',
-    '/openmp',
-    '/openmp:experimental',
-    '/MP12'
-]
+# Flags for Intel i7-10750H (Comet Lake/Skylake derivative)
+# CPU supports: SSE4.2, AVX, AVX2, FMA3
+# CPU does NOT support: AVX-512
 
 if platform.system() == "Windows":
-    extra_compile_args.extend(cpu_specific_flags)
+    # Windows (MSVC) optimizations
     extra_compile_args.extend([
-        '/openmp:experimental',
-        '/Qopenmp',
-        '/arch:AVX512',
-        '/fp:fast',  
-        '/Qopenmp',  
-        '/Qopenmp-simd',
-        '/Qpar',
-        '/O2', '/arch:AVX2', '/fp:fast', '/GL'
+        '/O2',              # Maximize speed
+        '/Oi',              # Enable intrinsic functions
+        '/Ot',              # Favor fast code
+        '/Oy',              # Omit frame pointers
+        '/GL',              # Whole program optimization
+        '/arch:AVX2',       # AVX2 only (no AVX-512 support!)
+        '/fp:fast',         # Fast floating-point
+        '/favor:INTEL64',   # Optimize for Intel 64-bit
+        '/Gw',              # Optimize global data
+        '/GA',              # Optimize for Windows application
+        '/Qpar',            # Auto-parallelization hints
+        '/openmp',          # OpenMP support
+        '/MP12'             # Multi-processor compilation (12 threads)
     ])
     extra_link_args.extend([
-        '/LTCG',     # Link-time Code Generation
-        '/OPT:REF',  # Eliminate Unreferenced Data
-        '/OPT:ICF',  # Identical COMDAT Folding
-    ])
-    extra_link_args.extend([
-        '/LTCG',     # Link-time Code Generation
-        '/OPT:REF',  # Eliminate Unreferenced Data
-        '/OPT:ICF',  # Identical COMDAT Folding
+        '/LTCG',            # Link-time code generation
+        '/OPT:REF',         # Remove unreferenced functions
+        '/OPT:ICF'          # Identical COMDAT folding
     ])
 else:
+    # Linux/MinGW (GCC/Clang) optimizations
+    # Use 'skylake' for Comet Lake (Comet Lake is Skylake derivative)
     extra_compile_args.extend([
-        '-fopenmp',
-        '-O3',
-        '-march=comet-lake',
-        '-mtune=comet-lake',
-        '-mavx2',
-        '-mfma',
-        '-ffast-math',
-        '-funroll-loops',
-        '-floop-optimize',
-        '-flto',
-        '-fopt-info-vec',
-        '-fopt-info-vec-missed',
-        '-fprefer-vector-width=256',
-        '-fopenmp-simd',
-        '-mavx512f',
-        '-mavx512cd'
+        '-fopenmp',                 # OpenMP support
+        '-O3',                      # Maximum optimization
+        '-march=skylake',           # Target Skylake architecture (Comet Lake compatible)
+        '-mtune=skylake',           # Tune for Skylake
+        '-mavx2',                   # Explicit AVX2 support
+        '-mfma',                    # Explicit FMA3 support
+        '-ffast-math',              # Fast math optimizations
+        '-funroll-loops',           # Loop unrolling
+        '-flto',                    # Link-time optimization
+        '-fprefer-vector-width=256' # Prefer 256-bit vectors (AVX2)
     ])
     extra_link_args.extend([
         '-fopenmp',
-        '-flto',
+        '-flto'
     ])
 
 ext_modules = [
@@ -87,7 +70,7 @@ ext_modules = [
 
 setup(
     name="MathExt",
-    version="1.0.0",
+    version="2.0.0",
     author="Abdalla ElDoumani",
     description="High-performance mathematical operations using C++ and SIMD",
     ext_modules=ext_modules,
