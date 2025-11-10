@@ -4,3 +4,9 @@ matrix_multiplication_results.txt
 # plot.py
 commands.txt
 t.cpp
+*.exe
+*.out
+*.o
+*.pyd
+build/
+dist/
