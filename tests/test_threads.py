@@ -12,8 +12,11 @@ environment before the process starts to take effect.
 The executor test drives kernels that release the GIL into the OpenMP
 runtime from four host threads at once. Each entering thread becomes its own
 OpenMP root, so the worst plausible outcome is oversubscription, not
-deadlock; a hang surfaces as TimeoutError from future.result instead of a
-stuck session.
+deadlock. The future.result timeout is not a real backstop: a worker wedged
+in a native call never returns, so executor shutdown joins it forever and
+the session hangs before pytest can report the TimeoutError; only the
+harness-level timeout reaps that. The test proves the non-deadlocking run,
+it does not convert a native deadlock into a loud failure.
 """
 
 import os
