@@ -37,8 +37,9 @@ from hypothesis import strategies as st
 import fastmathext as fme
 from conftest import assert_matmul_close
 
-# the regression fence: the @example pins on test_shapes mirror this list
-# entry for entry; update both together or not at all
+# the regression fence: every entry is applied as a square @example pin on
+# test_shapes by the loop below that property, so the pins cannot drift from
+# this list
 LEGACY_KILLER_SIZES = [1, 3, 7, 50, 250, 333, 750]
 
 # st.floats(width=32) rejects bounds that are not exactly representable in
@@ -105,21 +106,23 @@ def test_values_float32(operands):
 
 
 # explicit examples run first and do not count toward max_examples; each
-# @example must bind every @given parameter, which is why this property
+# example pin must bind every @given parameter, which is why this property
 # takes exactly these five plain parameters and draws nothing interactively
 @given(m=_DIM, k=_DIM, n=_DIM, seed=_SEED, dtype=_DTYPE)
-@example(m=1, k=1, n=1, seed=0, dtype=np.float64)
-@example(m=3, k=3, n=3, seed=0, dtype=np.float64)
-@example(m=7, k=7, n=7, seed=0, dtype=np.float64)
-@example(m=50, k=50, n=50, seed=0, dtype=np.float64)
-@example(m=250, k=250, n=250, seed=0, dtype=np.float64)
-@example(m=333, k=333, n=333, seed=0, dtype=np.float64)
-@example(m=750, k=750, n=750, seed=0, dtype=np.float64)
 def test_shapes(m, k, n, seed, dtype):
     a, b = _rng_operands(m, k, n, seed, dtype)
     got = fme.matmul(a, b)
     ref = a @ b
     assert_matmul_close(got, ref, a, b)
+
+
+# pins generated from the list keep the mirror structural: a list edit that
+# silently leaves a pin hole is impossible. example() is a plain decorator
+# and stacks fine applied after @given
+for _size in LEGACY_KILLER_SIZES:
+    test_shapes = example(m=_size, k=_size, n=_size, seed=0, dtype=np.float64)(
+        test_shapes
+    )
 
 
 # all three dims draw large on purpose: joint-large coverage costs about
