@@ -143,13 +143,16 @@ def test_shapes_spike(m, k, n, seed, dtype):
 def _special_value_operands(draw):
     # finite base content plus NaN and signed Inf injected at drawn
     # positions in either operand; the bounded base magnitudes mean every
-    # non-finite output traces back to an injection
+    # non-finite output traces back to an injection. The dtype draw fences
+    # float32 propagation separately: per-dtype kernel divergence is the
+    # legacy failure class, and Phase 3 gives float32 its own microkernel
+    dtype = draw(_DTYPE)
     m = draw(st.integers(1, 32))
     k = draw(st.integers(1, 32))
     n = draw(st.integers(1, 32))
     rng = np.random.default_rng(draw(_SEED))
-    a = rng.standard_normal((m, k))
-    b = rng.standard_normal((k, n))
+    a = rng.standard_normal((m, k)).astype(dtype)
+    b = rng.standard_normal((k, n)).astype(dtype)
     for _ in range(draw(st.integers(1, 4))):
         special = draw(st.sampled_from((np.nan, np.inf, -np.inf)))
         if draw(st.booleans()):
