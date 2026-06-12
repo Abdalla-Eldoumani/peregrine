@@ -20,7 +20,11 @@ quantized at one denormal ulp, so the floor is the principled minimum.
 
 float32 results are held to a different bar: both results are compared against
 the float64 ground truth and ours must stay within a small multiple of NumPy's
-own rounding error, with a k * eps32 floor for tiny k. A fixed rtol is exactly
+own rounding error, with a floor of k * eps32 scaled by the operands' largest
+finite magnitudes. The scaling exists for the same reason as the float64 atol
+term: one float32 rounding step is eps32-sized at data scale, and NumPy's FMA
+path can land arbitrarily close to the truth on cancellation elements, so an
+unscaled floor is vacuous away from unit-scale data. A fixed rtol is exactly
 what failed at k=750 historically.
 
 Special values are exact: NaN positions, Inf positions, and Inf signs must
@@ -86,9 +90,10 @@ def assert_matmul_close(got, ref, a, b):
         |got - ref| <= 1e-12 * |ref| + atol
         atol = max(4 * k * eps64 * amax(a) * amax(b), smallest subnormal)
     float32: both results against the float64 ground truth a64 @ b64; ours
-    within 4 * max(NumPy's own max abs error, k * eps32). Non-finite entries
-    must match positionally, including each Inf's sign; the toleranced
-    comparison then covers the mutually finite remainder only.
+    within 4 * max(NumPy's own max abs error, k * eps32 * amax(a) * amax(b)).
+    Non-finite entries must match positionally, including each Inf's sign;
+    the toleranced comparison then covers the mutually finite remainder only,
+    with amax taken over finite entries.
 
     Pass the operands actually multiplied as a and b: the float32 arm
     recomputes the ground truth from them and the float64 atol scales with
@@ -111,10 +116,16 @@ def assert_matmul_close(got, ref, a, b):
             return
 
     k = a.shape[1]
+    # amax runs over finite entries only: an injected NaN or Inf in an
+    # operand would otherwise poison the bound for finite remainder elements
+    # whose accumulations never touch it. Every reduction takes initial=0.0:
+    # a bare .max() raises ValueError on zero-size operands, and k=0 must
+    # yield an exactly-zero bound
+    amax_prod = (
+        np.abs(a[np.isfinite(a)]).max(initial=0.0)
+        * np.abs(b[np.isfinite(b)]).max(initial=0.0)
+    )
     if got.dtype == np.float64:
-        # every reduction takes initial=0.0: a bare .max() raises ValueError
-        # on zero-size operands, and k=0 must yield an exactly-zero bound
-        amax_prod = np.abs(a).max(initial=0.0) * np.abs(b).max(initial=0.0)
         atol = max(C_HIGHAM * k * EPS64 * amax_prod, SMALLEST_SUBNORMAL)
         diff = np.abs(got - ref)
         bound = 1e-12 * np.abs(ref) + atol
@@ -131,14 +142,17 @@ def assert_matmul_close(got, ref, a, b):
         # float32 summation order differs from BLAS, so a fixed rtol fails
         # once k grows (k=750 broke rtol=1e-5). Compare both results against
         # the float64 ground truth and require ours to stay within a small
-        # multiple of NumPy's own rounding error, with a k*eps floor for
-        # tiny k.
+        # multiple of NumPy's own rounding error. The floor scales with the
+        # operands' magnitudes for the same reason the float64 atol does:
+        # one rounding step is eps32-sized at data scale, and NumPy's FMA
+        # path can land arbitrarily closer to the truth on cancellation
+        # elements, so an unscaled k*eps32 floor is vacuous off unit scale.
         truth = a.astype(np.float64) @ b.astype(np.float64)
         if finite is not None:
             truth = truth[finite]
         err_got = np.abs(got.astype(np.float64) - truth).max(initial=0.0)
         err_ref = np.abs(ref.astype(np.float64) - truth).max(initial=0.0)
-        bound = 4.0 * max(err_ref, k * EPS32)
+        bound = 4.0 * max(err_ref, k * EPS32 * amax_prod)
         assert err_got <= bound, (
             f"f32 max abs error {err_got:.3e} exceeds bound {bound:.3e} "
             f"(numpy's own error vs float64 truth: {err_ref:.3e})"
