@@ -67,7 +67,9 @@ def matmul(a, b, *, out=None) -> np.ndarray:
         If an operand is not 2-D, or the inner dimensions do not match.
     TypeError
         If an operand dtype is bool, float16, complex64, complex128, or
-        object.
+        object, or if promotion lands on anything other than float32,
+        float64, or an integer dtype (longdouble and clongdouble on
+        platforms where they are distinct).
     NotImplementedError
         If out is anything other than None.
 
@@ -96,6 +98,15 @@ def matmul(a, b, *, out=None) -> np.ndarray:
 
     common = np.result_type(a_arr.dtype, b_arr.dtype)
     if common not in (np.dtype(np.float32), np.dtype(np.float64)):
+        # the fallback is integer-only: coercing an extended float or complex
+        # result (longdouble, clongdouble where the platform keeps them
+        # distinct) to float64 would silently drop precision or imaginary
+        # parts, the exact laundering _REJECT exists to stop
+        if not np.issubdtype(common, np.integer):
+            raise TypeError(
+                f"matmul: unsupported dtype {common.name}, "
+                "expected float32 or float64 (ints promote)"
+            )
         common = np.dtype(np.float64)
 
     return _matmul_native(_normalize(a_arr, common), _normalize(b_arr, common))
