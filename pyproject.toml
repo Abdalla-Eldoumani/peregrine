@@ -20,6 +20,7 @@ minimum-version = "0.10"
 cmake.version = ">=3.26"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["python/fastmathext"]
+wheel.py-api = "cp312"
 
 [tool.scikit-build.cmake.define]
 FME_ENABLE_CUDA = { env = "FME_ENABLE_CUDA", default = "OFF" }
