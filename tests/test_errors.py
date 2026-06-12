@@ -39,6 +39,15 @@ def test_rejected_dtype_on_b_operand_is_type_error():
         fme.matmul(a, b)
 
 
+def test_promoted_unsupported_dtype_is_type_error():
+    # datetime64 promotes to itself, which is neither float32/float64 nor
+    # an integer subdtype, so it exercises the post-promotion reject on
+    # every platform, standing in for longdouble/clongdouble on Linux
+    a = np.zeros((2, 2), dtype="datetime64[s]")
+    with pytest.raises(TypeError, match="unsupported dtype datetime64"):
+        fme.matmul(a, a)
+
+
 def test_out_keyword_raises_not_implemented():
     a = np.zeros((2, 2))
     b = np.zeros((2, 2))
