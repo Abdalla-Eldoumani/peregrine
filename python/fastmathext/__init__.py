@@ -56,10 +56,11 @@ def matmul(a, b, *, out=None) -> np.ndarray:
     Returns
     -------
     numpy.ndarray
-        The matrix product. float32 when both operands are float32,
-        otherwise float64. Integer operands always promote to float64,
-        unlike NumPy, which keeps int64: this is a float library, so every
-        result is a float array.
+        The matrix product. The result dtype is np.result_type(a, b) when
+        that lands on float32 or float64, so int8/int16/uint8/uint16 mixed
+        with float32 give float32. Integer-with-integer products always
+        promote to float64, unlike NumPy, which keeps int64: this is a
+        float library, so every result is a float array.
 
     Raises
     ------
