@@ -97,7 +97,9 @@ def assert_matmul_close(got, ref, a, b):
 
     Pass the operands actually multiplied as a and b: the float32 arm
     recomputes the ground truth from them and the float64 atol scales with
-    their magnitudes and the inner dimension k = a.shape[1].
+    their magnitudes and the inner dimension k = a.shape[1]. A non-finite
+    amax(a) * amax(b) product fails outright: the contract is unenforceable
+    at such magnitudes and must never pass vacuously.
     """
     assert got.shape == ref.shape, f"shape mismatch: {got.shape} vs {ref.shape}"
     assert got.dtype == ref.dtype, f"dtype mismatch: {got.dtype} vs {ref.dtype}"
@@ -120,10 +122,15 @@ def assert_matmul_close(got, ref, a, b):
     # operand would otherwise poison the bound for finite remainder elements
     # whose accumulations never touch it. Every reduction takes initial=0.0:
     # a bare .max() raises ValueError on zero-size operands, and k=0 must
-    # yield an exactly-zero bound
-    amax_prod = (
-        np.abs(a[np.isfinite(a)]).max(initial=0.0)
-        * np.abs(b[np.isfinite(b)]).max(initial=0.0)
+    # yield an exactly-zero bound. The product runs through Python float
+    # (float64), never the operand dtype: a float32 product overflows to inf
+    # above roughly 1.8e19 per operand, and an infinite bound would pass any
+    # result whatsoever
+    amax_prod = float(np.abs(a[np.isfinite(a)]).max(initial=0.0)) * float(
+        np.abs(b[np.isfinite(b)]).max(initial=0.0)
+    )
+    assert np.isfinite(amax_prod), (
+        "operand magnitudes overflow the tolerance bound; contract unenforceable"
     )
     if got.dtype == np.float64:
         atol = max(C_HIGHAM * k * EPS64 * amax_prod, SMALLEST_SUBNORMAL)
