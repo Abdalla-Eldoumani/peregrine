@@ -19,7 +19,7 @@ def test_1d_input_rejected():
 def test_module_reports_capabilities():
     feats = fme.cpu_features()
     assert set(feats) == {"avx2", "fma", "avx512f"}
-    assert isinstance(fme.has_cuda_build(), bool)
+    assert isinstance(fme.has_cuda(), bool)
 
 
 @pytest.mark.parametrize("name", ["bool", "float16", "complex64", "complex128", "object"])
