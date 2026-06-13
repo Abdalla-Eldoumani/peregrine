@@ -518,18 +518,35 @@ test_property_matches_unfused_numpy = example(
 # consumes, run the fused op (returns an fme.Array), from_device the result. The
 # oracle is the SAME unfused-NumPy expression as the host path (the _*_oracle
 # functions above), so the GPU is held to the identical assert_fused_close bound.
+#
+# Every fme.Array (the operands and the device result) is bound to a local and
+# explicitly del'd once the result is on the host, so the device handles are
+# released deterministically rather than relying on expression-temporary GC. The
+# returned value is a host ndarray (no device handle), so nothing device-resident
+# survives the call -- without this, one Array could straggle to interpreter
+# shutdown (nanobind's leaked-instance warning).
 def _axpby_call_gpu(x, y, z):
-    return fme.from_device(fme.axpby(fme.to_device(x), fme.to_device(y), a=2.0, b=3.0))
+    dx, dy = fme.to_device(x), fme.to_device(y)
+    out = fme.axpby(dx, dy, a=2.0, b=3.0)
+    host = fme.from_device(out)
+    del dx, dy, out
+    return host
 
 
 def _fma3_call_gpu(x, y, z):
-    return fme.from_device(
-        fme.fma3(fme.to_device(x), fme.to_device(y), fme.to_device(z))
-    )
+    dx, dy, dz = fme.to_device(x), fme.to_device(y), fme.to_device(z)
+    out = fme.fma3(dx, dy, dz)
+    host = fme.from_device(out)
+    del dx, dy, dz, out
+    return host
 
 
 def _scaled_relu_call_gpu(x, y, z):
-    return fme.from_device(fme.scaled_relu(fme.to_device(x), scale=3.0))
+    dx = fme.to_device(x)
+    out = fme.scaled_relu(dx, scale=3.0)
+    host = fme.from_device(out)
+    del dx, out
+    return host
 
 
 OPS_GPU = [
@@ -623,6 +640,7 @@ def test_gpu_mixed_residency_is_type_error():
         fme.fma3(d, h, h)
     with pytest.raises(TypeError, match="same device"):
         fme.axpby(h, d)
+    del d  # release the device handle deterministically
 
 
 def test_fused_helper_smoke():
