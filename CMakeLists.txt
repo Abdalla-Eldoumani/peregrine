@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.26)
 project(fastmathext LANGUAGES CXX)
 
-option(FME_ENABLE_CUDA "Build the CUDA backend (requires CUDA Toolkit 13.x)" OFF)
+option(FME_ENABLE_CUDA "Build the CUDA backend (requires CUDA Toolkit 12.8)" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,19 +57,23 @@ else()
 endif()
 
 if (FME_ENABLE_CUDA)
-  if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/context.cu")
-    message(FATAL_ERROR
-      "FME_ENABLE_CUDA=ON but src/cuda sources are not implemented yet. "
-      "Build with the option OFF until the cuda backend lands.")
-  endif()
   enable_language(CUDA)
   # sm_86 is the GA106 in the primary dev machine. PTX for 8.6 keeps newer
   # consumer parts working through JIT.
   set(CMAKE_CUDA_ARCHITECTURES 86)
-  find_package(CUDAToolkit 13 REQUIRED)
+  # Keep the C++ standard identical across the .cu and .cpp halves: nvcc passes
+  # host code to MSVC, and a standard mismatch between the two compilers is a
+  # subtle ODR and ABI hazard.
+  set(CMAKE_CUDA_STANDARD 20)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  # No version argument. The installed toolkit is 12.8 (nvcc 12.8.61); a bare
+  # find locates it and exposes CUDA::cudart/cublas/cublasLt. A "13" here
+  # returns FALSE on 12.8 and FATALs the configure (verified on-machine).
+  find_package(CUDAToolkit REQUIRED)
+  # Only the build probe for now. context.cu, gemm_cublas.cu, and transfer.cu
+  # are appended by the later plans in this phase as each lands.
   target_sources(_core PRIVATE
-    src/cuda/context.cu
-    src/cuda/gemm_cublas.cu
+    src/cuda/probe.cu
   )
   target_compile_definitions(_core PRIVATE FME_HAS_CUDA=1)
   target_link_libraries(_core PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
