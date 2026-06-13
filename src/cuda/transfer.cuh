@@ -88,6 +88,18 @@ void sync_compute();
 
 // Pinned host-staging cache (cudaHostAlloc), total capped at 256MB.
 //
+// STATUS (IN-01): this is a Phase-5+ staging PRIMITIVE that NO Phase-4 transfer
+// path calls yet. Every current host<->device copy -- gemm_host (gemm_cublas.cu)
+// and to_device/from_device (module.cpp) -- stages through a pageable new T[]
+// buffer, so those copies are NOT pinned and the cache below is unused. It is
+// implemented and unit-tested in isolation (acquire/reuse/evict, the 256MB cap)
+// so the primitive is ready, but wiring it into the transfer paths is deferred:
+// staging from_device/to_device through it would add a device->pinned->pageable
+// hop and, for gemm_host, would move the D2H onto the transfer stream and so
+// require the 04-07 cross-stream fences (see the ordering contract in
+// gemm_cublas.cu). Do not read the comments below as "transfers are pinned" --
+// they describe what this cache WOULD provide once a path adopts it.
+//
 // Why pinned at all: a pageable host buffer forces cudaMemcpyAsync to fall back
 // to a synchronous staging copy through a driver-internal pinned bounce buffer,
 // so H2D/D2H on the transfer stream cannot truly overlap or run async. A pinned
