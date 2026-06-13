@@ -58,6 +58,33 @@ extern template void fused_fma3<double>(const double*, const double*, const doub
 extern template void fused_scaled_relu<float>(const float*, float*, int64_t, float);
 extern template void fused_scaled_relu<double>(const double*, double*, int64_t, double);
 
+#if defined(FME_HAS_CUDA)
+// Device-resident fused routing. x, y, z, out are DEVICE pointers; the binding's
+// device fused Array overloads call these for operands already on the device, so
+// they never stage host memory. Separate from the host fused_* above on purpose:
+// the host entries are the CPU avx2/naive decision and stay byte-identical, while
+// these are the device-resident decision the wrapper reaches only when ALL
+// operands are an fme.Array. Unlike matmul there is NO f64-never-auto-routes
+// exclusion here: the fused device path is reached only by an explicit
+// to_device, so both dtypes route through (the wrapper never auto-stages a host
+// fused array to the GPU). Pure device-in/out forward to cuda::fused_*<T>.
+template <typename T>
+void fused_axpby_device(const T* x, const T* y, T* out, int64_t n, T a, T b);
+
+template <typename T>
+void fused_fma3_device(const T* x, const T* y, const T* z, T* out, int64_t n);
+
+template <typename T>
+void fused_scaled_relu_device(const T* x, T* out, int64_t n, T scale);
+
+extern template void fused_axpby_device<float>(const float*, const float*, float*, int64_t, float, float);
+extern template void fused_axpby_device<double>(const double*, const double*, double*, int64_t, double, double);
+extern template void fused_fma3_device<float>(const float*, const float*, const float*, float*, int64_t);
+extern template void fused_fma3_device<double>(const double*, const double*, const double*, double*, int64_t);
+extern template void fused_scaled_relu_device<float>(const float*, float*, int64_t, float);
+extern template void fused_scaled_relu_device<double>(const double*, double*, int64_t, double);
+#endif
+
 // transpose, sum_all, and sum_axis route through the same entry point. They
 // have one CPU implementation each (a plain, non-AVX2 TU that runs on every
 // CPU), so the routing is a direct forward today; keeping them behind dispatch
