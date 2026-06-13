@@ -15,6 +15,17 @@ namespace fme::cuda {
 // on the compute stream (no host staging, no sync).
 template <typename T>
 void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
+
+// The device-resident fused kernels (06-04), forward-declared CUDA-free the same
+// way: fused.cu's explicit float/double instantiations satisfy these, and this TU
+// pulls no src/cuda header so the deletable-src/cuda invariant holds. Pure
+// device-pointer compute on the compute stream.
+template <typename T>
+void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b);
+template <typename T>
+void fused_fma3(const T* x, const T* y, const T* z, T* out, int64_t n);
+template <typename T>
+void fused_scaled_relu(const T* x, T* out, int64_t n, T scale);
 } // namespace fme::cuda
 #endif
 
@@ -104,6 +115,39 @@ template void fused_fma3<float>(const float*, const float*, const float*, float*
 template void fused_fma3<double>(const double*, const double*, const double*, double*, int64_t);
 template void fused_scaled_relu<float>(const float*, float*, int64_t, float);
 template void fused_scaled_relu<double>(const double*, double*, int64_t, double);
+
+#if defined(FME_HAS_CUDA)
+// Device-resident fused entries: x, y, z, out are device pointers, so each is a
+// pure forward to the hand-written grid-stride kernel on the compute stream -- no
+// host staging, no sync (the binding owns the output buffer's lifetime; the
+// output alloc and the kernel are both on the compute stream, so the single-stream
+// ordering needs no cross-stream fence, unlike matmul_device's transfer/compute
+// split). Both f32 and f64 forward through: the fused device path is reached only
+// when operands are already an fme.Array (the user's explicit to_device), so there
+// is no f64-never-AUTO-routes exclusion to enforce here -- that is a GEMM-only rule
+// and fused never auto-stages a host array. Pure: no warnings/logging/fallback.
+template <typename T>
+void fused_axpby_device(const T* x, const T* y, T* out, int64_t n, T a, T b) {
+    cuda::fused_axpby<T>(x, y, out, n, a, b);
+}
+
+template <typename T>
+void fused_fma3_device(const T* x, const T* y, const T* z, T* out, int64_t n) {
+    cuda::fused_fma3<T>(x, y, z, out, n);
+}
+
+template <typename T>
+void fused_scaled_relu_device(const T* x, T* out, int64_t n, T scale) {
+    cuda::fused_scaled_relu<T>(x, out, n, scale);
+}
+
+template void fused_axpby_device<float>(const float*, const float*, float*, int64_t, float, float);
+template void fused_axpby_device<double>(const double*, const double*, double*, int64_t, double, double);
+template void fused_fma3_device<float>(const float*, const float*, const float*, float*, int64_t);
+template void fused_fma3_device<double>(const double*, const double*, const double*, double*, int64_t);
+template void fused_scaled_relu_device<float>(const float*, float*, int64_t, float);
+template void fused_scaled_relu_device<double>(const double*, double*, int64_t, double);
+#endif
 
 // transpose and the two sum entries have one CPU implementation each, valid on
 // every CPU, so they forward directly. No avx2/naive branch: unlike matmul
