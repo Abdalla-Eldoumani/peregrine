@@ -23,6 +23,26 @@ struct cuda_error : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+// CUDA-free description of the device the context singleton bound, plus the
+// runtime presence verdict. Lives here, not in context.cuh, for the same reason
+// cuda_error does: the binding boundary (module.cpp) reads it to answer a
+// has_cuda-style introspection call WITHOUT including a CUDA header, so src/cuda
+// stays deletable. It carries no CUDA type -- the .cu fills it from
+// cudaDeviceProp and a cudaGetDeviceCount/compute-capability probe and hands
+// back this plain struct. present is the device-usable verdict (driver loads,
+// device count > 0, compute capability >= 7.0); reason names the failure when
+// present is false (mapping to the EDGE_CASES device chain: "no device",
+// "driver too old", "compute capability too low"). cc_major/minor and name are
+// only meaningful when present.
+struct cuda_device_info {
+    bool present;
+    int device_id;
+    int cc_major;
+    int cc_minor;
+    std::string name;
+    std::string reason;
+};
+
 struct gemm_dims {
     int64_t m;
     int64_t k;
