@@ -80,10 +80,12 @@ if (FME_ENABLE_CUDA)
   # find locates it and exposes CUDA::cudart/cublas/cublasLt. A "13" here
   # returns FALSE on 12.8 and FATALs the configure (verified on-machine).
   find_package(CUDAToolkit REQUIRED)
-  # Only the build probe for now. context.cu, gemm_cublas.cu, and transfer.cu
-  # are appended by the later plans in this phase as each lands.
+  # probe.cu is the trivial-compile attestation; context.cu is the process-
+  # lifetime singleton (streams, mempool, cublas/cublasLt handles, atexit
+  # teardown). gemm_cublas.cu and transfer.cu are appended by the later plans.
   target_sources(_core PRIVATE
     src/cuda/probe.cu
+    src/cuda/context.cu
   )
   # _core is created by nanobind_add_module above, before CUDA is enabled, so
   # the global CMAKE_CUDA_ARCHITECTURES default never reached its property and
