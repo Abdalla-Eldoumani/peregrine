@@ -8,6 +8,7 @@
 
 #include "cuda/check.cuh"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -41,7 +42,28 @@ cublasHandle_t g_cublas = nullptr;
 cudaStream_t g_compute = nullptr;
 cudaStream_t g_transfer = nullptr;
 
+} // namespace
+
+// Set true at the top of teardown() and read by free_device (transfer.cu). After
+// teardown destroys ctx.transfer, ctx.transfer is a DANGLING handle the static
+// Context still names, so an Array still alive at finalization whose ~Array calls
+// free_device would otherwise cudaFreeAsync on that destroyed stream. The flag
+// turns that post-teardown free into a no-op: the mempool buffer is reclaimed by
+// the driver at process exit anyway, so leaking it is correct, while freeing it
+// on a dead stream is the use-after-teardown CR-01 names. Defined in the named
+// namespace (not the anonymous one) so transfer.cu can read it via context.cuh.
+std::atomic<bool> g_torn_down{false};
+
+namespace {
+
 void teardown() {
+    // First, publish that teardown has begun so any ~Array running after this
+    // point (Python GC at finalization) sees g_torn_down and skips its
+    // cudaFreeAsync rather than touching a stream this function is about to
+    // destroy. Ordered before the destroys so there is no window where the
+    // streams are gone but the flag is still false.
+    g_torn_down.store(true);
+
     // Order: handles before streams (a handle may have work queued on its
     // stream), and every result is discarded. cudaErrorCudartUnloading here is
     // the expected benign case, not a failure. No FME_*_CHECK: see above.
