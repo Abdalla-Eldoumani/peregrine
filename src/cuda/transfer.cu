@@ -58,6 +58,15 @@ void evict_slot_locked(std::size_t idx) {
 } // namespace
 
 void* alloc_device(int64_t bytes) {
+    // Reject a negative byte count explicitly (WR-03): the pre-flight below is
+    // gated on `bytes > 0`, so a negative value would SKIP it and then reach
+    // cudaMallocAsync via static_cast<size_t>(bytes), which wraps to a near-
+    // SIZE_MAX request (~16 EiB). checked_bytes upstream makes this unreachable
+    // from the binding, but alloc_device is a public entry in transfer.cuh and
+    // must defend its own contract rather than trust the `> 0` skip.
+    if (bytes < 0) {
+        throw ::fme::cuda_error("alloc_device: negative byte count");
+    }
     // A zero-byte buffer is legal (an empty operand): cudaMallocAsync accepts 0
     // and returns a pointer that is valid to free. Skip the pre-flight for it --
     // there is nothing to exhaust -- but still allocate so the handle is uniform.
