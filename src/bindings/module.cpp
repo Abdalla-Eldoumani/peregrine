@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 
 #include <atomic>
 #include <new>
@@ -10,6 +11,18 @@
 #include "dispatch/dispatch.hpp"
 
 namespace nb = nanobind;
+
+#if defined(FME_HAS_CUDA)
+namespace fme::cuda {
+// Forward declaration of the CUDA-free entry point defined in src/cuda/context.cu.
+// Declared here rather than via #include "cuda/context.cuh" on purpose: that
+// header pulls in cuda_runtime.h/cublas, and a CUDA header in this TU would break
+// the deletable-src/cuda invariant and the OFF build. The return type
+// fme::cuda_device_info is CUDA-free (core/common.hpp), so the forward
+// declaration alone is enough to call across the TU boundary.
+cuda_device_info context_device_info();
+} // namespace fme::cuda
+#endif
 
 namespace {
 
@@ -162,6 +175,28 @@ NB_MODULE(_core, m) {
         return false;
 #endif
     });
+
+#if defined(FME_HAS_CUDA)
+    // Underscore-private introspection that drives the context singleton to build
+    // (GPU-01) and reports the bound device. The wrapper's public has_cuda()
+    // (04-05) and the to_device path (04-04) will reach the context through their
+    // own entry points; this one exists so the context-init and clean-shutdown
+    // tests have a Python-visible trigger before those land. Defined only on the
+    // CUDA build: on the OFF build there is no context to introspect and the
+    // symbol is absent, matching has_cuda_build() == False. The GIL is held: this
+    // queries device props, it launches no kernel, so there is nothing to overlap.
+    m.def("_cuda_device_info", [] {
+        const fme::cuda_device_info i = fme::cuda::context_device_info();
+        nb::dict d;
+        d["present"] = i.present;
+        d["device_id"] = i.device_id;
+        d["cc_major"] = i.cc_major;
+        d["cc_minor"] = i.cc_minor;
+        d["name"] = i.name;
+        d["reason"] = i.reason;
+        return d;
+    });
+#endif
 
     nb::register_exception_translator([](const std::exception_ptr& p, void*) {
         try {
