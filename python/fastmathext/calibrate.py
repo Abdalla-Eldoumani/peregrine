@@ -26,10 +26,13 @@ GPU. Storing the measured per-n times lets the policy interpolate the real
 small-n floor instead of assuming the asymptote. See ``policy.choose_backend``.
 
 Budget: calibration uses LIGHTER reps than the publishable benchmark (warmup 2,
-a handful of reps that scale down as n grows). ``budget_seconds`` is a hard
-ceiling -- the grid stops adding larger sizes once the elapsed time projects to
-breach it, so a slow machine returns a smaller-but-valid grid rather than
-overrunning. The whole CPU-only pass completes in well under the default 120s.
+a handful of reps that scale down as n grows). ``budget_seconds`` bounds the
+grid: the elapsed wall time is checked BEFORE each size, and once it has been
+spent no larger size is started, so a slow machine returns a smaller-but-valid
+grid. The check is between sizes, not projected, so the one size already in
+flight when the budget is reached runs to completion -- the budget can be
+overrun by a single largest-size measurement, never by more. The whole CPU-only
+pass completes in well under the default 120s.
 
 GPU symbols (``_cuda_time_matmul``, ``to_device``, ``from_device``, ``Array``)
 exist ONLY on a CUDA build; on a CPU-only build they are absent. Every GPU
@@ -298,17 +301,21 @@ def _seeded_square(n: int, dtype) -> np.ndarray:
 def _measure_cpu(budget_seconds: float, start: float) -> tuple[dict, list]:
     """Measure the CPU per-(dtype, n) wall-time grid under the time budget.
 
-    Both float dtypes are measured at each grid size until the budget would be
-    breached. The budget is a HARD ceiling: before measuring each size, the
-    elapsed wall time is checked, and once the largest sizes would push past
-    ``budget_seconds`` the grid stops growing -- a slow machine returns a
-    smaller-but-valid grid rather than overrunning. At least the smallest size is
-    always measured so the grid is never empty.
+    Both float dtypes are measured at each grid size until the budget is spent.
+    The elapsed wall time is checked BEFORE each size: once it has reached
+    ``budget_seconds`` the grid stops growing, so a slow machine returns a
+    smaller-but-valid grid. The check is between sizes, not projected, so the size
+    already chosen when the budget is reached runs to completion -- the elapsed
+    time can therefore exceed ``budget_seconds`` by at most one largest-size
+    measurement. At least the smallest size is always measured so the grid is
+    never empty.
 
     Parameters
     ----------
     budget_seconds : float
-        The hard wall-time ceiling for the whole calibration.
+        The wall-time budget for the whole calibration. Checked between sizes, so
+        the one size in flight when it is reached still completes (overrun by at
+        most a single largest-size measurement).
     start : float
         The ``perf_counter`` value captured at the start of calibration.
 
@@ -450,10 +457,12 @@ def calibrate(force: bool = False, budget_seconds: float = 120) -> dict:
     reads as "no GPU available." Because the signature also records ``gpu=none``
     in that case, a CPU-only cache is never mistaken for a GPU one.
 
-    Calibration uses lighter reps than the publishable benchmark and treats
-    ``budget_seconds`` as a hard ceiling: on a slow machine the grid stops adding
-    larger sizes rather than overrunning, so the call always returns within the
-    budget. The whole CPU-only pass completes in well under the 120s default.
+    Calibration uses lighter reps than the publishable benchmark. The grid stops
+    adding larger sizes once ``budget_seconds`` of wall time has elapsed, checked
+    between sizes -- so on a slow machine the call returns close to the budget,
+    overrunning by at most the one largest-size measurement already in flight when
+    the budget is reached. The whole CPU-only pass completes in well under the
+    120s default.
 
     Parameters
     ----------
@@ -462,8 +471,10 @@ def calibrate(force: bool = False, budget_seconds: float = 120) -> dict:
         return it without re-measuring (the second-run-uses-cache contract). When
         True, ignore any existing cache and re-measure unconditionally.
     budget_seconds : float, optional
-        Hard wall-time ceiling for the measurement, default 120. The grid stops
-        growing once the elapsed time would breach it.
+        Wall-time budget for the measurement, default 120. Checked between sizes:
+        the grid stops growing once this much time has elapsed, so the one size in
+        flight at that point still completes (overrun by at most a single
+        largest-size measurement).
 
     Returns
     -------
