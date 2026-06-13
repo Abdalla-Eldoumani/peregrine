@@ -1,0 +1,181 @@
+{
+  "manifest": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 165 Stepping 2, GenuineIntel",
+    "python": "3.12.4",
+    "numpy": "2.4.6",
+    "fastmathext": "3.0.0.dev0",
+    "cpu_features": {
+      "avx2": true,
+      "fma": true,
+      "avx512f": false
+    },
+    "cuda_build": false,
+    "blas": "openblas 0.3.31.188.0",
+    "power_profile": "Power Scheme GUID: 0f443208-af27-43c1-8255-8606ca7d5000  (Ultimate Performance)",
+    "timestamp": "2026-06-13T02:13:16.954929",
+    "threadpools": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 6,
+        "prefix": "libscipy_openblas",
+        "filepath": "C:\\Users\\96654\\AppData\\Roaming\\Python\\Python312\\site-packages\\numpy.libs\\libscipy_openblas64_-63c857e738469261263c764a36be9436.dll",
+        "version": "0.3.31.188.0",
+        "threading_layer": "pthreads",
+        "architecture": "Haswell"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 6,
+        "prefix": "libomp",
+        "filepath": "C:\\Windows\\System32\\libomp140.x86_64.dll",
+        "version": null
+      }
+    ]
+  },
+  "dtype": "float64",
+  "cases": [
+    {
+      "n": 256,
+      "gflop": 0.033554432,
+      "fastmathext": {
+        "median_s": 0.00489955,
+        "p25_s": 0.0029115,
+        "p75_s": 0.009449724999999999,
+        "min_s": 0.0011558,
+        "cv": 1.3650669382846214,
+        "reps": 30
+      },
+      "numpy": {
+        "median_s": 0.00036635,
+        "p25_s": 0.00036202500000000003,
+        "p75_s": 0.0003722,
+        "min_s": 0.0003449,
+        "cv": 0.14587399471805676,
+        "reps": 30
+      },
+      "fme_gflops": 6.848472206631222,
+      "numpy_gflops": 91.59118875392386,
+      "speedup_vs_numpy": 0.0747721729546591
+    },
+    {
+      "n": 512,
+      "gflop": 0.268435456,
+      "fastmathext": {
+        "median_s": 0.0209278,
+        "p25_s": 0.01159075,
+        "p75_s": 0.029279149999999997,
+        "min_s": 0.0065603,
+        "cv": 0.6831974566187705,
+        "reps": 30
+      },
+      "numpy": {
+        "median_s": 0.0031091,
+        "p25_s": 0.002990975,
+        "p75_s": 0.003167275,
+        "min_s": 0.0028698,
+        "cv": 0.04232767574491036,
+        "reps": 30
+      },
+      "fme_gflops": 12.826740316707921,
+      "numpy_gflops": 86.33863690457046,
+      "speedup_vs_numpy": 0.14856315522892993
+    },
+    {
+      "n": 1024,
+      "gflop": 2.147483648,
+      "fastmathext": {
+        "median_s": 0.04714135,
+        "p25_s": 0.04096915,
+        "p75_s": 0.058437325,
+        "min_s": 0.0328472,
+        "cv": 0.3344258661494148,
+        "reps": 30
+      },
+      "numpy": {
+        "median_s": 0.02174315,
+        "p25_s": 0.021569275,
+        "p75_s": 0.02192455,
+        "min_s": 0.0206053,
+        "cv": 0.016942477334967846,
+        "reps": 30
+      },
+      "fme_gflops": 45.554139794469194,
+      "numpy_gflops": 98.76598597719283,
+      "speedup_vs_numpy": 0.46123307881509545
+    },
+    {
+      "n": 2048,
+      "gflop": 17.179869184,
+      "fastmathext": {
+        "median_s": 0.25992515,
+        "p25_s": 0.24466069999999998,
+        "p75_s": 0.265198025,
+        "min_s": 0.2254345,
+        "cv": 0.08849094522476371,
+        "reps": 30
+      },
+      "numpy": {
+        "median_s": 0.1606441,
+        "p25_s": 0.157770725,
+        "p75_s": 0.162645775,
+        "min_s": 0.1527432,
+        "cv": 0.02041384861870631,
+        "reps": 30
+      },
+      "fme_gflops": 66.09544780103042,
+      "numpy_gflops": 106.94366729932814,
+      "speedup_vs_numpy": 0.6180398472406384
+    }
+  ],
+  "cpu02_analysis": {
+    "requirement": "CPU-02: fme f64 >= 85% of OpenBLAS at n in {256,512,1024,2048}",
+    "verdict": "NOT met (measured below target at every size; AV-noise confound documented)",
+    "metric_note": "A persistent background antivirus (the user security tool, ~uncloseable) preempts the OpenMP barrier and inflates fme CV to 9-136% (worst at small n), far past the 5% protocol gate, while OpenBLAS pthreads stay at CV 1.7-14.6%. The floor (min_s) is the noise-robust comparison per the 03-04 finding; both median and floor ratios are recorded.",
+    "floor_ratios_main_run": {
+      "n256": {
+        "fme_floor_gflops": 29.0,
+        "numpy_floor_gflops": 97.3,
+        "floor_ratio": 0.298,
+        "median_ratio": 0.075,
+        "fme_cv": 1.365
+      },
+      "n512": {
+        "fme_floor_gflops": 40.9,
+        "numpy_floor_gflops": 93.5,
+        "floor_ratio": 0.437,
+        "median_ratio": 0.149,
+        "fme_cv": 0.683
+      },
+      "n1024": {
+        "fme_floor_gflops": 65.4,
+        "numpy_floor_gflops": 104.2,
+        "floor_ratio": 0.627,
+        "median_ratio": 0.461,
+        "fme_cv": 0.334
+      },
+      "n2048": {
+        "fme_floor_gflops": 76.2,
+        "numpy_floor_gflops": 112.5,
+        "floor_ratio": 0.678,
+        "median_ratio": 0.618,
+        "fme_cv": 0.088
+      }
+    },
+    "high_effort_best_floor": {
+      "n1024": {
+        "fme_gflops": 72.1,
+        "numpy_gflops": 113.0,
+        "ratio": 0.638
+      },
+      "n2048": {
+        "fme_gflops": 87.5,
+        "numpy_gflops": 110.8,
+        "ratio": 0.79
+      }
+    },
+    "interpretation": "Two components: (1) a real kernel/bandwidth ceiling (fme tops ~84-88 GF/s vs OpenBLAS ~110, consistent with the 03-04 scaling plateau at 4 threads), and (2) AV barrier-preemption noise that hits the 6-thread fme path far harder than OpenBLAS at small n. The ratio rises monotonically with n as CV falls (0.30 at n=256 CV136% -> 0.79 at n=2048 CV8.8%), so noise is a large part of the small-n gap, but the cleanest point still misses 0.85. Re-measure on a quiet machine before a final CPU-02 claim."
+  }
+}
