@@ -8,6 +8,7 @@ promotion, contiguity normalization, and clear errors.
 from __future__ import annotations
 
 import os
+import threading
 import warnings
 
 import numpy as np
@@ -154,7 +155,14 @@ _MIXED_RESIDENCY_MSG = (
 # Set once per process the first time an auto-mode CUDA failure falls back to the
 # CPU, so the warn-once contract holds: a long-running session that hits a
 # recurring CUDA error warns a single time, not on every call. Module-level (not
-# per-call) so the "for this session" wording is literally true.
+# per-call) so the "for this session" wording is literally true. The lock makes
+# the check-then-set atomic (WR-05): the library drops the GIL around kernels so
+# callers thread around it, and `if not _cuda_fallback_warned: _cuda_fallback_warned = True`
+# is two bytecode ops -- a thread switch between them under concurrent device
+# failures would let two threads both warn, breaking the literal once-per-session
+# claim. The lock is uncontended on the normal path (transfers/GEMM are the hot
+# work, not fallback), so it costs nothing measurable.
+_cuda_fallback_lock = threading.Lock()
 _cuda_fallback_warned = False
 
 
@@ -401,8 +409,16 @@ def matmul(a, b, *, out=None):
             # back is Phase 5; this phase has no forced-backend API wired, so the
             # auto path is the only reachable one and it always falls back.
             global _cuda_fallback_warned
-            if not _cuda_fallback_warned:
+            # Atomic check-then-set under the lock (WR-05) so exactly one thread
+            # ever sees the flag as unset and wins the warning, even when several
+            # threads hit a device failure at once. warnings.warn runs OUTSIDE the
+            # lock: it can invoke arbitrary user warning filters, and holding a
+            # lock across that is needless contention -- the only invariant the
+            # lock must protect is the single flip of the sentinel.
+            with _cuda_fallback_lock:
+                should_warn = not _cuda_fallback_warned
                 _cuda_fallback_warned = True
+            if should_warn:
                 name = _cuda_error_name(exc)
                 warnings.warn(
                     f"cuda matmul failed ({name}), "
