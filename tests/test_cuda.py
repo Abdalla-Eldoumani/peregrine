@@ -19,6 +19,10 @@ assert_matmul_close (conftest), never an inline tolerance, exactly like the CPU
 suite; f32 GPU compares against the f64 ground truth the same way.
 """
 
+import os
+import subprocess
+import sys
+
 import pytest
 
 import fastmathext as fme
@@ -44,10 +48,68 @@ def test_has_cuda_build_true_on_cuda_build():
     assert fme.has_cuda_build() is True
 
 
+# A CUDA-built _core links cublas64_12.dll / cublasLt64_12.dll from the toolkit
+# bin, which Python's secure DLL search ignores on PATH (3.8+). The in-process
+# suite gets this for free from conftest, but the clean-shutdown child below is a
+# bare interpreter that does NOT load conftest, so it registers the directory
+# itself. This duplicates conftest's shim deliberately: it keeps the regression
+# fence self-contained until 04-05 makes the package self-sufficient at import.
+_CHILD_DLL_SETUP = (
+    "import os\n"
+    "_b = os.path.join(os.environ.get('CUDA_PATH', ''), 'bin')\n"
+    "if os.name == 'nt' and _b.strip(os.sep) and os.path.isdir(_b):\n"
+    "    os.add_dll_directory(_b)\n"
+)
+
+# Forces the context singleton to build (first _cuda_device_info call) and then
+# exits normally. The atexit teardown must run cleanly on the way out: a
+# static-destructor teardown would touch CUDA after the driver unloaded and
+# intermittently nonzero-exit or print a CUDA shutdown error here. Asserting the
+# device is present first guarantees the context actually built before exit.
+_CLEAN_SHUTDOWN_SCRIPT = _CHILD_DLL_SETUP + (
+    "import fastmathext as fme\n"
+    "info = fme._core._cuda_device_info()\n"
+    "assert info['present'] is True, info\n"
+)
+
+
 @gpu
-def test_context_singleton_placeholder():
-    # GPU-01: context singleton init and clean atexit shutdown. Filled in 04-02.
-    assert fme.has_cuda_build() is True
+def test_context_inits():
+    # GPU-01: first use builds the process-lifetime singleton (device props,
+    # streams, mempool, cublas/cublasLt handles). _cuda_device_info drives that
+    # build and reports the bound device. Under the gate a usable device is
+    # present, so the props must be populated; the dev box is sm_86 (cc 8.6) and
+    # the contract floor is cc >= 7.0, so assert both the floor (the real
+    # requirement) and the expected exact capability on this machine.
+    info = fme._core._cuda_device_info()
+    assert info["present"] is True, info
+    assert (info["cc_major"], info["cc_minor"]) >= (7, 0), info
+    assert (info["cc_major"], info["cc_minor"]) == (8, 6), info
+    assert info["name"], "device name should be populated once props are queried"
+
+
+@gpu
+def test_context_clean_shutdown():
+    # GPU-01 regression fence for the static-destruction-order trap: a child that
+    # builds the context and exits must return 0 with no CUDA shutdown error in
+    # stderr. Full env copy so Windows DLL resolution survives in the child
+    # (the test_threads.py subprocess shape). If teardown ever regresses to a
+    # static destructor, this is where it surfaces as a nonzero exit or a
+    # cudaErrorCudartUnloading print.
+    env = dict(os.environ)
+    p = subprocess.run(
+        [sys.executable, "-c", _CLEAN_SHUTDOWN_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "cudaErrorCudartUnloading" not in p.stderr, p.stderr
+    # Catch a native abort/crash at shutdown that still left returncode 0 on some
+    # paths: none of these strings should appear on a clean teardown.
+    for bad in ("Traceback", "terminate", "abort", "access violation"):
+        assert bad not in p.stderr, p.stderr
 
 
 @gpu
