@@ -7,15 +7,63 @@ promotion, contiguity normalization, and clear errors.
 
 from __future__ import annotations
 
+import os
 import warnings
 
 import numpy as np
 
-from ._core import cpu_features, has_cuda_build
+# Import-time CUDA DLL discovery (Windows). A CUDA-enabled _core links
+# cublas64_12.dll / cublasLt64_12.dll from the toolkit bin, and since Python 3.8
+# the secure DLL search for extension modules ignores PATH, so a bare
+# `import fastmathext` under the ON build would raise "DLL load failed". Register
+# the toolkit bin before importing _core so the package is self-sufficient at
+# import on a CUDA build -- including under a bare `python -c` child that never
+# loads the test conftest (test_threads.py / test_fallback.py spawn those).
+# Best-effort and Windows-only: on the CPU-only build _core has no CUDA
+# dependency so this changes nothing, and a missing CUDA_PATH simply skips. This
+# is directory registration only (os.add_dll_directory), NOT a driver load or
+# context init, so it costs microseconds and respects the <50ms import budget --
+# "CUDA init" is the first device op, which this is not.
+if os.name == "nt":
+    _cuda_bin = os.path.join(os.environ.get("CUDA_PATH", ""), "bin")
+    if _cuda_bin.strip(os.sep) and os.path.isdir(_cuda_bin):
+        try:
+            os.add_dll_directory(_cuda_bin)
+        except OSError:
+            pass
+
+from ._core import _has_cuda_build, cpu_features
 from ._core import matmul as _matmul_native
 from ._core import sum_all as _sum_all_native
 from ._core import sum_axis as _sum_axis_native
 from ._core import transpose as _transpose_native
+
+# Device-side entries exist only on the CUDA build. Import them behind the build
+# flag so the OFF build imports cleanly; bind Array to a private sentinel class
+# nothing is an instance of when CUDA is absent, so the residency isinstance
+# checks in matmul return False on OFF without a separate code path.
+if _has_cuda_build():
+    from ._core import Array
+    from ._core import _cuda_device_probe
+    from ._core import from_device as _from_device_native
+    from ._core import to_device as _to_device_native
+else:
+    class Array:  # noqa: D401 - sentinel; the real device type is CUDA-build-only
+        """Placeholder for fme.Array on a CPU-only build.
+
+        The device array type exists only when fastmathext is built with
+        ``FME_ENABLE_CUDA=ON``. On a CPU-only build this sentinel exists so the
+        public name is importable and ``isinstance(x, fme.Array)`` is always
+        False; constructing it raises, since there is no device to hold.
+        """
+
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "cuda backend requested but no build "
+                "(fastmathext was built with FME_ENABLE_CUDA=OFF)"
+            )
+
+    _cuda_device_probe = None
 
 __version__ = "3.0.0.dev0"
 __all__ = [
@@ -23,8 +71,11 @@ __all__ = [
     "transpose",
     "sum",
     "mean",
+    "to_device",
+    "from_device",
+    "Array",
     "cpu_features",
-    "has_cuda_build",
+    "has_cuda",
     "__version__",
 ]
 
@@ -93,42 +144,220 @@ def _check_axis(axis, op: str) -> None:
         raise ValueError(f"{op}: axis {axis} is out of bounds for 2-dimensional input")
 
 
-def matmul(a, b, *, out=None) -> np.ndarray:
+# The exact mixed-residency token from the API design doc (DESIGN_SYSTEM.md error
+# model). Verbatim, never paraphrased: tests match on it and it is the contract.
+_MIXED_RESIDENCY_MSG = (
+    "matmul: one input is on cuda and one on cpu, "
+    "call to_device or from_device first"
+)
+
+# Set once per process the first time an auto-mode CUDA failure falls back to the
+# CPU, so the warn-once contract holds: a long-running session that hits a
+# recurring CUDA error warns a single time, not on every call. Module-level (not
+# per-call) so the "for this session" wording is literally true.
+_cuda_fallback_warned = False
+
+
+def _cuda_error_name(exc: Exception) -> str:
+    """Extract the cuda error name from a native cuda_error message.
+
+    The CHECK macros throw fme::cuda_error carrying "<cudaErrorName> at
+    <file>:<line>" (or a plain sentence for the synthetic guards). The fallback
+    warning names the error, so take the leading token up to " at " when present,
+    otherwise the whole message. Keeps the design-doc token
+    "cuda <op> failed (<cuda error name>), ..." readable rather than dumping a
+    file path into it.
+    """
+    msg = str(exc)
+    return msg.split(" at ", 1)[0].strip() or msg
+
+
+def _cuda_unavailable_reason() -> str:
+    """Return why the cuda backend is unavailable, or "" when it is usable.
+
+    The reason strings are the ones the design doc names for the
+    ``cuda backend requested but <reason>`` RuntimeError: "no build", "no
+    device", "driver too old". Composed from the build flag and the cheap device
+    probe (no context build, no driver load beyond the probe's own count query).
+    """
+    if not _has_cuda_build():
+        return "no build"
+    probe = _cuda_device_probe()
+    if probe["present"]:
+        return ""
+    reason = probe["reason"]
+    # Map the native probe's reason onto the design-doc vocabulary. The probe
+    # already returns "driver too old" / "no device" / "compute capability too
+    # low"; normalize the two device-absent variants to "no device" so the public
+    # token stays in the doc's named set.
+    if "driver" in reason:
+        return "driver too old"
+    return "no device"
+
+
+def has_cuda() -> bool:
+    """Return whether a usable CUDA device is available.
+
+    True only when fastmathext was built with CUDA support AND a usable device
+    is present: the driver loads, at least one device exists, and its compute
+    capability is at least 7.0. False (never an exception) on a CPU-only build
+    or a machine without a usable device, so auto-mode code can branch on it
+    without a try/except and stays silent when there is no GPU.
+
+    Returns
+    -------
+    bool
+        True if a CUDA device is built-in and usable, otherwise False.
+
+    Examples
+    --------
+    >>> import fastmathext as fme
+    >>> isinstance(fme.has_cuda(), bool)
+    True
+    """
+    # The probe runs lazily, on call, never at import: it queries the device
+    # count and compute capability but does not build the context (no streams,
+    # handles, or mempool), so importing fastmathext pays nothing for it and the
+    # <50ms import budget holds.
+    return _cuda_unavailable_reason() == ""
+
+
+def to_device(a) -> Array:
+    """Copy a host array to the CUDA device, returning an fme.Array.
+
+    The returned fme.Array holds a device-resident copy of ``a``; pass it to
+    matmul for the device path, or back through from_device to retrieve the
+    values. Accepts both float32 and float64: it is a memory transfer, not a
+    routing decision. A float64 array is stored on the device, but a float64
+    matmul never auto-routes to this GPU (its FP64 throughput is far below the
+    CPU); a forced device-resident float64 matmul computes correctly and slowly.
+
+    Parameters
+    ----------
+    a : array_like
+        Input; must be 2-D with a float32, float64, or integer dtype (integers
+        promote to float64, matching the host matmul promotion).
+
+    Returns
+    -------
+    fme.Array
+        A device-resident copy of ``a`` after promotion and contiguity
+        normalization.
+
+    Raises
+    ------
+    RuntimeError
+        If no usable CUDA device is available.
+    ValueError
+        If ``a`` is not 2-D.
+    TypeError
+        If the dtype is unsupported.
+    """
+    reason = _cuda_unavailable_reason()
+    if reason:
+        raise RuntimeError(f"cuda backend requested but {reason}")
+    arr = _prepare(a, "a", "to_device")
+    common = _resolve_dtype(arr, "to_device")
+    return _to_device_native(_normalize(arr, common))
+
+
+def from_device(x: Array) -> np.ndarray:
+    """Copy an fme.Array back to a host NumPy array.
+
+    Performs a device-to-host copy and synchronizes before returning, so the
+    result is fully populated. The returned array owns a fresh host buffer.
+
+    Parameters
+    ----------
+    x : fme.Array
+        A device-resident array produced by to_device or a device matmul.
+
+    Returns
+    -------
+    numpy.ndarray
+        A host copy of ``x``.
+
+    Raises
+    ------
+    RuntimeError
+        If no usable CUDA device is available.
+    TypeError
+        If ``x`` is not an fme.Array.
+    """
+    reason = _cuda_unavailable_reason()
+    if reason:
+        raise RuntimeError(f"cuda backend requested but {reason}")
+    if not isinstance(x, Array):
+        raise TypeError(
+            f"from_device: expected an fme.Array, got {type(x).__name__}"
+        )
+    return _from_device_native(x)
+
+
+def _matmul_cpu_fallback(a, b):
+    # Recompute on the CPU after an auto-mode device failure: the operands are
+    # device-resident fme.Arrays, so copy them back to host and run the host
+    # matmul. The result is a host ndarray -- "falling back to cpu" means the
+    # computation (and its residency) is now host-side; we cannot return a device
+    # array when the device is exactly what failed. This is the correct,
+    # testable fallback (the forced-OOM test compares it to NumPy through
+    # assert_matmul_close, which operates on host arrays).
+    return matmul(_from_device_native(a), _from_device_native(b))
+
+
+def matmul(a, b, *, out=None):
     """Matrix product of two 2-D arrays.
 
     Matches numpy.matmul for float32 and float64 operands, including
     zero-sized dimensions and NaN/Inf propagation.
 
+    The return type follows operand residency: two host arrays give a host
+    ndarray, two device fme.Arrays give a device fme.Array (the float32 GPU
+    path), and a mix of one host and one device operand raises TypeError rather
+    than transferring silently. A device float64 product computes on the GPU only
+    when both operands were explicitly placed there with to_device; a host
+    float64 product never auto-routes to the GPU (its FP64 throughput is below
+    the CPU). If a device computation fails at runtime, the call warns once and
+    falls back to the CPU for the rest of the session, returning a host ndarray.
+
     Parameters
     ----------
-    a : array_like
+    a : array_like or fme.Array
         Left operand; must be 2-D.
-    b : array_like
-        Right operand; must be 2-D with as many rows as a has columns.
+    b : array_like or fme.Array
+        Right operand; must be 2-D with as many rows as a has columns, and on
+        the same side (host or device) as a.
     out : None, optional
         Reserved for a future preallocated-output path. The keyword is part
         of the signature ahead of its implementation; only None is accepted.
 
     Returns
     -------
-    numpy.ndarray
-        The matrix product. The result dtype is np.result_type(a, b) when
-        that lands on float32 or float64, so int8/int16/uint8/uint16 mixed
-        with float32 give float32. Integer-with-integer products always
-        promote to float64, unlike NumPy, which keeps int64: this is a
-        float library, so every result is a float array.
+    numpy.ndarray or fme.Array
+        The matrix product, on the host for host operands and on the device for
+        device operands. The result dtype is np.result_type(a, b) when that
+        lands on float32 or float64, so int8/int16/uint8/uint16 mixed with
+        float32 give float32. Integer-with-integer products always promote to
+        float64, unlike NumPy, which keeps int64: this is a float library, so
+        every result is a float array.
 
     Raises
     ------
     ValueError
         If an operand is not 2-D, or the inner dimensions do not match.
     TypeError
-        If an operand dtype is bool, float16, complex64, complex128, or
-        object, or if promotion lands on anything other than float32,
-        float64, or an integer dtype (longdouble and clongdouble on
-        platforms where they are distinct).
+        If exactly one operand is an fme.Array (mixed residency), or an operand
+        dtype is bool, float16, complex64, complex128, or object, or if
+        promotion lands on anything other than float32, float64, or an integer
+        dtype (longdouble and clongdouble on platforms where they are distinct).
     NotImplementedError
         If out is anything other than None.
+
+    Warns
+    -----
+    RuntimeWarning
+        Once per session, if a device matmul fails at runtime and the call
+        falls back to the CPU.
 
     Examples
     --------
@@ -142,6 +371,46 @@ def matmul(a, b, *, out=None) -> np.ndarray:
     """
     if out is not None:
         raise NotImplementedError("matmul: out= is not implemented yet")
+
+    # Residency check, BEFORE the host fast path. Return type follows residency
+    # (DESIGN_SYSTEM.md): both operands on the device returns an fme.Array, both
+    # on the host returns an ndarray, and a mix is an error -- never a silent
+    # transfer. fme.Array is the CUDA-build device type; on a CPU-only build it is
+    # a sentinel nothing is an instance of, so both isinstance checks are False
+    # and control falls straight through to the host path with zero overhead.
+    a_is_dev = isinstance(a, Array)
+    b_is_dev = isinstance(b, Array)
+    if a_is_dev != b_is_dev:
+        # Exactly one operand is device-resident: the verbatim mixed-residency
+        # token, never a silent host<->device transfer the caller did not ask for.
+        raise TypeError(_MIXED_RESIDENCY_MSG)
+    if a_is_dev and b_is_dev:
+        # Both device-resident: the f32 (and forced f64) device path. f64 reaches
+        # here ONLY because the caller explicitly put both operands on the device
+        # (to_device) -- a host f64 array never auto-routes to the GPU (it would
+        # not be an fme.Array), so the FP64 trap rule is upheld upstream. Auto mode
+        # catches a CUDA runtime failure, warns ONCE, and falls back to the CPU.
+        try:
+            return _matmul_native(a, b)
+        except RuntimeError as exc:
+            # The native cuda_error arm maps every FME_CUDA_CHECK / cuBLAS / OOM
+            # failure to RuntimeError carrying the cuda error NAME. In auto mode
+            # this is recoverable: warn once with the verbatim fallback token
+            # (the cuda op and error name come from the message) and recompute on
+            # the CPU. A forced backend (set_backend("cuda")) that must NOT fall
+            # back is Phase 5; this phase has no forced-backend API wired, so the
+            # auto path is the only reachable one and it always falls back.
+            global _cuda_fallback_warned
+            if not _cuda_fallback_warned:
+                _cuda_fallback_warned = True
+                name = _cuda_error_name(exc)
+                warnings.warn(
+                    f"cuda matmul failed ({name}), "
+                    "falling back to cpu for this session",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return _matmul_cpu_fallback(a, b)
 
     # Fast path (CPU-06): when both operands are already 2-D C-contiguous
     # ndarrays of the same accepted float dtype, np.asarray, np.result_type, and
