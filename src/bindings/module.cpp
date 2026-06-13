@@ -42,12 +42,40 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 
 // gemm: the PURE device-pointer GEMM (04-03). a, b, c are DEVICE pointers; it
 // runs cuBLAS on the compute stream and never touches host memory or syncs. The
-// device-resident matmul(Array, Array) entry below calls this directly on the
-// operands' device buffers -- no host staging -- which is exactly the device-in/
-// device-out path 04-05's wrapper layers residency semantics on top of.
+// device-resident matmul(Array, Array) entry below reaches it through
+// fme::dispatch::matmul_device (the routing tier), never by calling it here, so
+// the f64-never-AUTO-routes exclusion lives in dispatch where it is unit-testable.
 template <typename T>
 void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
+
+// device_probe: the CUDA-free runtime presence verdict (present + cc + name +
+// reason), the cheap chain has_cuda() composes WITHOUT building the context (no
+// CUDA init, so it respects the <50ms import budget). Forward-declared rather
+// than #include "cuda/context.cuh" because that header pulls cuda_runtime.h;
+// cuda_device_info is CUDA-free (core/common.hpp), so the declaration alone calls
+// across the TU boundary. The wrapper turns present/reason into has_cuda() and
+// the "cuda backend requested but <reason>" token.
+cuda_device_info device_probe();
+
+// time_matmul: the cudaEvent-timed warm GEMM (the GPU-08 measurement primitive
+// 04-06 consumes). a, b are DEVICE pointers; the timed region is the GEMM only
+// (no transfer). Forward-declared CUDA-free (plain pointers + int64 + float), so
+// the event/stream body stays in gemm_cublas.cu and no CUDA header reaches this
+// TU. Returns warm elapsed ms per rep.
+template <typename T>
+float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
+                  int reps, int warmups);
 } // namespace fme::cuda
+
+namespace fme::dispatch {
+// The device-resident routing entry (04-05): a, b, c are DEVICE pointers; it
+// forwards f32/f64 to the cuBLAS GEMM behind the same FME_HAS_CUDA guard. The
+// binding's matmul(Array, Array) path calls THIS rather than cuda::gemm directly,
+// so the routing decision (and the f64-never-AUTO-routes rule it documents) stays
+// in the dispatch tier. CUDA-free signature (pointers + int64), forward-declared.
+template <typename T>
+void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
+} // namespace fme::dispatch
 #endif
 
 namespace {
@@ -326,17 +354,60 @@ Array* matmul_device(const Array& a, const Array& b) {
         // result is consumed only through a later from_device that syncs).
         nb::gil_scoped_release release;
         out.ptr = fme::cuda::alloc_device(out_bytes);
+        // Route through the dispatch tier, not cuda::gemm directly: the
+        // device-resident routing decision (and the f64-never-AUTO-routes rule it
+        // documents) belongs in src/dispatch. Both operands are already an
+        // fme.Array here, so this is the forced device-resident path -- f64 is
+        // allowed and computed, the auto-route exclusion is enforced upstream by
+        // the wrapper never sending a host f64 array down here.
         if (dt == fme::cuda::DType::f64) {
-            fme::cuda::gemm<double>(static_cast<const double*>(a.buf.ptr),
-                                    static_cast<const double*>(b.buf.ptr),
-                                    static_cast<double*>(out.ptr), d.m, d.k, d.n);
+            fme::dispatch::matmul_device<double>(
+                static_cast<const double*>(a.buf.ptr),
+                static_cast<const double*>(b.buf.ptr),
+                static_cast<double*>(out.ptr), d.m, d.k, d.n);
         } else {
-            fme::cuda::gemm<float>(static_cast<const float*>(a.buf.ptr),
-                                   static_cast<const float*>(b.buf.ptr),
-                                   static_cast<float*>(out.ptr), d.m, d.k, d.n);
+            fme::dispatch::matmul_device<float>(
+                static_cast<const float*>(a.buf.ptr),
+                static_cast<const float*>(b.buf.ptr),
+                static_cast<float*>(out.ptr), d.m, d.k, d.n);
         }
     }
     return new Array(out);
+}
+
+// The cudaEvent-timed device matmul: (Array x, Array y, reps, warmups) -> warm
+// ms per rep. Both operands are device-resident, so the timed region is the GEMM
+// only -- no H2D/D2H. This is the firm GPU-08 timing primitive 04-06's bench
+// reads instead of a wall-clock approximation around an async launch. Same
+// dtype + conformable-shape validation as matmul_device (a mismatch is a
+// shape_error -> ValueError, never a fake measurement). The GIL drops around the
+// whole warmup + timed run; time_matmul itself allocates the single output
+// buffer and creates/destroys the events.
+float time_matmul_entry(const Array& x, const Array& y, int reps, int warmups) {
+    if (x.buf.dtype != y.buf.dtype) {
+        throw fme::shape_error(
+            "matmul: device operands must have the same dtype");
+    }
+    const fme::gemm_dims d = fme::check_matmul_dims(x.buf.rows, x.buf.cols,
+                                                    y.buf.rows, y.buf.cols);
+    const fme::cuda::DType dt = x.buf.dtype;
+
+    float ms = 0.0f;
+    {
+        nb::gil_scoped_release release;
+        if (dt == fme::cuda::DType::f64) {
+            ms = fme::cuda::time_matmul<double>(
+                static_cast<const double*>(x.buf.ptr),
+                static_cast<const double*>(y.buf.ptr), d.m, d.k, d.n, reps,
+                warmups);
+        } else {
+            ms = fme::cuda::time_matmul<float>(
+                static_cast<const float*>(x.buf.ptr),
+                static_cast<const float*>(y.buf.ptr), d.m, d.k, d.n, reps,
+                warmups);
+        }
+    }
+    return ms;
 }
 #endif
 
@@ -390,7 +461,14 @@ NB_MODULE(_core, m) {
         return d;
     });
 
-    m.def("has_cuda_build", [] {
+    // The PRIVATE compile-time build signal. Underscore-private: the public
+    // predicate is the wrapper's has_cuda() (04-05), which composes this build
+    // flag AND a usable-device probe (_cuda_device_probe below) into the
+    // build-AND-usable-device meaning DESIGN_SYSTEM.md names. Renamed from the old
+    // public has_cuda_build: a build flag alone is not the useful predicate
+    // (dispatch must not route to a GPU that is absent), so the build-only answer
+    // stays private and the runtime chain is the public surface.
+    m.def("_has_cuda_build", [] {
 #if defined(FME_HAS_CUDA)
         return true;
 #else
@@ -405,10 +483,30 @@ NB_MODULE(_core, m) {
     // own entry points; this one exists so the context-init and clean-shutdown
     // tests have a Python-visible trigger before those land. Defined only on the
     // CUDA build: on the OFF build there is no context to introspect and the
-    // symbol is absent, matching has_cuda_build() == False. The GIL is held: this
+    // symbol is absent, matching _has_cuda_build() == False. The GIL is held: this
     // queries device props, it launches no kernel, so there is nothing to overlap.
     m.def("_cuda_device_info", [] {
         const fme::cuda_device_info i = fme::cuda::context_device_info();
+        nb::dict d;
+        d["present"] = i.present;
+        d["device_id"] = i.device_id;
+        d["cc_major"] = i.cc_major;
+        d["cc_minor"] = i.cc_minor;
+        d["name"] = i.name;
+        d["reason"] = i.reason;
+        return d;
+    });
+
+    // The CHEAP, never-building device presence probe the wrapper's has_cuda()
+    // composes its runtime chain from. Unlike _cuda_device_info, this calls
+    // device_probe (cudaGetDeviceCount + a props read), which does NOT build the
+    // context -- so has_cuda() pays no stream/handle/pool creation and no CUDA
+    // init, honoring the <50ms import budget when called lazily. Returns present
+    // plus the cc and the reason string ("no device" / "driver too old" /
+    // "compute capability too low") the wrapper turns into the "cuda backend
+    // requested but <reason>" RuntimeError token. Never throws on a driverless box.
+    m.def("_cuda_device_probe", [] {
+        const fme::cuda_device_info i = fme::cuda::device_probe();
         nb::dict d;
         d["present"] = i.present;
         d["device_id"] = i.device_id;
@@ -484,6 +582,15 @@ NB_MODULE(_core, m) {
     // GPU-05 device-resident routing; Task 3 round-trips it against the CPU
     // result through assert_matmul_close.
     m.def("matmul", &matmul_device, nb::arg("a"), nb::arg("b"));
+
+    // The cudaEvent-timed device-matmul timer (GPU-08 primitive 04-06 consumes).
+    // Both operands are device-resident fme.Array, so the timed region is the
+    // GEMM only -- no transfer. Returns warm elapsed ms per rep from a cudaEvent
+    // pair recorded after a sync. Underscore-private: it is a measurement tool the
+    // bench reaches through _core, not part of the public surface. Defined only on
+    // the CUDA build (it times a device GEMM), absent on the OFF build.
+    m.def("_cuda_time_matmul", &time_matmul_entry, nb::arg("x"), nb::arg("y"),
+          nb::arg("reps"), nb::arg("warmups"));
 #endif
 
     nb::register_exception_translator([](const std::exception_ptr& p, void*) {
