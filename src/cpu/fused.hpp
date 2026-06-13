@@ -32,6 +32,30 @@ void fused_fma3(const T* x, const T* y, const T* z, T* out, int64_t n);
 template <typename T>
 void fused_scaled_relu(const T* x, T* out, int64_t n, T scale);
 
+// float and double of the three ops above are EXPLICIT SPECIALIZATIONS (the AVX2
+// bodies in fused_avx2.cpp), not implicit instantiations of the primary template
+// (whose body is the generic scalar fallback that only the AVX2 TU's tail reuses).
+// These specialization declarations MUST precede the extern-template instantiation
+// declarations below: an explicit specialization has to be declared before the
+// first use that would otherwise instantiate the primary template
+// ([temp.expl.spec]/6). GCC enforces this and rejects the specialization
+// definitions in fused_avx2.cpp as "specialization after instantiation" without
+// these; MSVC accepts the out-of-order form silently, so the WSL/GCC build is the
+// only place the omission surfaces. The _naive twins are plain templates (separate
+// names), so they need no specialization declaration.
+template <>
+void fused_axpby<float>(const float*, const float*, float*, int64_t, float, float);
+template <>
+void fused_axpby<double>(const double*, const double*, double*, int64_t, double, double);
+template <>
+void fused_fma3<float>(const float*, const float*, const float*, float*, int64_t);
+template <>
+void fused_fma3<double>(const double*, const double*, const double*, double*, int64_t);
+template <>
+void fused_scaled_relu<float>(const float*, float*, int64_t, float);
+template <>
+void fused_scaled_relu<double>(const double*, double*, int64_t, double);
+
 // The _naive twins: identical contract, scalar bodies in a plain (non-AVX2) TU.
 template <typename T>
 void fused_axpby_naive(const T* x, const T* y, T* out, int64_t n, T a, T b);
