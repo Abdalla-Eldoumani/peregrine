@@ -73,6 +73,7 @@ not change.
         live_crossover            real RTX 3060 calibration reproduces DISP-05 (@gpu) [Wave 4: integration]
 """
 
+import importlib
 import json
 import os
 import subprocess
@@ -83,7 +84,17 @@ import numpy as np
 import pytest
 
 import fastmathext as fme
-from fastmathext import calibrate, policy
+from fastmathext import policy
+
+# The SUBMODULE, fetched via import_module. As of Phase 5 the package re-exports
+# the calibrate FUNCTION as fme.calibrate (the public API the design doc names),
+# which shadows the submodule attribute: `from fastmathext import calibrate` and
+# `import fastmathext.calibrate as calibrate` both now bind the FUNCTION. These
+# tests need the MODULE -- they call calibrate.calibrate(), _machine_signature(),
+# _cpu_brand() -- so import_module (which returns the module object from
+# sys.modules regardless of the namespace shadowing) is the reliable handle. The
+# public function is exercised as fme.calibrate elsewhere.
+calibrate = importlib.import_module("fastmathext.calibrate")
 from conftest import assert_matmul_close, requires_cuda
 
 _CUDA_OK, _CUDA_REASON = requires_cuda()
@@ -282,6 +293,197 @@ def test_set_backend_forces_cuda_routing():
         "float32", 256, 256, 256, residency="host", calibration=table, backend="cuda"
     )
     assert got_small == "cuda"
+
+
+def test_set_backend():
+    # The wrapper-level set_backend (DISP-05 override half). cpu/auto succeed and
+    # return None; an out-of-set value raises ValueError naming the allowed set;
+    # on a CPU-only build "cuda" raises the VERBATIM "cuda backend requested but
+    # <reason>" RuntimeError (the same token to_device raises -- the contract is
+    # the literal string, matched on its prefix here). The module-global _backend
+    # is restored to "auto" in a finally so this test cannot leak a forced backend
+    # into any later test in the same process (the global is process-wide state).
+    try:
+        assert fme.set_backend("cpu") is None
+        assert fme._backend == "cpu"
+        assert fme.set_backend("auto") is None
+        assert fme._backend == "auto"
+
+        with pytest.raises(ValueError) as ei:
+            fme.set_backend("gpu")
+        # the message names the allowed vocabulary so a typo is self-correcting
+        assert "auto" in str(ei.value) and "cpu" in str(ei.value)
+
+        if not fme.has_cuda():
+            with pytest.raises(RuntimeError) as ri:
+                fme.set_backend("cuda")
+            assert str(ri.value).startswith("cuda backend requested but "), str(ri.value)
+        else:
+            # on an ON build with a usable device the forced choice is accepted
+            assert fme.set_backend("cuda") is None
+            assert fme._backend == "cuda"
+    finally:
+        fme.set_backend("auto")
+
+
+# Child for the FME_BACKEND env-before-import test. It asserts the override
+# reached the module BEFORE trusting any behavior (the test_fallback.py shape:
+# the child verifies the env actually took effect, so a missed override fails
+# loudly rather than passing vacuously). FME_BACKEND is read once at import into
+# fme._backend, so the child checks that global AND that a host f32 dispatch stays
+# on the CPU under FME_BACKEND=cpu (it returns an ndarray, not an fme.Array).
+_ENV_BACKEND_SCRIPT = """\
+import numpy as np
+
+import fastmathext as fme
+
+# the override must have reached the module global at import
+assert fme._backend == "cpu", repr(fme._backend)
+
+# and a host f32 product stays on the CPU: a host ndarray result, never an Array
+a = np.ones((64, 64), dtype=np.float32)
+b = np.ones((64, 64), dtype=np.float32)
+out = fme.matmul(a, b)
+assert isinstance(out, np.ndarray), type(out)
+assert out.shape == (64, 64) and out.dtype == np.float32
+"""
+
+
+def test_env_backend(tmp_path):
+    # DISP-05: FME_BACKEND maps to the backend at import. The variable MUST be in
+    # the environment before the process starts (the dispatch policy reads it once
+    # at import, exactly like FME_DISABLE_AVX2 in test_fallback.py), so this spawns
+    # a child with a FULL env copy plus the override merged in -- a stripped env
+    # breaks Windows DLL resolution -- rather than monkeypatching in-process. The
+    # child asserts the override reached fme._backend before trusting the result;
+    # its stderr surfaces in the assertion message so a child failure reads as
+    # itself. FME_CACHE_DIR is redirected to a tmp dir so the child never touches
+    # the real per-user cache even if a dispatch were to read it.
+    env = dict(os.environ, FME_BACKEND="cpu", FME_CACHE_DIR=str(tmp_path))
+    p = subprocess.run(
+        [sys.executable, "-c", _ENV_BACKEND_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert p.returncode == 0, p.stderr
+
+
+# Child for the import-laziness guard. It imports fastmathext at a fresh, empty
+# FME_CACHE_DIR and asserts NO cache file appeared: the import must run no
+# calibration and read no cache (the <50ms lazy contract). The cache file is
+# created only by an explicit calibrate() or by a dispatch that consults a present
+# GPU's crossover -- never by `import fastmathext` itself.
+_IMPORT_LAZY_SCRIPT = """\
+import os
+import sys
+
+cache_dir = sys.argv[1]
+before = set(os.listdir(cache_dir))
+
+import fastmathext as fme
+
+after = set(os.listdir(cache_dir))
+new = after - before
+assert new == set(), "import created cache files: " + repr(new)
+# the lazy default is "auto" -- import read FME_BACKEND (absent here) and nothing
+# else; no cache, no calibration ran
+assert fme._backend == "auto", repr(fme._backend)
+"""
+
+
+def test_import_no_calibration(tmp_path):
+    # DISP-01: a bare `import fastmathext` runs no calibration and reads/writes no
+    # cache (the import budget is <50ms; calibration and the cache read are lazy).
+    # Run in a subprocess so the import is genuinely fresh -- an in-process import
+    # is already cached and could not observe import-time side effects. The child
+    # points FME_CACHE_DIR at a fresh empty tmp dir and asserts no file appears
+    # after the import; the cache materializes only on an explicit calibrate() or a
+    # GPU-routed dispatch, never at import.
+    env = dict(os.environ, FME_CACHE_DIR=str(tmp_path))
+    p = subprocess.run(
+        [sys.executable, "-c", _IMPORT_LAZY_SCRIPT, str(tmp_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert p.returncode == 0, p.stderr
+    # belt and suspenders: the parent confirms the dir is still empty afterward
+    assert os.listdir(str(tmp_path)) == [], os.listdir(str(tmp_path))
+
+
+@gpu
+def test_live_crossover(tmp_path, monkeypatch):
+    # DISP-05 (live, @gpu): on a fresh ON build, an actual calibrate() on the real
+    # RTX 3060 must complete within budget, return gpu + transfer entries (a true
+    # GPU-signature cache), and the four DISP-05 crossover points must hold when
+    # the policy is fed the REAL measured numbers -- not the synthetic table. This
+    # is the end-to-end close of DISP-01/05 on hardware: every other DISP-05 test
+    # uses constructed numbers, this one proves the live device reproduces the
+    # contract. Isolated to a tmp cache dir so the real per-user cache is untouched.
+    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+
+    start = time.perf_counter()
+    cal = calibrate.calibrate(force=True, budget_seconds=120)
+    elapsed = time.perf_counter() - start
+
+    # completed within the documented ceiling (generous margin for one in-flight
+    # size, matching test_calibrate_budget's reasoning)
+    assert elapsed < 120 + 60.0, f"live calibrate overran: {elapsed:.1f}s"
+
+    # a real GPU calibration carries the measured gpu + transfer series ...
+    assert "gpu" in cal and "transfer" in cal, "ON-build calibrate must measure the GPU"
+    assert cal["gpu"]["float32"], "gpu float32 grid must be non-empty"
+    for key in ("h2d_gbps", "d2h_gbps", "fixed_overhead_s"):
+        assert key in cal["transfer"], f"transfer must carry {key}"
+    # ... and a GPU machine signature (gpu name + driver, not none/n-a)
+    parts = cal["signature"].split("|")
+    assert parts[1] != "none" and parts[2] != "n/a", cal["signature"]
+
+    # the four DISP-05 points, fed the LIVE numbers. The measured grid only spans
+    # the sizes the budget allowed; key the points off what was actually measured.
+    measured_ns = [pt[0] for pt in cal["cpu"]["float32"]]
+    small_n = measured_ns[0]
+    large_n = measured_ns[-1]
+
+    # f64 host never routes to the GPU, at any measured size (the FP64 trap)
+    for n in measured_ns:
+        assert (
+            policy.choose_backend(
+                "float64", n, n, n, residency="host", calibration=cal, backend="auto"
+            )
+            == "cpu"
+        ), f"live f64 host n={n} must stay on cpu"
+
+    # the smallest measured host f32 stays on the CPU (the staging+launch floor
+    # dominates), while that same size device-resident routes to the GPU (no
+    # transfer cost) -- the transfer-cost crossover, on real numbers
+    assert (
+        policy.choose_backend(
+            "float32", small_n, small_n, small_n,
+            residency="host", calibration=cal, backend="auto",
+        )
+        == "cpu"
+    ), f"live f32 host n={small_n} should stay on cpu (transfer floor)"
+    assert (
+        policy.choose_backend(
+            "float32", large_n, large_n, large_n,
+            residency="device", calibration=cal, backend="auto",
+        )
+        == "cuda"
+    ), f"live f32 device n={large_n} should route to cuda"
+
+    # the largest measured host f32 crosses to the GPU: the GEMM time saved dwarfs
+    # the transfer round trip at large n
+    assert (
+        policy.choose_backend(
+            "float32", large_n, large_n, large_n,
+            residency="host", calibration=cal, backend="auto",
+        )
+        == "cuda"
+    ), f"live f32 host n={large_n} should route to cuda"
 
 
 # --- DISP-03: fail-safe cache read and the FME_CACHE_DIR override -------------
