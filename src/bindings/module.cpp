@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <new>
+#include <type_traits>
 
 #include "core/common.hpp"
 #include "cpu/feature_detect.hpp"
@@ -13,6 +14,15 @@
 namespace nb = nanobind;
 
 #if defined(FME_HAS_CUDA)
+// transfer.cuh is included (not forward-declared) because, unlike context.cuh
+// and gemm_cublas.cuh, it pulls NO CUDA header -- it declares only the CUDA-free
+// DeviceBuffer/DType handle and the transfer functions over void*/int64. fme.Array
+// wraps DeviceBuffer, so the binding needs the struct's fields; including the
+// header keeps one source of truth for the handle rather than duplicating it. No
+// cuda_runtime.h/cublas reaches this TU, so the deletable-src/cuda invariant and
+// the byte-identical OFF build both hold (verified: the OFF build links no CUDA).
+#include "cuda/transfer.cuh"
+
 namespace fme::cuda {
 // Forward declarations of the CUDA-free entry points defined in src/cuda.
 // Declared here rather than via #include "cuda/context.cuh"/"cuda/gemm_cublas.cuh"
@@ -24,12 +34,19 @@ namespace fme::cuda {
 cuda_device_info context_device_info();
 
 // gemm_host: host-pointer GEMM convenience (allocates device buffers, copies up,
-// runs the device gemm, copies the result back, syncs). The device-resident
-// matmul on fme.Array lands in 04-04; this entry exists so the GPU-02
-// correctness suite has a callable host->device->host path now. Templated in
+// runs the device gemm, copies the result back, syncs). This entry exists so the
+// GPU-02 correctness suite has a callable host->device->host path. Templated in
 // src/cuda; the explicit float/double instantiations there satisfy these.
 template <typename T>
 void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
+
+// gemm: the PURE device-pointer GEMM (04-03). a, b, c are DEVICE pointers; it
+// runs cuBLAS on the compute stream and never touches host memory or syncs. The
+// device-resident matmul(Array, Array) entry below calls this directly on the
+// operands' device buffers -- no host staging -- which is exactly the device-in/
+// device-out path 04-05's wrapper layers residency semantics on top of.
+template <typename T>
+void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 } // namespace fme::cuda
 #endif
 
@@ -157,6 +174,170 @@ nb::ndarray<nb::numpy, T, nb::ndim<2>> gemm_host_typed(
     const size_t shape[2] = {static_cast<size_t>(d.m), static_cast<size_t>(d.n)};
     return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
 }
+
+// fme.Array: the device-resident array. It owns a DeviceBuffer (device pointer +
+// shape + dtype, allocated from the context mempool) and frees it in its
+// destructor when the Python object is garbage-collected. Single owner: nanobind
+// manages this C++ instance's lifetime, so the device buffer is freed exactly
+// once, by ~Array, never by a stray capsule deleter -- the use-after-free / leak
+// mitigation (a wrong deleter on a device pointer is a DoS, RESEARCH Security
+// Domain). The buffer is moved into the instance at construction (to_device /
+// the device matmul) and never shared between two live Arrays.
+struct Array {
+    fme::cuda::DeviceBuffer buf;
+
+    explicit Array(fme::cuda::DeviceBuffer b) : buf(b) {}
+
+    Array(const Array&) = delete;
+    Array& operator=(const Array&) = delete;
+
+    ~Array() {
+        // free_device tolerates nullptr; a default/empty buffer is a no-op. This
+        // is the ONLY place a device buffer owned by an Array is freed.
+        if (buf.ptr != nullptr) {
+            // No CHECK in a destructor: a throw escaping ~Array during Python GC
+            // would terminate the interpreter, the same hazard the context
+            // teardown avoids. free_device itself CHECK-throws on a live error,
+            // but cudaFreeAsync of a pool pointer at GC time does not fail in
+            // practice; guard the contract by swallowing here is unnecessary
+            // because free_device runs on a live (non-teardown) path. Keep it a
+            // plain call: GC of an Array is a live operation, not interpreter
+            // shutdown.
+            fme::cuda::free_device(buf.ptr);
+            buf.ptr = nullptr;
+        }
+    }
+};
+
+// Map the runtime DType to the matching nb::dtype for the dlpack/property export.
+nb::dlpack::dtype array_dtype(fme::cuda::DType dt) {
+    return dt == fme::cuda::DType::f64 ? nb::dtype<double>() : nb::dtype<float>();
+}
+
+// Build the dlpack-exporting ndarray view over an Array's device buffer. The
+// returned nb::ndarray<nb::array_api, ...> carries the CUDA device type and id,
+// and its owner is the Array Python object itself (passed as `self`): nanobind
+// holds a reference to it for as long as the exported dltensor/capsule lives, so
+// the device buffer cannot be freed under a consumer (cupy/torch) that imported
+// it -- ~Array runs only after both the Array and every dlpack view are gone.
+// The deleter therefore does NOT free the buffer (that is ~Array's sole job);
+// the owner reference is purely keep-alive. numpy cannot consume a CUDA dltensor
+// (it has no device memory), so this export is for device-aware consumers; the
+// host path is from_device's explicit synced D2H copy.
+nb::ndarray<nb::array_api> array_dlpack_view(nb::handle self, const Array& arr) {
+    const size_t shape[2] = {static_cast<size_t>(arr.buf.rows),
+                             static_cast<size_t>(arr.buf.cols)};
+    return nb::ndarray<nb::array_api>(
+        arr.buf.ptr, 2, shape, /*owner=*/self, /*strides=*/nullptr,
+        array_dtype(arr.buf.dtype), nb::device::cuda::value, /*device_id=*/0);
+}
+
+// to_device: copy a host ndarray up to a fresh device buffer and wrap it in an
+// fme.Array. Accepts both f32 and f64 (Open Q3: to_device is just memory; the
+// f64-never-auto-routes rule is a dispatch concern in 04-05, not a to_device
+// rejection). alloc_device pre-flights cudaMemGetInfo; copy_h2d runs on the
+// transfer stream. The H2D is async, but the device buffer is only handed back
+// inside the returned Array -- any later device read (the matmul) is ordered
+// after this copy by being queued behind it, so no host-visible sync is needed
+// here (sync is the D2H/from_device contract, not H2D).
+template <typename T>
+Array* to_device_typed(
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a) {
+
+    const int64_t rows = static_cast<int64_t>(a.shape(0));
+    const int64_t cols = static_cast<int64_t>(a.shape(1));
+    const fme::cuda::DType dt =
+        std::is_same_v<T, double> ? fme::cuda::DType::f64 : fme::cuda::DType::f32;
+    const int64_t bytes = rows * cols * static_cast<int64_t>(sizeof(T));
+
+    fme::cuda::DeviceBuffer buf{nullptr, rows, cols, dt};
+    {
+        // Drop the GIL around the allocation + copy: alloc_device and copy_h2d
+        // touch no Python object. a.data() stays valid -- nanobind holds the
+        // ndarray alive across the call -- and the copy reads from it on the
+        // transfer stream.
+        nb::gil_scoped_release release;
+        buf.ptr = fme::cuda::alloc_device(bytes);
+        fme::cuda::copy_h2d(buf.ptr, a.data(), bytes);
+    }
+    return new Array(buf);
+}
+
+// from_device: copy an fme.Array's device buffer back to a FRESH host ndarray.
+// numpy has no device memory and cannot pull a CUDA dltensor through dlpack, so
+// this does an explicit D2H copy on the transfer stream and -- the hard contract
+// -- SYNCS the transfer stream before the host buffer is returned to Python
+// (async wins live inside a call, never across the API boundary; a D2H result
+// returned before its stream syncs is a data race the caller never sees). The
+// returned ndarray owns a fresh host allocation via a capsule whose deleter
+// frees exactly that allocation.
+template <typename T>
+nb::ndarray<nb::numpy, T, nb::ndim<2>> from_device_typed(const Array& arr) {
+    const int64_t rows = arr.buf.rows;
+    const int64_t cols = arr.buf.cols;
+    const int64_t bytes = rows * cols * static_cast<int64_t>(sizeof(T));
+
+    T* out = new T[static_cast<size_t>(rows) * static_cast<size_t>(cols)];
+    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+
+    {
+        nb::gil_scoped_release release;
+        fme::cuda::copy_d2h(out, arr.buf.ptr, bytes);
+        // Sync BEFORE the host buffer crosses back into Python: out is fully
+        // written only after the transfer stream drains.
+        fme::cuda::sync_transfer();
+    }
+
+    const size_t shape[2] = {static_cast<size_t>(rows), static_cast<size_t>(cols)};
+    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+}
+
+// The REQUIRED device-resident matmul: (Array, Array) -> Array, device-in/
+// device-out. It validates the operands are the same dtype and shape-conformable,
+// allocates the output device buffer via alloc_device, and runs the PURE device
+// GEMM (fme::cuda::gemm<T>) directly on the operands' device pointers -- NO host
+// staging, no D2H. The result is a fresh fme.Array wrapping the output buffer.
+//
+// Deliberately minimal here: this is the device-in/device-out primitive 04-05's
+// wrapper consumes for the f32 device-resident GPU path (GPU-05 routing). The
+// full residency dispatch -- the mixed-residency TypeError, the residency-out
+// return-type selection, the f64-never-auto-routes exclusion, and the warn-once
+// CPU fallback -- is layered on top in 04-05; this entry must not silently
+// transfer either (it never touches host memory). A dtype/shape mismatch raises
+// (shape_error -> ValueError via the translator) rather than computing garbage.
+Array* matmul_device(const Array& a, const Array& b) {
+    if (a.buf.dtype != b.buf.dtype) {
+        throw fme::shape_error(
+            "matmul: device operands must have the same dtype");
+    }
+    const fme::gemm_dims d = fme::check_matmul_dims(a.buf.rows, a.buf.cols,
+                                                    b.buf.rows, b.buf.cols);
+
+    const fme::cuda::DType dt = a.buf.dtype;
+    const int64_t elem = fme::cuda::dtype_size(dt);
+    const int64_t out_bytes = d.m * d.n * elem;
+
+    fme::cuda::DeviceBuffer out{nullptr, d.m, d.n, dt};
+    {
+        // Drop the GIL around the alloc + device GEMM. gemm<T> launches on the
+        // compute stream and the operands' buffers were filled by to_device on
+        // the transfer stream; cuBLAS reads them correctly because the buffers
+        // are complete (to_device's H2D is queued before this call, and the
+        // result is consumed only through a later from_device that syncs).
+        nb::gil_scoped_release release;
+        out.ptr = fme::cuda::alloc_device(out_bytes);
+        if (dt == fme::cuda::DType::f64) {
+            fme::cuda::gemm<double>(static_cast<const double*>(a.buf.ptr),
+                                    static_cast<const double*>(b.buf.ptr),
+                                    static_cast<double*>(out.ptr), d.m, d.k, d.n);
+        } else {
+            fme::cuda::gemm<float>(static_cast<const float*>(a.buf.ptr),
+                                   static_cast<const float*>(b.buf.ptr),
+                                   static_cast<float*>(out.ptr), d.m, d.k, d.n);
+        }
+    }
+    return new Array(out);
+}
 #endif
 
 } // namespace
@@ -240,9 +421,69 @@ NB_MODULE(_core, m) {
 
     // double before float, like every other overload set: a float64 array must
     // never bind the float32 overload (a silent narrowing). Private and
-    // CUDA-only; the public device matmul lands in 04-04.
+    // CUDA-only; the public device matmul is exposed via the Array overload of
+    // matmul below (04-04), wired into fme.matmul by 04-05.
     m.def("_gemm_host", &gemm_host_typed<double>, nb::arg("a"), nb::arg("b"));
     m.def("_gemm_host", &gemm_host_typed<float>, nb::arg("a"), nb::arg("b"));
+
+    // fme.Array: the device-resident array handle. Read-only shape (a tuple) and
+    // dtype (the numpy dtype), and __dlpack__/__dlpack_device__ reporting a CUDA
+    // device. The class owns its device buffer and frees it on GC (~Array); the
+    // dlpack export keeps the Array alive via the owner reference rather than
+    // freeing through a capsule deleter, so a device-aware consumer can hold the
+    // exported tensor without a use-after-free.
+    nb::class_<Array>(m, "Array")
+        .def_prop_ro(
+            "shape",
+            [](const Array& self) {
+                return nb::make_tuple(self.buf.rows, self.buf.cols);
+            })
+        .def_prop_ro(
+            "dtype",
+            [](const Array& self) {
+                // Hand back the numpy dtype object so x.dtype == np.float32 holds
+                // on the Python side, matching how an ndarray reports its dtype.
+                return nb::module_::import_("numpy").attr(
+                    self.buf.dtype == fme::cuda::DType::f64 ? "float64"
+                                                            : "float32");
+            })
+        .def(
+            "__dlpack__",
+            [](nb::handle self) {
+                const Array& arr = nb::cast<const Array&>(self);
+                return array_dlpack_view(self, arr);
+            })
+        .def("__dlpack_device__", [](const Array&) {
+            // (device_type, device_id): kDLCUDA is 2 in the DLPack device enum.
+            // Reported directly so a consumer's __dlpack_device__ negotiation
+            // sees CUDA without constructing the full tensor.
+            return nb::make_tuple(static_cast<int>(nb::device::cuda::value), 0);
+        });
+
+    // to_device(ndarray) -> fme.Array. double before float (a float64 array must
+    // never bind the float32 overload). Accepts both dtypes -- it is just memory.
+    m.def("to_device", &to_device_typed<double>, nb::arg("a"));
+    m.def("to_device", &to_device_typed<float>, nb::arg("a"));
+
+    // from_device(fme.Array) -> ndarray. One entry, dtype-dispatched off the
+    // Array (no host operand to overload on): the D2H copy + transfer-stream sync
+    // happen in from_device_typed before the host ndarray is returned.
+    m.def(
+        "from_device",
+        [](const Array& arr) -> nb::object {
+            return arr.buf.dtype == fme::cuda::DType::f64
+                       ? nb::cast(from_device_typed<double>(arr))
+                       : nb::cast(from_device_typed<float>(arr));
+        },
+        nb::arg("x"));
+
+    // The REQUIRED device-resident matmul: matmul(Array, Array) -> Array,
+    // device-in/device-out, dtype-dispatched. Registered as a matmul overload
+    // AFTER the host ndarray overloads, so a host pair still binds the CPU path
+    // and a device pair binds this one. 04-05's wrapper consumes this for the
+    // GPU-05 device-resident routing; Task 3 round-trips it against the CPU
+    // result through assert_matmul_close.
+    m.def("matmul", &matmul_device, nb::arg("a"), nb::arg("b"));
 #endif
 
     nb::register_exception_translator([](const std::exception_ptr& p, void*) {
@@ -250,6 +491,19 @@ NB_MODULE(_core, m) {
             std::rethrow_exception(p);
         } catch (const fme::shape_error& e) {
             PyErr_SetString(PyExc_ValueError, e.what());
+        } catch (const fme::cuda_error& e) {
+            // The ONE new arm for the CUDA path (04-04). Every FME_CUDA_CHECK /
+            // FME_CUBLAS_CHECK failure and the alloc_device OOM pre-flight throw
+            // fme::cuda_error carrying the cuda error NAME (e.g.
+            // cudaErrorMemoryAllocation) plus file:line. Mapped to RuntimeError
+            // here; the distinct user-facing wording (the byte-math OOM message,
+            // the driver-too-old message) is composed in the wrapper (04-05),
+            // keyed off the name in e.what(). cuda_error lives in core/common.hpp
+            // and carries no CUDA type, so this arm compiles in every build; on
+            // the OFF build nothing throws it, so it is simply never reached. One
+            // translator, one new arm -- never a second register call
+            // (src/bindings/CLAUDE.md).
+            PyErr_SetString(PyExc_RuntimeError, e.what());
         } catch (const std::bad_alloc& e) {
             // A GEMM whose pack buffers (MC*KC*NC, reachable via a pathological
             // _set_gemm_blocking) exceed memory throws bad_alloc out of the
