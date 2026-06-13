@@ -37,6 +37,78 @@ namespace {
 constexpr int64_t MR = 6;
 constexpr int64_t NR = 8;
 
+// The f32 register-tile shape, chosen by measurement at n=512 (CPU-03): 8x16
+// beat 6x16, so the f32 path runs microkernel_f32_8x16 with MR_F32=8, NR_F32=16.
+// Both shapes were built and benched single-threaded at n=512 on zpicy
+// (i7-10750H, Ultimate Performance, OMP_WAIT_POLICY=ACTIVE). A persistent
+// background antivirus held CV above the 5% protocol gate, so the spike-resistant
+// best-min floor over repeated cooldown-separated runs decides, not the raw
+// median (the same noise-handling 03-04 established for the f64 sweep). Measured
+// f32 n=512 best-min floor / top-3-mean floor, GF/s, two independent rounds:
+//   8x16 = 57.5 / 57.0 (round 2), 55.1 (round 1 best-min) -- winner
+//   6x16 = 53.2 / 52.9 (round 2), 53.6 (round 1 best-min) -- loser
+// The register-budget argument predicted the opposite (8x16 needs 16 ymm
+// accumulators, the whole file, so B is reloaded each k-step instead of held in
+// a register the way 6x16's 12-accumulator budget allows). Measurement overruled
+// it: 8x16's higher arithmetic density (16 FMAs per k-step) amortizes the B
+// reloads and wins by ~8% on this core's port layout, which is exactly why the
+// skill says decide f32 shape by measuring, not by counting registers. To
+// reproduce the loser, define FME_F32_SHAPE_6x16 and rebuild. The decision run is
+// in benchmarks/results/cpu03_f32_shape_zpicy.json. Re-measure on a quiet machine
+// before treating either number as protocol-grade absolute throughput.
+#if defined(FME_F32_SHAPE_6x16)
+constexpr int64_t MR_F32 = 6;
+#else
+constexpr int64_t MR_F32 = 8;
+#endif
+constexpr int64_t NR_F32 = 16;
+
+// f32 panel packers, local to this TU because pack.cpp's pack_a/pack_b are
+// compiled with the f64 MR=6/NR=8 layout and the f32 tile needs MR_F32/NR_F32.
+// Identical structure to pack.cpp (strided copy, zero-pad the edge rows/cols to
+// the tile extent so the k loop never branches), specialized to the f32 shape.
+// No intrinsics: a plain copy, kept here only so the f32 shape decision lives
+// entirely in this file and microkernel_avx2_f32.cpp.
+void pack_a_f32(float* ap, const float* a, int64_t ic, int64_t pc, int64_t mc, int64_t kc, int64_t k) {
+    const float* a_block = a + ic * k + pc;
+    int64_t dst = 0;
+    for (int64_t i0 = 0; i0 < mc; i0 += MR_F32) {
+        const int64_t rows = (mc - i0 < MR_F32) ? (mc - i0) : MR_F32;
+        for (int64_t p = 0; p < kc; ++p) {
+            for (int64_t r = 0; r < rows; ++r) {
+                ap[dst++] = a_block[(i0 + r) * k + p];
+            }
+            for (int64_t r = rows; r < MR_F32; ++r) {
+                ap[dst++] = 0.0f;
+            }
+        }
+    }
+}
+
+void pack_b_f32(float* bp, const float* b, int64_t pc, int64_t jc, int64_t kc, int64_t nc, int64_t n) {
+    const float* b_block = b + pc * n + jc;
+    int64_t dst = 0;
+    for (int64_t j0 = 0; j0 < nc; j0 += NR_F32) {
+        const int64_t cols = (nc - j0 < NR_F32) ? (nc - j0) : NR_F32;
+        for (int64_t p = 0; p < kc; ++p) {
+            for (int64_t c = 0; c < cols; ++c) {
+                bp[dst++] = b_block[p * n + (j0 + c)];
+            }
+            for (int64_t c = cols; c < NR_F32; ++c) {
+                bp[dst++] = 0.0f;
+            }
+        }
+    }
+}
+
+inline void microkernel_f32(const float* ap, const float* bp, float* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr) {
+#if defined(FME_F32_SHAPE_6x16)
+    microkernel_f32_6x16(ap, bp, c, kc, ldc, mr, nr);
+#else
+    microkernel_f32_8x16(ap, bp, c, kc, ldc, mr, nr);
+#endif
+}
+
 // Below this max dimension the pack buffers and (in 03-04) the thread spawn cost
 // more than they save, so a direct register-blocked pass with no heap and no
 // threading wins. 96 is a measurement-validated default (the small-path bench in
@@ -82,12 +154,57 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
         return;
     }
 
-    // The packed five-loop path is f64-only this plan; the f32 microkernel shape
-    // is chosen by measurement in 03-05. Until then any f32 input above the small
-    // threshold takes the same direct pass (correct, just unblocked) so the
-    // routed kernel is correct for every dtype and size today.
-    if constexpr (!std::is_same_v<T, double>) {
-        gemm_small<T>(a, b, c, m, k, n);
+    // Both dtypes now have a packed five-loop path: f64 runs the 6x8 microkernel,
+    // f32 runs the shape CPU-03 chose at n=512 (MR_F32 x 16). The two paths share
+    // the loop structure, the runtime blocking, and the OpenMP region; only the
+    // pack layout and the microkernel callee differ by dtype, dispatched here at
+    // compile time so neither path carries a runtime dtype branch in its hot loop.
+    if constexpr (std::is_same_v<T, float>) {
+        const blocking& blk = current_blocking();
+        const int64_t MC = blk.mc;
+        const int64_t KC = blk.kc;
+        const int64_t NC = blk.nc;
+
+        const int64_t ap_cap = ((MC + MR_F32 - 1) / MR_F32) * MR_F32 * KC;
+        const int64_t bp_cap = ((NC + NR_F32 - 1) / NR_F32) * NR_F32 * KC;
+        float* Bp = aligned_new<float>(bp_cap);
+
+        for (int64_t jc = 0; jc < n; jc += NC) {
+            const int64_t nc = std::min(NC, n - jc);
+            for (int64_t pc = 0; pc < k; pc += KC) {
+                const int64_t kc = std::min(KC, k - pc);
+                pack_b_f32(Bp, b, pc, jc, kc, nc, n);
+
+                const int64_t num_ic = (m + MC - 1) / MC;
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+                {
+                    float* Ap = aligned_new<float>(ap_cap);
+#if defined(_OPENMP)
+#pragma omp for schedule(dynamic)
+#endif
+                    for (int64_t icb = 0; icb < num_ic; ++icb) {
+                        const int64_t ic = icb * MC;
+                        const int64_t mc = std::min(MC, m - ic);
+                        pack_a_f32(Ap, a, ic, pc, mc, kc, k);
+                        for (int64_t jr = 0; jr < nc; jr += NR_F32) {
+                            const int64_t nr = std::min(NR_F32, nc - jr);
+                            const float* bpanel = Bp + (jr / NR_F32) * kc * NR_F32;
+                            for (int64_t ir = 0; ir < mc; ir += MR_F32) {
+                                const int64_t mr = std::min(MR_F32, mc - ir);
+                                const float* apanel = Ap + (ir / MR_F32) * MR_F32 * kc;
+                                float* ctile = c + (ic + ir) * n + (jc + jr);
+                                microkernel_f32(apanel, bpanel, ctile, kc, n, mr, nr);
+                            }
+                        }
+                    }
+                    aligned_delete(Ap);
+                }
+            }
+        }
+
+        aligned_delete(Bp);
         return;
     } else {
         const blocking& blk = current_blocking();
