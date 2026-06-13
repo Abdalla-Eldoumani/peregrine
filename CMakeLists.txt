@@ -20,19 +20,38 @@ nanobind_add_module(_core STABLE_ABI NB_STATIC
   src/bindings/module.cpp
   src/cpu/feature_detect.cpp
   src/cpu/gemm_naive.cpp
+  src/cpu/pack.cpp
+  src/cpu/microkernel_avx2_f64.cpp
+  src/cpu/microkernel_avx2_f32.cpp
+  src/cpu/gemm_blis.cpp
   src/dispatch/dispatch.cpp
 )
 target_include_directories(_core PRIVATE src)
 target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
 
+# AVX2 codegen is confined to exactly these four kernel translation units. The
+# arch flag is deliberately absent at target level: AVX2 instructions in a TU
+# that the no-AVX2 fallback path links produce a module that executes an illegal
+# instruction at import on a CPU without AVX2 (the legacy import crash). The
+# feature_detect, gemm_naive, dispatch, and module TUs must stay free of AVX2
+# codegen so the fallback path runs everywhere.
+set(FME_AVX2_SOURCES
+  src/cpu/pack.cpp
+  src/cpu/microkernel_avx2_f64.cpp
+  src/cpu/microkernel_avx2_f32.cpp
+  src/cpu/gemm_blis.cpp
+)
+
 if (MSVC)
   # /openmp:llvm because the legacy /openmp runtime is OpenMP 2.0 and rejects
   # modern pragmas. No /fp:fast: it changes NaN and Inf semantics and the
   # library promises NumPy-matching results.
-  target_compile_options(_core PRIVATE /O2 /arch:AVX2 /openmp:llvm /permissive- /W4)
+  target_compile_options(_core PRIVATE /O2 /openmp:llvm /permissive- /W4)
+  set_source_files_properties(${FME_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
   # No -ffast-math for the same reason.
-  target_compile_options(_core PRIVATE -O3 -mavx2 -mfma -Wall -Wextra)
+  target_compile_options(_core PRIVATE -O3 -Wall -Wextra)
+  set_source_files_properties(${FME_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
 endif()
 
 if (FME_ENABLE_CUDA)
