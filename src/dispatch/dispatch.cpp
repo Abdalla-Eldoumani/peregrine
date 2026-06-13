@@ -2,6 +2,8 @@
 #include "cpu/feature_detect.hpp"
 #include "cpu/gemm_blis.hpp"
 #include "cpu/gemm_naive.hpp"
+#include "cpu/reduce.hpp"
+#include "cpu/transpose.hpp"
 
 namespace fme::dispatch {
 
@@ -23,5 +25,32 @@ void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 
 template void matmul<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 template void matmul<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
+
+// transpose and the two sum entries have one CPU implementation each, valid on
+// every CPU, so they forward directly. No avx2/naive branch: unlike matmul
+// there is no packed variant to choose, and the kernels are plain TUs the
+// fallback path links unconditionally. The decision stays pure: no features
+// are read, no state mutated, the call simply crosses the TU boundary.
+template <typename T>
+void transpose(const T* a, T* out, int64_t m, int64_t n) {
+    cpu::transpose<T>(a, out, m, n);
+}
+
+template <typename T>
+T sum_all(const T* a, int64_t m, int64_t n) {
+    return cpu::sum_all<T>(a, m, n);
+}
+
+template <typename T>
+void sum_axis(const T* a, T* out, int64_t m, int64_t n, int axis) {
+    cpu::sum_axis<T>(a, out, m, n, axis);
+}
+
+template void transpose<float>(const float*, float*, int64_t, int64_t);
+template void transpose<double>(const double*, double*, int64_t, int64_t);
+template float sum_all<float>(const float*, int64_t, int64_t);
+template double sum_all<double>(const double*, int64_t, int64_t);
+template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
+template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
 
 } // namespace fme::dispatch
