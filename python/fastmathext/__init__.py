@@ -35,7 +35,10 @@ if os.name == "nt":
 
 from . import policy
 from ._core import _has_cuda_build, cpu_features
+from ._core import axpby as _axpby_native
+from ._core import fma3 as _fma3_native
 from ._core import matmul as _matmul_native
+from ._core import scaled_relu as _scaled_relu_native
 from ._core import sum_all as _sum_all_native
 from ._core import sum_axis as _sum_axis_native
 from ._core import transpose as _transpose_native
@@ -83,6 +86,9 @@ __all__ = [
     "transpose",
     "sum",
     "mean",
+    "axpby",
+    "fma3",
+    "scaled_relu",
     "calibrate",
     "set_backend",
     "to_device",
@@ -145,6 +151,50 @@ def _resolve_dtype(arr: np.ndarray, op: str) -> np.dtype:
     return common
 
 
+def _resolve_dtype_multi(arrs, op: str) -> np.dtype:
+    # The N-operand form of _resolve_dtype, the one dtype policy generalized
+    # across the fused operands: reject the laundering set PER OPERAND first (so
+    # promotion can never launder a float16/bool up into an accepted dtype),
+    # naming the offending dtype, then np.result_type across every operand, then
+    # the same integer-only float64 fallback. fma3 promotes across all three
+    # arrays; axpby across two; scaled_relu across one. Reuses the exact reject
+    # set and fallback so all ops -- matmul, transpose, sum, mean, and the fused
+    # family -- share one reject table and one promotion table.
+    for arr in arrs:
+        if arr.dtype in _REJECT:
+            raise TypeError(
+                f"{op}: unsupported dtype {arr.dtype.name}, "
+                "expected float32 or float64 (ints promote)"
+            )
+    common = np.result_type(*(arr.dtype for arr in arrs))
+    if common not in (np.dtype(np.float32), np.dtype(np.float64)):
+        # integer-only fallback, identical to _resolve_dtype / matmul: coercing an
+        # extended float or complex result (longdouble, clongdouble where the
+        # platform keeps them distinct) to float64 would silently drop precision
+        # or imaginary parts, the exact laundering _REJECT exists to stop.
+        if not np.issubdtype(common, np.integer):
+            raise TypeError(
+                f"{op}: unsupported dtype {common.name}, "
+                "expected float32 or float64 (ints promote)"
+            )
+        common = np.dtype(np.float64)
+    return common
+
+
+def _check_same_shape(arrs, op: str) -> None:
+    # v1 fused is same-shape, NO broadcast: a shape mismatch is a ValueError, not
+    # a silent NumPy broadcast. This is the genuinely new validation with no
+    # matmul analog (matmul checks inner-dimension conformability; fused checks
+    # exact-shape equality across every operand). Raise on the first mismatch,
+    # naming both shapes, in the design-doc error-model shape.
+    s0 = arrs[0].shape
+    for arr in arrs[1:]:
+        if arr.shape != s0:
+            raise ValueError(
+                f"{op}: operands must have the same shape, got {s0} and {arr.shape}"
+            )
+
+
 def _check_axis(axis, op: str) -> None:
     # axis is keyword-only and accepts only None, 0, or 1: this is a 2-D library
     # and a positional or out-of-range axis is the accidental argument the
@@ -164,6 +214,18 @@ _MIXED_RESIDENCY_MSG = (
     "matmul: one input is on cuda and one on cpu, "
     "call to_device or from_device first"
 )
+
+
+def _mixed_residency_msg(op: str) -> str:
+    # The fused per-op mixed-residency token. The matmul literal above is
+    # matmul-prefixed and is its own contract string; the fused ops carry the
+    # SAME wording but named for the op, never the matmul-prefixed literal, so a
+    # caller mixing a host and a device operand to axpby/fma3/scaled_relu sees the
+    # op they called. From the design-doc error model (same shape as matmul's).
+    return (
+        f"{op}: inputs must all be on the same device, "
+        "call to_device or from_device first"
+    )
 
 # Set once per process the first time an auto-mode CUDA failure falls back to the
 # CPU, so the warn-once contract holds: a long-running session that hits a
@@ -847,3 +909,195 @@ def mean(a, *, axis=None):
     # True division, never reciprocal multiply: x / count and x * (1 / count)
     # round differently, and NumPy composes mean with a division.
     return total / count
+
+
+def _fused_residency(operands, op: str) -> str:
+    # Decide the residency of a fused call from its raw operands, BEFORE any host
+    # normalization (the isinstance check must see the original objects). The
+    # return-type-follows-residency rule (DESIGN_SYSTEM.md), extended from
+    # matmul's two-operand check to N operands: every operand on the device routes
+    # the device path (returns an fme.Array); every operand on the host routes the
+    # host CPU path (returns an ndarray); ANY mix is a TypeError, never a silent
+    # host<->device transfer. On a CPU-only build fme.Array is a sentinel nothing
+    # is an instance of, so this is always "host" and the device branch is dead.
+    dev = [isinstance(x, Array) for x in operands]
+    if all(dev):
+        return "device"
+    if any(dev):
+        raise TypeError(_mixed_residency_msg(op))
+    return "host"
+
+
+def axpby(x, y, *, a=1.0, b=1.0):
+    """Elementwise ``a*x + b*y`` for two same-shape 2-D arrays.
+
+    Computes the unfused expression ``a*x + b*y`` within the elementwise
+    tolerance for float32 and float64, including exact NaN/Inf propagation
+    (matching the NumPy expression positionally).
+
+    The scalars ``a`` and ``b`` are keyword-only. The two arrays must have the
+    same shape: v1 does not broadcast, so a shape mismatch raises ValueError.
+    The return type follows operand residency (host arrays give a host ndarray);
+    the device-resident path lands in a later plan.
+
+    Parameters
+    ----------
+    x, y : array_like or fme.Array
+        Operands; must be 2-D and the same shape, and on the same side (both
+        host or both device).
+    a, b : float, optional
+        Scalar coefficients, keyword-only. Default 1.0 each.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``a*x + b*y`` elementwise. The result dtype is np.result_type across the
+        operands when that lands on float32 or float64; integer operands promote
+        to float64 (this is a float library).
+
+    Raises
+    ------
+    ValueError
+        If an operand is not 2-D, or the operands differ in shape.
+    TypeError
+        If an operand dtype is bool, float16, complex64, complex128, or object,
+        if promotion lands on anything other than float32/float64/integer, or if
+        the operands are split across host and device.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import fastmathext as fme
+    >>> x = np.array([[1.0, 2.0], [3.0, 4.0]])
+    >>> y = np.array([[10.0, 20.0], [30.0, 40.0]])
+    >>> fme.axpby(x, y, a=2.0, b=-1.0)
+    array([[ -8., -16.],
+           [-24., -32.]])
+    """
+    if _fused_residency((x, y), "axpby") == "device":
+        # 06-04 wires the device-resident fused path (all operands fme.Array ->
+        # device kernel -> fme.Array out). Until then this is a guarded stub, not
+        # a silent CPU compute: the residency dispatch above already routed here,
+        # so 06-04 replaces this raise with the device binding call and nothing
+        # else moves.
+        raise NotImplementedError(
+            "axpby: device-resident fused ops are not implemented yet"
+        )
+    xa = _prepare(x, "x", "axpby")
+    ya = _prepare(y, "y", "axpby")
+    common = _resolve_dtype_multi((xa, ya), "axpby")
+    _check_same_shape((xa, ya), "axpby")
+    # Host fused ALWAYS computes on the CPU: v1 has no host->GPU auto-staging
+    # (no _matmul_gpu_staged analog, no policy/choose_backend call). float(a) /
+    # float(b) cast the scalars at the boundary, mirroring sum's int(axis).
+    return _axpby_native(
+        _normalize(xa, common), _normalize(ya, common), float(a), float(b)
+    )
+
+
+def fma3(x, y, z):
+    """Elementwise fused multiply-add ``x*y + z`` for three same-shape arrays.
+
+    Computes ``x*y + z`` in a single rounding (a true fused multiply-add), so it
+    can be closer to the real-number result than the two-rounding unfused NumPy
+    ``x*y + z``; both stay within the elementwise tolerance. NaN/Inf match the
+    NumPy expression positionally, including ``inf*0 + z`` giving NaN.
+
+    The three arrays must have the same shape: v1 does not broadcast, so a shape
+    mismatch raises ValueError. The return type follows operand residency.
+
+    Parameters
+    ----------
+    x, y, z : array_like or fme.Array
+        Operands; must be 2-D and the same shape, and on the same side (all host
+        or all device).
+
+    Returns
+    -------
+    numpy.ndarray
+        ``x*y + z`` elementwise. The result dtype is np.result_type across all
+        three operands when that lands on float32 or float64; integer operands
+        promote to float64.
+
+    Raises
+    ------
+    ValueError
+        If an operand is not 2-D, or the operands differ in shape.
+    TypeError
+        If an operand dtype is bool, float16, complex64, complex128, or object,
+        if promotion lands on anything other than float32/float64/integer, or if
+        the operands are split across host and device.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import fastmathext as fme
+    >>> x = np.array([[1.0, 2.0], [3.0, 4.0]])
+    >>> y = np.array([[5.0, 6.0], [7.0, 8.0]])
+    >>> z = np.array([[1.0, 1.0], [1.0, 1.0]])
+    >>> fme.fma3(x, y, z)
+    array([[ 6., 13.],
+           [22., 33.]])
+    """
+    if _fused_residency((x, y, z), "fma3") == "device":
+        raise NotImplementedError(
+            "fma3: device-resident fused ops are not implemented yet"
+        )
+    xa = _prepare(x, "x", "fma3")
+    ya = _prepare(y, "y", "fma3")
+    za = _prepare(z, "z", "fma3")
+    common = _resolve_dtype_multi((xa, ya, za), "fma3")
+    _check_same_shape((xa, ya, za), "fma3")
+    return _fma3_native(
+        _normalize(xa, common), _normalize(ya, common), _normalize(za, common)
+    )
+
+
+def scaled_relu(x, *, scale=1.0):
+    """Elementwise ``maximum(scale*x, 0)`` for a 2-D array.
+
+    Computes ``np.maximum(scale*x, 0)`` within the elementwise tolerance for
+    float32 and float64. A NaN input PROPAGATES as NaN exactly like np.maximum
+    (it does not collapse to 0); signed Inf matches positionally.
+
+    The scalar ``scale`` is keyword-only. The return type follows operand
+    residency (a host array gives a host ndarray).
+
+    Parameters
+    ----------
+    x : array_like or fme.Array
+        Input; must be 2-D.
+    scale : float, optional
+        Scalar multiplier applied before the rectifier, keyword-only. Default
+        1.0.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``maximum(scale*x, 0)`` elementwise. The result dtype is the input dtype
+        after promotion (integers promote to float64).
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not 2-D.
+    TypeError
+        If the dtype is bool, float16, complex64, complex128, object, or any
+        promoted dtype other than float32 or float64.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import fastmathext as fme
+    >>> x = np.array([[-1.0, 2.0], [3.0, -4.0]])
+    >>> fme.scaled_relu(x, scale=3.0)
+    array([[0., 6.],
+           [9., 0.]])
+    """
+    if _fused_residency((x,), "scaled_relu") == "device":
+        raise NotImplementedError(
+            "scaled_relu: device-resident fused ops are not implemented yet"
+        )
+    xa = _prepare(x, "x", "scaled_relu")
+    common = _resolve_dtype_multi((xa,), "scaled_relu")
+    return _scaled_relu_native(_normalize(xa, common), float(scale))
