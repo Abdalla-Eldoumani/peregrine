@@ -975,14 +975,14 @@ def axpby(x, y, *, a=1.0, b=1.0):
            [-24., -32.]])
     """
     if _fused_residency((x, y), "axpby") == "device":
-        # 06-04 wires the device-resident fused path (all operands fme.Array ->
-        # device kernel -> fme.Array out). Until then this is a guarded stub, not
-        # a silent CPU compute: the residency dispatch above already routed here,
-        # so 06-04 replaces this raise with the device binding call and nothing
-        # else moves.
-        raise NotImplementedError(
-            "axpby: device-resident fused ops are not implemented yet"
-        )
+        # Device-resident path (06-04): both operands are fme.Array, so the native
+        # axpby Array overload runs the grid-stride kernel device-in/device-out and
+        # returns an fme.Array. nanobind dispatches on the operand type (Array vs
+        # ndarray), so the same _axpby_native binds the device overload here and the
+        # host overload below. Scalars cross as Python floats; no host->GPU staging
+        # (v1 is device-resident only). dtype/shape validation lives in the binding
+        # (a mismatch raises ValueError via the shape_error translator).
+        return _axpby_native(x, y, float(a), float(b))
     xa = _prepare(x, "x", "axpby")
     ya = _prepare(y, "y", "axpby")
     common = _resolve_dtype_multi((xa, ya), "axpby")
@@ -1040,9 +1040,10 @@ def fma3(x, y, z):
            [22., 33.]])
     """
     if _fused_residency((x, y, z), "fma3") == "device":
-        raise NotImplementedError(
-            "fma3: device-resident fused ops are not implemented yet"
-        )
+        # Device-resident path (06-04): all three operands are fme.Array, so the
+        # native fma3 Array overload runs the device kernel and returns an
+        # fme.Array (same nanobind type-dispatch as axpby). No host->GPU staging.
+        return _fma3_native(x, y, z)
     xa = _prepare(x, "x", "fma3")
     ya = _prepare(y, "y", "fma3")
     za = _prepare(z, "z", "fma3")
@@ -1095,9 +1096,10 @@ def scaled_relu(x, *, scale=1.0):
            [9., 0.]])
     """
     if _fused_residency((x,), "scaled_relu") == "device":
-        raise NotImplementedError(
-            "scaled_relu: device-resident fused ops are not implemented yet"
-        )
+        # Device-resident path (06-04): the operand is an fme.Array, so the native
+        # scaled_relu Array overload runs the device kernel (NaN-propagating, like
+        # the CPU path) and returns an fme.Array. No host->GPU staging.
+        return _scaled_relu_native(x, float(scale))
     xa = _prepare(x, "x", "scaled_relu")
     common = _resolve_dtype_multi((xa,), "scaled_relu")
     return _scaled_relu_native(_normalize(xa, common), float(scale))
