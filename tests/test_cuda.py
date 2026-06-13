@@ -327,6 +327,32 @@ def test_device_matmul_roundtrip():
 
 
 @gpu
+@pytest.mark.parametrize("n", [250, 512])
+def test_device_matmul_transfer_ordering(n):
+    # GPU-07 regression fence for the cross-stream use-before-ready race: to_device
+    # allocates + copies operands on the TRANSFER stream while cuBLAS runs the GEMM
+    # on the COMPUTE stream, and the matmul output buffer is allocated on transfer
+    # too. With no ordering between the streams cuBLAS read operands and wrote the
+    # output before the transfer-stream alloc/copy completed -- correct untimed
+    # (the copy usually won the race) but flagged by compute-sanitizer
+    # --track-stream-ordered-races all as use-before-alloc, returning garbage under
+    # instrumentation. The fix fences the transfer stream before the GEMM and the
+    # compute stream after it. This test runs the exact to_device -> device matmul
+    # -> from_device path at a non-trivial size and asserts the result matches
+    # NumPy through the single toleranced path; the hard proof is the sanitizer
+    # gate (it FAILS under --track-stream-ordered-races all without the fences),
+    # but a value check here keeps the path exercised in the normal suite too.
+    rng = np.random.default_rng(20260617 + n)
+    k = n + 3  # rectangular so a wrong leading dimension would surface as a value error
+    a = rng.standard_normal((n, k)).astype(np.float32)
+    b = rng.standard_normal((k, n)).astype(np.float32)
+
+    xc = fme._core.matmul(fme._core.to_device(a), fme._core.to_device(b))
+    assert xc.shape == (n, n)
+    assert_matmul_close(fme._core.from_device(xc), a @ b, a, b)
+
+
+@gpu
 def test_mixed_residency_raises():
     # GPU-06 residency: exactly one device-resident operand is the verbatim
     # mixed-residency TypeError (DESIGN_SYSTEM.md), never a silent host<->device
@@ -398,6 +424,22 @@ def test_f64_never_auto_routes():
 # bare interpreter does not load conftest's toolkit-bin registration -- though
 # 04-05 also gives the package its own import-time discovery, the shim stays
 # belt-and-suspenders for a child that imports before any package code runs.
+#
+# The OOM is forced by RESERVING most of free VRAM in a device-resident array
+# first, leaving a small fixed GAP, so the matmul output need only exceed that gap
+# to OOM -- NOT the whole multi-GB free pool. This keeps the test bounded in TIME.
+# The output is a SQUARE (N, N), rank-1 (K=1): a square output keeps BOTH the row
+# AND column counts at ~N (N ~ 8192 for a 256MB f32 output), so the CPU fallback
+# is a normal cache-friendly outer product (~0.3s measured). A skinny (8, huge-n)
+# output of the same BYTE size is pathological in the BLIS kernel -- millions of
+# n-columns with M=8, K=1 packs and loops per column and ran for MINUTES, blowing
+# past the subprocess timeout once free VRAM was large enough to size n into the
+# tens of millions. Same byte size, same OOM trigger, vastly different CPU cost;
+# the square shape is the one that stays bounded. The OOM path under test is
+# identical -- alloc_device's cudaMemGetInfo pre-flight throws
+# cudaErrorMemoryAllocation on the OUTPUT alloc because the reserve leaves less
+# than request+margin free; the auto-mode fallback then computes the FULL host
+# result (square, fast) before the corner check slices it.
 _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     "import subprocess, sys, warnings\n"
     "import numpy as np\n"
@@ -406,17 +448,33 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     "out = subprocess.run(['nvidia-smi','--query-gpu=memory.free',"
     "'--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=15)\n"
     "free_mib = int(out.stdout.strip().splitlines()[0])\n"
-    # Output bytes sized to free + 128MB: safely past alloc_device's 64MB
-    # pre-flight margin so the request reliably exceeds current free and throws
-    # cudaErrorMemoryAllocation, without over-committing far beyond free.
-    "req_bytes = (free_mib + 128) * 1024 * 1024\n"
-    "m = 8\n"
-    "n = int(req_bytes // (m * 4))\n"  # f32 output, (m, n)
-    # Rank-1 inputs: tiny (m + n floats), so to_device succeeds and only the
-    # output (m, n) allocation OOMs. Seeded so the parent need not see the data.
+    # Reserve free VRAM down to a fixed GAP with one device-resident array, so the
+    # matmul output OOMs at a SIZE WE CONTROL regardless of how much VRAM is free.
+    # The gap (768MB) comfortably holds the tiny rank-1 inputs (~32KB each) and
+    # absorbs cudaMallocAsync pool rounding and display-compositor fluctuation; the
+    # square output request below (1GB) sits far past the 64MB pre-flight margin so
+    # the OUTPUT alloc reliably OOMs even if the residual free after the reserve is
+    # somewhat below the nominal gap. The reserve is a square f32 array sized
+    # free-gap; np.empty (not RNG) keeps the host cost to the allocation itself and
+    # one H2D at PCIe rate is sub-second. Kept alive in `reserve` until after the
+    # matmul so the device memory stays occupied.
+    "gap_mib = 768\n"
+    "reserve_bytes = max(0, (free_mib - gap_mib)) * 1024 * 1024\n"
+    "rside = int((reserve_bytes // 4) ** 0.5)\n"
+    "reserve = fme.to_device(np.empty((rside, rside), dtype=np.float32))\n"
+    # SQUARE output (N, N) sized to gap+256MB = ~1GB: far past the 64MB pre-flight
+    # margin given the reserve, so the OUTPUT alloc reliably throws
+    # cudaErrorMemoryAllocation, while N ~ 16384 keeps the CPU fallback a fast
+    # cache-friendly outer product (seconds) rather than a skinny millions-of-
+    # columns one (minutes, timeout-prone).
+    "out_bytes = (gap_mib + 256) * 1024 * 1024\n"
+    "N = int((out_bytes // 4) ** 0.5)\n"  # f32 square output (N, N)
+    # Rank-1 inputs: (N, 1) and (1, N), tiny (N floats each), so to_device succeeds
+    # and only the (N, N) output allocation OOMs. Seeded so the parent need not see
+    # the data.
     "rng = np.random.default_rng(909)\n"
-    "a = rng.standard_normal((m, 1)).astype(np.float32)\n"
-    "b = rng.standard_normal((1, n)).astype(np.float32)\n"
+    "a = rng.standard_normal((N, 1)).astype(np.float32)\n"
+    "b = rng.standard_normal((1, N)).astype(np.float32)\n"
     "xa = fme.to_device(a)\n"
     "xb = fme.to_device(b)\n"
     "with warnings.catch_warnings(record=True) as caught:\n"
