@@ -23,10 +23,11 @@ import os
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 
 import fastmathext as fme
-from conftest import requires_cuda
+from conftest import assert_matmul_close, requires_cuda
 
 _CUDA_OK, _CUDA_REASON = requires_cuda()
 # Reused by every device-touching test below. The build-flag smoke test is
@@ -112,16 +113,132 @@ def test_context_clean_shutdown():
         assert bad not in p.stderr, p.stderr
 
 
-@gpu
-def test_gemm_device_placeholder():
-    # GPU-02: f32/f64 device GEMM matches CPU via assert_matmul_close. 04-03.
-    assert fme.has_cuda_build() is True
+# Legacy-killer sizes (1, 7, 333 are not multiples of 4, where the archived
+# kernel corrupted) plus round powers, all far inside the TDR budget (n=512 f32
+# is microseconds; the watchdog is ~2s). The device GEMM must match NumPy at
+# every one, square and rectangular.
+_GEMM_SIZES = [1, 7, 64, 250, 333, 512]
 
 
 @gpu
-def test_tolerance_placeholder():
-    # GPU-02: TF32 off by default; result inside the f32 tolerance contract. 04-03.
-    assert fme.has_cuda_build() is True
+@pytest.mark.parametrize("n", _GEMM_SIZES)
+def test_gemm_f32_matches_numpy(n):
+    # GPU-02: f32 device GEMM via cublasSgemm and the no-transpose trick matches
+    # NumPy. assert_matmul_close compares f32 against the f64 ground truth it
+    # recomputes from a, b, exactly like the CPU suite -- the single toleranced
+    # path, no inline rtol. Rectangular k so a wrong leading dimension in the
+    # operand-swap would surface as a shape or value error, not hide behind n==k.
+    rng = np.random.default_rng(20260613 + n)
+    k = n + 5
+    a = rng.standard_normal((n, k)).astype(np.float32)
+    b = rng.standard_normal((k, n)).astype(np.float32)
+    got = fme._core._gemm_host(a, b)
+    assert got.dtype == np.float32
+    assert_matmul_close(got, a @ b, a, b)
+
+
+@gpu
+@pytest.mark.parametrize("n", _GEMM_SIZES)
+def test_gemm_f64_matches_numpy(n):
+    # GPU-02: f64 device GEMM via cublasDgemm, identical no-transpose layout. f64
+    # is computed on the device for the forced-resident path even though it never
+    # auto-routes here (the FP64 trap is a dispatch rule, 04-05); the kernel must
+    # still be correct. Through the f64 arm of the same tolerance contract.
+    rng = np.random.default_rng(40260613 + n)
+    k = n + 5
+    a = rng.standard_normal((n, k))
+    b = rng.standard_normal((k, n))
+    got = fme._core._gemm_host(a, b)
+    assert got.dtype == np.float64
+    assert_matmul_close(got, a @ b, a, b)
+
+
+@gpu
+def test_gemm_zero_dims():
+    # GPU-02 / DESIGN_SYSTEM zero-sized dim semantics: the guards run before any
+    # cuBLAS launch (an empty GEMM must not reach cuBLAS). (m,0)@(0,n) is an m x n
+    # matrix of exact zeros; (0,k)@(k,n) is an empty (0,n). Exact equality, not
+    # toleranced: a k=0 product is exactly zero and an empty result has no
+    # elements. Both dtypes, since the guards are dtype-generic.
+    for dtype in (np.float32, np.float64):
+        a = np.zeros((4, 0), dtype=dtype)
+        b = np.zeros((0, 3), dtype=dtype)
+        got = fme._core._gemm_host(a, b)
+        assert got.shape == (4, 3)
+        assert got.dtype == dtype
+        np.testing.assert_array_equal(got, np.zeros((4, 3), dtype=dtype))
+
+        a0 = np.zeros((0, 5), dtype=dtype)
+        b0 = (np.arange(15, dtype=dtype)).reshape(5, 3)
+        got0 = fme._core._gemm_host(a0, b0)
+        assert got0.shape == (0, 3)
+        assert got0.dtype == dtype
+
+
+# TF32 is opt-in (FME_ALLOW_TF32=1) and read ONCE at context init, so it must be
+# set in the environment before import -- the subprocess + full-env-copy idiom
+# from test_fallback/test_threads. The child reproduces the same seeded inputs,
+# runs the f32 device GEMM under TF32, and writes both its result and the f64
+# ground truth so the parent can measure the TF32 error against the DEFAULT_MATH
+# error. The child DLL shim is required because a bare interpreter does not load
+# conftest (which registers the toolkit bin for the cublas DLL).
+_TF32_SCRIPT = _CHILD_DLL_SETUP + (
+    "import sys\n"
+    "import numpy as np\n"
+    "import fastmathext as fme\n"
+    "rng = np.random.default_rng(515)\n"
+    "k = 517\n"
+    "a = rng.standard_normal((512, k)).astype(np.float32)\n"
+    "b = rng.standard_normal((k, 512)).astype(np.float32)\n"
+    "got = fme._core._gemm_host(a, b)\n"
+    "np.save(sys.argv[1], got)\n"
+)
+
+
+@gpu
+def test_tf32_off_by_default_matches_contract(tmp_path):
+    # GPU-02 math-mode policy. Two halves:
+    #   1. The default path (no FME_ALLOW_TF32) is DEFAULT_MATH and passes the
+    #      standard f32 tolerance contract.
+    #   2. A subprocess with FME_ALLOW_TF32=1 takes the TF32 path. TF32's 10-bit
+    #      mantissa is ~830x looser (measured), so its raw abs error against the
+    #      f64 truth must MATERIALLY exceed the DEFAULT_MATH error. That proves
+    #      TF32 is actually engaged and is why it is off by default. The TF32
+    #      result is deliberately NOT run through assert_matmul_close: TF32 is
+    #      opt-in and excluded from the standard contract and from headline
+    #      numbers (DESIGN_SYSTEM numeric policy).
+    rng = np.random.default_rng(515)
+    k = 517
+    a = rng.standard_normal((512, k)).astype(np.float32)
+    b = rng.standard_normal((k, 512)).astype(np.float32)
+
+    # Half 1: the in-process default build is DEFAULT_MATH; passes the contract.
+    got_default = fme._core._gemm_host(a, b)
+    assert_matmul_close(got_default, a @ b, a, b)
+
+    # Half 2: the TF32 child reruns the identical seeded GEMM with the flag set.
+    out_path = tmp_path / "got_tf32.npy"
+    env = dict(os.environ, FME_ALLOW_TF32="1")
+    p = subprocess.run(
+        [sys.executable, "-c", _TF32_SCRIPT, str(out_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert p.returncode == 0, p.stderr
+    got_tf32 = np.load(out_path)
+
+    truth = a.astype(np.float64) @ b.astype(np.float64)
+    err_default = float(np.abs(got_default.astype(np.float64) - truth).max())
+    err_tf32 = float(np.abs(got_tf32.astype(np.float64) - truth).max())
+    # Materially looser: an order of magnitude is a conservative floor against
+    # the measured ~830x, enough to prove the mode actually changed without
+    # pinning the exact ratio (which drifts with clocks and data).
+    assert err_tf32 > 10.0 * err_default, (
+        f"tf32 error {err_tf32:.3e} not materially looser than default "
+        f"{err_default:.3e}; the FME_ALLOW_TF32 path may not be engaged"
+    )
 
 
 @gpu
