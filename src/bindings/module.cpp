@@ -223,14 +223,16 @@ struct Array {
         // free_device tolerates nullptr; a default/empty buffer is a no-op. This
         // is the ONLY place a device buffer owned by an Array is freed.
         if (buf.ptr != nullptr) {
-            // No CHECK in a destructor: a throw escaping ~Array during Python GC
-            // would terminate the interpreter, the same hazard the context
-            // teardown avoids. free_device itself CHECK-throws on a live error,
-            // but cudaFreeAsync of a pool pointer at GC time does not fail in
-            // practice; guard the contract by swallowing here is unnecessary
-            // because free_device runs on a live (non-teardown) path. Keep it a
-            // plain call: GC of an Array is a live operation, not interpreter
-            // shutdown.
+            // ~Array runs during Python GC, INCLUDING interpreter finalization
+            // after the atexit teardown destroyed the context streams. An Array
+            // held in a module global (or an inline temporary the GC keeps alive
+            // past module finalization) reaches here on a dead transfer stream.
+            // free_device is teardown-tolerant for exactly that case (CR-01): it
+            // skips the free once teardown has run and otherwise inspects the
+            // return code by hand, never throwing. So this stays a plain call --
+            // a throw escaping a destructor during GC would terminate the
+            // interpreter, and the no-throw guarantee now lives in free_device,
+            // not in an assumption that GC-time frees never fail.
             fme::cuda::free_device(buf.ptr);
             buf.ptr = nullptr;
         }
