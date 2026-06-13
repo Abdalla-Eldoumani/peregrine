@@ -1,6 +1,9 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 
+#include <atomic>
+#include <new>
+
 #include "core/common.hpp"
 #include "cpu/feature_detect.hpp"
 #include "cpu/gemm_blis.hpp"
@@ -136,15 +139,15 @@ NB_MODULE(_core, m) {
     // Underscore-private: these are a measurement tool, not part of the public API,
     // and changing blocking shifts results bitwise within tolerance (KC repartitions
     // each element's k accumulation), so they must never be reached on a result path.
+    // The triple is published in one atomic store (store_blocking) rather than
+    // field-by-field: a kernel reads blocking after dropping the GIL, so a torn
+    // write would let it size a buffer for one MC and loop for another.
     m.def("_set_gemm_blocking", [](int64_t mc, int64_t kc, int64_t nc) {
-        fme::cpu::blocking& b = fme::cpu::current_blocking();
-        b.mc = mc;
-        b.kc = kc;
-        b.nc = nc;
+        fme::cpu::store_blocking(fme::cpu::blocking{mc, kc, nc});
     });
 
     m.def("_get_gemm_blocking", [] {
-        const fme::cpu::blocking& b = fme::cpu::current_blocking();
+        const fme::cpu::blocking b = fme::cpu::load_blocking();
         nb::dict d;
         d["mc"] = b.mc;
         d["kc"] = b.kc;
@@ -165,6 +168,13 @@ NB_MODULE(_core, m) {
             std::rethrow_exception(p);
         } catch (const fme::shape_error& e) {
             PyErr_SetString(PyExc_ValueError, e.what());
+        } catch (const std::bad_alloc& e) {
+            // A GEMM whose pack buffers (MC*KC*NC, reachable via a pathological
+            // _set_gemm_blocking) exceed memory throws bad_alloc out of the
+            // kernel; surface it as MemoryError instead of nanobind's default
+            // terminate path. The kernel now keeps the throwing allocation off
+            // the OpenMP unwinding path so this catch is actually reached.
+            PyErr_SetString(PyExc_MemoryError, e.what());
         }
     });
 }
