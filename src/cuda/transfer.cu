@@ -136,11 +136,24 @@ void copy_d2h(void* dst_host, const void* src_dev, int64_t bytes) {
 void sync_transfer() {
     // Block until every queued copy on the transfer stream has finished. This is
     // the API-boundary fence: from_device calls it after copy_d2h so the host
-    // buffer is fully written before the ndarray is handed to Python. CHECK-
-    // wrapped (a sync can surface an asynchronous launch/copy error) and never
-    // used at teardown.
+    // buffer is fully written before the ndarray is handed to Python, and
+    // to_device calls it after copy_h2d so the operand is fully resident before
+    // the unordered compute stream's GEMM reads it (the cross-stream
+    // use-before-ready race this fence closes). CHECK-wrapped (a sync can surface
+    // an asynchronous launch/copy error) and never used at teardown.
     Context& ctx = context();
     FME_CUDA_CHECK(cudaStreamSynchronize(ctx.transfer));
+}
+
+void sync_compute() {
+    // Block until every launch on the compute stream (the cuBLAS GEMM) has
+    // finished. The device-resident matmul entry calls it after the GEMM so the
+    // output buffer is fully written before the result Array can be from_device'd
+    // back to host -- the compute-side twin of sync_transfer's D2H fence, the
+    // same "async wins inside a call, never across the API boundary" rule applied
+    // to the compute stream. CHECK-wrapped and never used at teardown.
+    Context& ctx = context();
+    FME_CUDA_CHECK(cudaStreamSynchronize(ctx.compute));
 }
 
 void* pinned_acquire(int64_t bytes) {
