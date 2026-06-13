@@ -172,6 +172,91 @@ nb::ndarray<nb::numpy, T, nb::ndim<1>> sum_axis_typed(
     return nb::ndarray<nb::numpy, T, nb::ndim<1>>(out, 1, shape, owner);
 }
 
+// Fused elementwise: capsule-owned output after the overflow guard, GIL dropped
+// around the kernel. The wrapper sends only validated, same-shape, same-dtype,
+// C-contiguous host operands here, so each binding trusts shape and validates
+// only contiguity/dtype via the nanobind view type (as sum_axis_typed trusts the
+// validated axis). checked_bytes runs before every new T[]: an int64 m*n*sizeof(T)
+// product that overflows would otherwise size a truncated buffer the full-extent
+// kernel write then overruns (a heap overflow, WR-02) -- it throws shape_error
+// (-> ValueError) on overflow or a negative extent first. n is the flat element
+// count m*n; all index math is int64_t.
+
+// scaled_relu(x, scale): one array + one scalar. maximum(scale*x, 0) elementwise,
+// NaN-propagating (the kernel owns the np.maximum-matching idiom).
+template <typename T>
+nb::ndarray<nb::numpy, T, nb::ndim<2>> scaled_relu_typed(
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& x,
+    T scale) {
+
+    const int64_t m = static_cast<int64_t>(x.shape(0));
+    const int64_t n = static_cast<int64_t>(x.shape(1));
+    fme::checked_bytes(m, n, static_cast<int64_t>(sizeof(T)));
+
+    T* out = new T[static_cast<size_t>(m) * static_cast<size_t>(n)];
+    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+
+    {
+        nb::gil_scoped_release release;
+        fme::dispatch::fused_scaled_relu<T>(x.data(), out, m * n, scale);
+    }
+
+    const size_t shape[2] = {static_cast<size_t>(m), static_cast<size_t>(n)};
+    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+}
+
+// axpby(x, y, a, b): two same-shape arrays + two scalars. a*x + b*y elementwise.
+// The two inputs share the wrapper-guaranteed shape, so the binding takes the
+// extents from x and does NOT call check_matmul_dims (there are no inner
+// dimensions to conform; the same-shape rule is enforced in the wrapper).
+template <typename T>
+nb::ndarray<nb::numpy, T, nb::ndim<2>> axpby_typed(
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& x,
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& y,
+    T a, T b) {
+
+    const int64_t m = static_cast<int64_t>(x.shape(0));
+    const int64_t n = static_cast<int64_t>(x.shape(1));
+    fme::checked_bytes(m, n, static_cast<int64_t>(sizeof(T)));
+
+    T* out = new T[static_cast<size_t>(m) * static_cast<size_t>(n)];
+    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+
+    {
+        nb::gil_scoped_release release;
+        fme::dispatch::fused_axpby<T>(x.data(), y.data(), out, m * n, a, b);
+    }
+
+    const size_t shape[2] = {static_cast<size_t>(m), static_cast<size_t>(n)};
+    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+}
+
+// fma3(x, y, z): three same-shape arrays. x*y + z elementwise in a single
+// rounding (the kernel's std::fma / _mm256_fmadd), more accurate than the
+// two-rounding unfused expression. All three share the wrapper-guaranteed shape,
+// so the binding takes the extents from x.
+template <typename T>
+nb::ndarray<nb::numpy, T, nb::ndim<2>> fma3_typed(
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& x,
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& y,
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& z) {
+
+    const int64_t m = static_cast<int64_t>(x.shape(0));
+    const int64_t n = static_cast<int64_t>(x.shape(1));
+    fme::checked_bytes(m, n, static_cast<int64_t>(sizeof(T)));
+
+    T* out = new T[static_cast<size_t>(m) * static_cast<size_t>(n)];
+    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+
+    {
+        nb::gil_scoped_release release;
+        fme::dispatch::fused_fma3<T>(x.data(), y.data(), z.data(), out, m * n);
+    }
+
+    const size_t shape[2] = {static_cast<size_t>(m), static_cast<size_t>(n)};
+    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+}
+
 #if defined(FME_HAS_CUDA)
 // Host-pointer device GEMM for the GPU-02 correctness suite: same zero-copy-in,
 // capsule-owned-out shape as matmul_typed, but the kernel is the cuBLAS device
@@ -470,6 +555,25 @@ NB_MODULE(_core, m) {
 
     m.def("sum_axis", &sum_axis_typed<double>, nb::arg("a"), nb::arg("axis"));
     m.def("sum_axis", &sum_axis_typed<float>, nb::arg("a"), nb::arg("axis"));
+
+    // Fused elementwise, double before float in every set: a float64 array must
+    // never bind the float32 overload (a silent narrowing). The wrapper sends
+    // only validated same-shape same-dtype host operands; these CPU overloads
+    // carry the host fused path. The device-resident Array overloads land in
+    // 06-04. No new exception translator: checked_bytes throws shape_error, which
+    // the existing translator maps to ValueError.
+    m.def("axpby", &axpby_typed<double>, nb::arg("x"), nb::arg("y"), nb::arg("a"),
+          nb::arg("b"));
+    m.def("axpby", &axpby_typed<float>, nb::arg("x"), nb::arg("y"), nb::arg("a"),
+          nb::arg("b"));
+
+    m.def("fma3", &fma3_typed<double>, nb::arg("x"), nb::arg("y"), nb::arg("z"));
+    m.def("fma3", &fma3_typed<float>, nb::arg("x"), nb::arg("y"), nb::arg("z"));
+
+    m.def("scaled_relu", &scaled_relu_typed<double>, nb::arg("x"),
+          nb::arg("scale"));
+    m.def("scaled_relu", &scaled_relu_typed<float>, nb::arg("x"),
+          nb::arg("scale"));
 
     m.def("cpu_features", [] {
         const auto& f = fme::cpu::detect();
