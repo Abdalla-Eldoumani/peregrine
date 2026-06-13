@@ -405,8 +405,12 @@ def _measure_transfer(sizes: list) -> dict:
     big_bytes = big * big * 4
     h2d_big = _h2d(a_big)
     d2h_big = _d2h(dev_big)
-    h2d_gbps = big_bytes / h2d_big / 1e9
-    d2h_gbps = big_bytes / d2h_big / 1e9
+    # Floor the measured time before dividing: a degenerate 0.0 reading (a coarse
+    # timer against a fast transfer, or a stubbed transfer in a test) would raise
+    # ZeroDivisionError here. The 1e-9s floor caps the derived bandwidth instead of
+    # crashing; _load_cache and _transfer_time defend the read side symmetrically.
+    h2d_gbps = big_bytes / max(h2d_big, 1e-9) / 1e9
+    d2h_gbps = big_bytes / max(d2h_big, 1e-9) / 1e9
 
     small = sizes[0]
     a_small = _seeded_square(small, np.float32)
@@ -416,7 +420,12 @@ def _measure_transfer(sizes: list) -> dict:
     # explains is the fixed floor: the launch + Python<->native<->CUDA crossings
     # + pageable-copy setup that is constant regardless of size.
     round_trip_small = _h2d(a_small) + _d2h(dev_small)
-    explained = small_bytes / (h2d_gbps * 1e9) + small_bytes / (d2h_gbps * 1e9)
+    # Floor the bandwidths here too (matching policy._transfer_time): if a big-size
+    # reading floored to a near-zero bandwidth above, dividing by it here would
+    # raise. A near-zero bandwidth makes "explained" huge, so the clamped-non-
+    # negative floor below reads as ~0 -- the conservative degenerate result.
+    explained = small_bytes / (max(h2d_gbps, 1e-12) * 1e9) + \
+        small_bytes / (max(d2h_gbps, 1e-12) * 1e9)
     fixed_overhead_s = max(round_trip_small - explained, 0.0)
 
     return {
