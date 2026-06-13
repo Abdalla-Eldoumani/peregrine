@@ -22,24 +22,19 @@
 
 namespace fme::cuda {
 
-// cuBLAS error-name resolution. 12.8 ships cublasGetStatusName, so prefer it for
-// a human-readable name. The fallback switch exists only so check.cuh still
-// compiles if that symbol is ever absent (it covers the statuses a GEMM/handle
-// path can actually return); it is never the primary path on this toolkit.
+// cuBLAS error-name resolution. cublasGetStatusName has shipped since well before
+// 12.x and 12.8 is the only supported toolkit, so call it unconditionally.
+//
+// A previous version gated a hand-written fallback switch behind
+// `#if defined(CUBLAS_VER_MAJOR)`, but CUBLAS_VER_MAJOR is defined by
+// cublas_v2.h on every versioned header, so the `#if` arm was ALWAYS taken and
+// the `#else` switch was dead, unverified code (WR-06). Worse, the guard tested
+// "is this a versioned cuBLAS header" (always yes), not "does
+// cublasGetStatusName exist" (the actual question), so it would not even have
+// covered the case it claimed to. There is no clean preprocessor test for a
+// function's existence in cuBLAS, so the honest form is the direct call.
 inline const char* cublas_status_name(cublasStatus_t s) {
-#if defined(CUBLAS_VER_MAJOR)
     return cublasGetStatusName(s);
-#else
-    switch (s) {
-        case CUBLAS_STATUS_SUCCESS:          return "CUBLAS_STATUS_SUCCESS";
-        case CUBLAS_STATUS_NOT_INITIALIZED:  return "CUBLAS_STATUS_NOT_INITIALIZED";
-        case CUBLAS_STATUS_ALLOC_FAILED:     return "CUBLAS_STATUS_ALLOC_FAILED";
-        case CUBLAS_STATUS_INVALID_VALUE:    return "CUBLAS_STATUS_INVALID_VALUE";
-        case CUBLAS_STATUS_EXECUTION_FAILED: return "CUBLAS_STATUS_EXECUTION_FAILED";
-        case CUBLAS_STATUS_INTERNAL_ERROR:   return "CUBLAS_STATUS_INTERNAL_ERROR";
-        default:                             return "CUBLAS_STATUS_UNKNOWN";
-    }
-#endif
 }
 
 } // namespace fme::cuda
