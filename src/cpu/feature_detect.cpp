@@ -1,4 +1,12 @@
+// std::getenv is the standard portable read and the value is only ever compared,
+// never used to build a path or a command, so MSVC's /W4 C4996 deprecation
+// (which steers toward getenv_s) is noise here; silence it TU-locally.
+#define _CRT_SECURE_NO_WARNINGS
+
 #include "cpu/feature_detect.hpp"
+
+#include <cstdlib>
+#include <cstring>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -36,6 +44,20 @@ features probe() {
         cpuid_count(7, 0, r);
         f.avx2 = (r[1] & (1 << 5)) != 0;
         f.avx512f = (r[1] & (1 << 16)) != 0;
+    }
+
+    // FME_DISABLE_AVX2 forces the naive fallback so this AVX2 machine can prove
+    // the fallback path is reachable and correct (test_fallback.py). It folds in
+    // here, before detect() memoizes the result, so every downstream consumer
+    // (dispatch routing, the cpu_features binding, the tests) sees one consistent
+    // answer for the process lifetime. Any value except a null or literal "0"
+    // counts as set, matching the usual environment-flag convention. avx512f is
+    // left as probed: nothing routes on it yet, and the override targets the
+    // AVX2+FMA fast path specifically.
+    const char* disable = std::getenv("FME_DISABLE_AVX2");
+    if (disable != nullptr && std::strcmp(disable, "0") != 0) {
+        f.avx2 = false;
+        f.fma = false;
     }
     return f;
 }
