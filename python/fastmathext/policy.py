@@ -89,7 +89,18 @@ def _load_cache(path: str, expected_signature: str):
     1. the file is missing, unreadable, or not valid JSON -> ``None``;
     2. the parsed value is not a dict, or its schema integer is missing or does
        not match ``SCHEMA`` (a foreign / older / newer cache) -> ``None``;
-    3. the signature does not match the running machine/build -> ``None``.
+    3. the signature does not match the running machine/build -> ``None``;
+    4. the body is structurally malformed -- a missing or empty ``cpu`` grid, a
+       grid point that is not an ``[n, time]`` pair, or a ``gpu`` series present
+       without a well-formed ``transfer`` triple -> ``None``.
+
+    The schema integer promises the fields exist and are well-formed, but a
+    truncated file, a non-atomic external writer, or a foreign tool can stamp the
+    matching schema and signature onto a broken body. Step 4 is the reader-side
+    defense: a structurally malformed body collapses to ``None`` like every other
+    rejection so a partial dict never reaches :func:`choose_backend`, where
+    ``grid[0][0]`` / ``calibration["cpu"][dtype]`` / ``calibration["transfer"]``
+    would otherwise raise ``IndexError`` / ``KeyError`` on the dispatch hot path.
 
     Only ``json.load`` is used -- never ``pickle`` -- so a tampered cache cannot
     execute code; it can only be rejected or, at worst, route sub-optimally.
@@ -119,6 +130,33 @@ def _load_cache(path: str, expected_signature: str):
     if data.get("signature") != expected_signature:
         # a different machine or build wrote this cache
         return None
+    # Structural validation (step 4): the schema + signature gate does not prove
+    # the body is well-formed. A non-empty per-dtype [n, time] CPU grid is
+    # required, and if a "gpu" series is present then the "transfer" triple it
+    # depends on must be present and complete (a positive bandwidth pair so the
+    # _transfer_time division below cannot hit a zero). Any defect collapses to
+    # None -- recalibrate or static fallback -- exactly like a parse/schema/
+    # signature failure, so a malformed body never reaches choose_backend.
+    cpu = data.get("cpu")
+    if not isinstance(cpu, dict):
+        return None
+    for dt in ("float32", "float64"):
+        grid = cpu.get(dt)
+        if not isinstance(grid, list) or not grid:
+            return None
+        if not all(isinstance(p, list) and len(p) == 2 for p in grid):
+            return None
+    gpu = data.get("gpu")
+    if gpu is not None:
+        if not (isinstance(gpu, dict) and gpu.get("float32")):
+            return None
+        transfer = data.get("transfer")
+        if not isinstance(transfer, dict) or not all(
+            k in transfer for k in ("h2d_gbps", "d2h_gbps", "fixed_overhead_s")
+        ):
+            return None
+        if not (transfer["h2d_gbps"] > 0 and transfer["d2h_gbps"] > 0):
+            return None
     return data
 
 
