@@ -78,10 +78,40 @@ def _power_profile() -> str:
     return out.stdout.strip() or "unknown"
 
 
+def _gpu_manifest() -> tuple[str, str]:
+    # (gpu, driver) for the DESIGN_SYSTEM manifest keys, best-effort and never
+    # raising. nvidia-smi ships with the driver and is queried for the device
+    # name and driver version; a CPU-only build, no device, or no nvidia-smi all
+    # degrade to ("none", "n/a") so the manifest records what it can prove rather
+    # than failing the run. Records the device regardless of has_cuda(): the
+    # manifest is provenance, so a GPU present but below the cc floor still
+    # belongs in the record.
+    import shutil
+
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        return "none", "n/a"
+    try:
+        out = subprocess.run(
+            [smi, "--query-gpu=name,driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "none", "n/a"
+    if out.returncode != 0 or not out.stdout.strip():
+        return "none", "n/a"
+    first = out.stdout.strip().splitlines()[0]
+    name, _, driver = first.partition(",")
+    return name.strip() or "none", driver.strip() or "n/a"
+
+
 def _machine_manifest() -> dict:
     # bench-protocol rule 9: no manifest, no merge. Every results JSON carries
     # the machine identity, the BLAS the comparison ran against, the power
     # profile (thermal state changes throughput on a laptop), and a timestamp.
+    gpu, driver = _gpu_manifest()
     info = {
         "platform": platform.platform(),
         "processor": platform.processor(),
@@ -89,7 +119,14 @@ def _machine_manifest() -> dict:
         "numpy": np.__version__,
         "fastmathext": fme.__version__,
         "cpu_features": fme.cpu_features(),
-        "cuda_build": fme.has_cuda_build(),
+        # The BUILD flag, not the runtime has_cuda(): the manifest records what
+        # the binary was compiled with (whether the CUDA path exists at all), and
+        # the gpu/driver fields below record the device that was actually present.
+        # A run on a CUDA build with the GPU busy elsewhere should still read
+        # cuda_build True.
+        "cuda_build": fme._has_cuda_build(),
+        "gpu": gpu,
+        "driver": driver,
         "blas": _blas_identity(),
         "power_profile": _power_profile(),
         "timestamp": datetime.datetime.now().isoformat(),
