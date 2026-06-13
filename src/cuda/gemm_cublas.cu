@@ -133,6 +133,14 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 
     gemm<T>(da, db, dc, m, k, n);
 
+    // The destination `c` is the caller's pageable new T[] buffer (module.cpp
+    // gemm_host_typed), so this cudaMemcpyAsync D2H is NOT truly asynchronous:
+    // into pageable host memory the driver inserts a synchronous staging copy
+    // through its own bounce buffer (WR-01). It is correct, just not overlapped;
+    // the transfer.cu pinned-staging cache that exists to make D2H genuinely
+    // async is deliberately NOT used here (see its IN-01 note and the
+    // single-stream caveat below). For the GPU-02 correctness entry the simple
+    // pageable copy is the right tradeoff.
     FME_CUDA_CHECK(cudaMemcpyAsync(c, dc, c_bytes, cudaMemcpyDeviceToHost, stream));
 
     FME_CUDA_CHECK(cudaFreeAsync(da, stream));
@@ -143,6 +151,18 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // "every D2H feeding a host-visible return syncs first" rule. cudaFreeAsync
     // is stream-ordered behind the copy, so the result is safely in c once the
     // stream drains.
+    //
+    // ORDERING CONTRACT (WR-01): the copy, the three frees, and this sync are
+    // correct ONLY because everything in gemm_host runs on the ONE compute
+    // stream -- the free-after-copy and copy-before-return orderings are pure
+    // stream ordering, with no event/fence. If this function is ever migrated to
+    // stage on ctx.transfer (the natural change once the pinned cache is wired,
+    // since that cache is a transfer-stream primitive), the cross-stream
+    // ordering between the transfer-stream copy and the compute-stream GEMM must
+    // be fenced exactly as matmul_device does (04-07: sync_transfer before the
+    // GEMM, sync_compute after) -- otherwise it silently becomes the
+    // use-before-ready race 04-07 fixed. Do not move the staging to another
+    // stream without adding those fences.
     FME_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
