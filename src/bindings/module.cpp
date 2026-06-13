@@ -285,7 +285,11 @@ Array* to_device_typed(
     const int64_t cols = static_cast<int64_t>(a.shape(1));
     const fme::cuda::DType dt =
         std::is_same_v<T, double> ? fme::cuda::DType::f64 : fme::cuda::DType::f32;
-    const int64_t bytes = rows * cols * static_cast<int64_t>(sizeof(T));
+    // Overflow-checked (WR-02): an unbounded rows*cols*sizeof(T) product cast to
+    // size_t for the device alloc could wrap, leaving alloc_device sized for a
+    // truncated buffer while copy_h2d copies the full extent.
+    const int64_t bytes =
+        fme::checked_bytes(rows, cols, static_cast<int64_t>(sizeof(T)));
 
     fme::cuda::DeviceBuffer buf{nullptr, rows, cols, dt};
     {
@@ -315,7 +319,13 @@ template <typename T>
 nb::ndarray<nb::numpy, T, nb::ndim<2>> from_device_typed(const Array& arr) {
     const int64_t rows = arr.buf.rows;
     const int64_t cols = arr.buf.cols;
-    const int64_t bytes = rows * cols * static_cast<int64_t>(sizeof(T));
+    // Overflow-checked (WR-02): rows/cols come straight off the Array's buffer
+    // with no bound. Before the fix, an overflowing rows*cols*sizeof(T) product
+    // cast to size_t let new T[] allocate a truncated host buffer while copy_d2h
+    // was told to copy the full bytes -- a heap overflow. checked_bytes throws
+    // shape_error (-> ValueError) on overflow or a negative extent first.
+    const int64_t bytes =
+        fme::checked_bytes(rows, cols, static_cast<int64_t>(sizeof(T)));
 
     T* out = new T[static_cast<size_t>(rows) * static_cast<size_t>(cols)];
     nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
@@ -355,7 +365,10 @@ Array* matmul_device(const Array& a, const Array& b) {
 
     const fme::cuda::DType dt = a.buf.dtype;
     const int64_t elem = fme::cuda::dtype_size(dt);
-    const int64_t out_bytes = d.m * d.n * elem;
+    // Overflow-checked (WR-02): the int32 cuBLAS dimension guard fires only
+    // INSIDE cuda::gemm, after alloc_device has already been asked for out_bytes,
+    // so an overflowing d.m*d.n*elem would reach the device allocator first.
+    const int64_t out_bytes = fme::checked_bytes(d.m, d.n, elem);
 
     fme::cuda::DeviceBuffer out{nullptr, d.m, d.n, dt};
     {
