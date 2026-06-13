@@ -91,28 +91,6 @@ SMALLEST_SUBNORMAL32 = float(np.finfo(np.float32).smallest_subnormal)
 C_HIGHAM = 4.0
 
 
-def _usable_cuda_device():
-    """Best-effort "is a GPU present" probe that needs no CUDA headers.
-
-    nvidia-smi ships with the driver; a non-empty `-L` listing means a device
-    and a loaded driver. This is deliberately a placeholder: in 04-05 the public
-    fme.has_cuda() runtime chain (build flag, driver load, device count, compute
-    capability >= 7.0) replaces it and requires_cuda is rewritten to call that.
-    Until then a build flag plus this probe is enough to gate the suite so a
-    CPU-only or driverless machine skips instead of erroring.
-    """
-    smi = shutil.which("nvidia-smi")
-    if smi is None:
-        return False
-    try:
-        out = subprocess.run(
-            [smi, "-L"], capture_output=True, text=True, timeout=15
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return out.returncode == 0 and "GPU 0" in out.stdout
-
-
 def requires_cuda():
     """Return (ok, reason): whether the CUDA path can actually run here.
 
@@ -120,12 +98,14 @@ def requires_cuda():
     present, so the CUDA suite runs on the GPU build and skips with a stated
     reason on a CPU-only build or a machine without a device. Every CUDA test
     consumes this through the module-level skip below so CPU-only and the WSL/GCC
-    clone stay green. Migrates to fme.has_cuda() in 04-05 (this composes the same
-    build-flag + device-present predicate by hand until that public API exists).
+    clone stay green. As of 04-05 this defers to the public fme.has_cuda()
+    runtime chain (build flag, driver load, device count, compute capability
+    >= 7.0) -- the same predicate, now owned by the package instead of composed
+    by hand here; the build-flag arm keeps a distinct reason for a CPU-only build.
     """
-    if not fme.has_cuda_build():
+    if not fme._has_cuda_build():
         return False, "built without cuda (FME_ENABLE_CUDA=OFF)"
-    if not _usable_cuda_device():
+    if not fme.has_cuda():
         return False, "no usable cuda device present"
     return True, ""
 
@@ -140,9 +120,11 @@ def _gpu_manifest():
     Returns ("none", "n/a") when there is no build, no device, or no nvidia-smi,
     so the header reads identically on CPU-only and WSL. The DESIGN_SYSTEM
     manifest keys are gpu and driver; this is the test-run provenance line, not a
-    capability gate (requires_cuda is the gate).
+    capability gate (requires_cuda is the gate). Gated on the build flag
+    (_has_cuda_build), not has_cuda(): the provenance line should read "none" on a
+    CPU-only build regardless of whether a GPU happens to be in the machine.
     """
-    if not fme.has_cuda_build():
+    if not fme._has_cuda_build():
         return "none", "n/a"
     smi = shutil.which("nvidia-smi")
     if smi is None:
