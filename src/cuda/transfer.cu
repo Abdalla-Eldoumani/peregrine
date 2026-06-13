@@ -97,12 +97,37 @@ void free_device(void* dptr) {
     if (dptr == nullptr) {
         return;
     }
+    // ~Array calls this during Python GC, which includes interpreter
+    // finalization AFTER the atexit teardown() has destroyed ctx.transfer. Two
+    // guards make that path safe (CR-01):
+    //
+    //   1. If teardown has run, ctx.transfer is a dangling handle the static
+    //      Context still names. Skip the free entirely: the mempool buffer is
+    //      reclaimed by the CUDA driver at process exit anyway, so leaking it
+    //      here is correct, while cudaFreeAsync on the destroyed stream is a
+    //      use-after-teardown.
+    //   2. On the live path, do NOT use FME_CUDA_CHECK -- it throws, and a throw
+    //      escaping ~Array during GC terminates the interpreter (the same hazard
+    //      teardown itself avoids, check.cuh). Inspect the return code by hand
+    //      and swallow the shutdown/invalid-resource codes that mean the stream
+    //      or runtime is already gone; never propagate out of the destructor.
+    if (g_torn_down.load()) {
+        return;
+    }
+    Context& ctx = context();
     // cudaFreeAsync on the transfer stream returns the buffer to the mempool
     // (release threshold UINT64_MAX, 04-02) rather than the OS, so the next
     // same-size allocation reuses it. Stream-ordered: it completes behind any
     // copy still queued on the transfer stream that touched this buffer.
-    Context& ctx = context();
-    FME_CUDA_CHECK(cudaFreeAsync(dptr, ctx.transfer));
+    const cudaError_t e = cudaFreeAsync(dptr, ctx.transfer);
+    if (e != cudaSuccess && e != cudaErrorCudartUnloading &&
+        e != cudaErrorInvalidResourceHandle && e != cudaErrorInvalidValue) {
+        // A genuine live-path failure (not a shutdown race). ~Array must never
+        // throw, so surface it without propagating: clear the sticky error so it
+        // does not poison the next CUDA call, then drop it. A leaked buffer at
+        // GC is far better than terminating the interpreter from a destructor.
+        cudaGetLastError();
+    }
 }
 
 void copy_h2d(void* dst_dev, const void* src_host, int64_t bytes) {
