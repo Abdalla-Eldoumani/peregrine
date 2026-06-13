@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <new>
 
@@ -13,7 +14,7 @@ namespace fme::cpu {
 template <typename T>
 T* aligned_new(int64_t count) {
     return static_cast<T*>(
-        ::operator new(static_cast<size_t>(count) * sizeof(T), std::align_val_t{64}));
+        ::operator new(static_cast<std::size_t>(count) * sizeof(T), std::align_val_t{64}));
 }
 
 inline void aligned_delete(void* p) noexcept {
