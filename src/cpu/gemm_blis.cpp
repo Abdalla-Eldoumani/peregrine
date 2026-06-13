@@ -89,39 +89,63 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
         // Ap holds one MC x KC block as ceil(MC/MR) row panels of MR x KC; Bp holds
         // one KC x NC block as ceil(NC/NR) column panels of KC x NR. Both are sized
         // for the maximum (full-block) extents and reused across edge blocks; the
-        // packers zero-pad the live sub-block into the same layout.
+        // packers zero-pad the live sub-block into the same layout. Bp is shared
+        // and read-only inside the parallel region (packed once per (jc, pc) by the
+        // serial thread that owns the loop), so it is allocated here; Ap is written
+        // by every thread that packs its own A panel, so each thread allocates a
+        // private Ap inside the region (below).
         const int64_t ap_cap = ((MC + MR - 1) / MR) * MR * KC;
         const int64_t bp_cap = ((NC + NR - 1) / NR) * NR * KC;
-        double* Ap = aligned_new<double>(ap_cap);
         double* Bp = aligned_new<double>(bp_cap);
 
-        // jc has a single block at n <= NC (every bench size); the pc loop is the
-        // serial k-block reduction and is NEVER parallelized, so each output
-        // element accumulates its k-blocks in a fixed order. 03-04 wraps the ic
-        // loop in an omp parallel region; the order above stays invariant.
+        // jc has a single block at n <= NC (every bench size), so all of CPU-05's
+        // scaling has to come from the ic loop: a jc-only parallel region would
+        // measure 1.0x because there is one jc iteration. The pc loop is the serial
+        // k-block reduction and is NEVER parallelized, so each output element
+        // accumulates its k-blocks in a fixed order independent of the thread that
+        // owns its ic block. That is what keeps the result bitwise identical across
+        // thread counts (the 1-vs-12 identity tests/test_threads.py guards).
         for (int64_t jc = 0; jc < n; jc += NC) {
             const int64_t nc = std::min(NC, n - jc);
             for (int64_t pc = 0; pc < k; pc += KC) {
                 const int64_t kc = std::min(KC, k - pc);
                 pack_b<double>(Bp, b, pc, jc, kc, nc, n);
-                for (int64_t ic = 0; ic < m; ic += MC) {
-                    const int64_t mc = std::min(MC, m - ic);
-                    pack_a<double>(Ap, a, ic, pc, mc, kc, k);
-                    for (int64_t jr = 0; jr < nc; jr += NR) {
-                        const int64_t nr = std::min(NR, nc - jr);
-                        const double* bpanel = Bp + (jr / NR) * kc * NR;
-                        for (int64_t ir = 0; ir < mc; ir += MR) {
-                            const int64_t mr = std::min(MR, mc - ir);
-                            const double* apanel = Ap + (ir / MR) * MR * kc;
-                            double* ctile = c + (ic + ir) * n + (jc + jr);
-                            microkernel_f64_6x8(apanel, bpanel, ctile, kc, n, mr, nr);
+
+                const int64_t num_ic = (m + MC - 1) / MC;
+                // The parallel region wraps the ic loop. Each thread owns a disjoint
+                // set of ic blocks (disjoint C row ranges, so no two threads write
+                // the same C element), packs them into its own private Ap, and runs
+                // the macro kernel. schedule(dynamic) balances the ragged final ic
+                // block across threads. The pragmas are guarded so the kernel still
+                // builds and runs single-threaded without an OpenMP runtime.
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+                {
+                    double* Ap = aligned_new<double>(ap_cap);
+#if defined(_OPENMP)
+#pragma omp for schedule(dynamic)
+#endif
+                    for (int64_t icb = 0; icb < num_ic; ++icb) {
+                        const int64_t ic = icb * MC;
+                        const int64_t mc = std::min(MC, m - ic);
+                        pack_a<double>(Ap, a, ic, pc, mc, kc, k);
+                        for (int64_t jr = 0; jr < nc; jr += NR) {
+                            const int64_t nr = std::min(NR, nc - jr);
+                            const double* bpanel = Bp + (jr / NR) * kc * NR;
+                            for (int64_t ir = 0; ir < mc; ir += MR) {
+                                const int64_t mr = std::min(MR, mc - ir);
+                                const double* apanel = Ap + (ir / MR) * MR * kc;
+                                double* ctile = c + (ic + ir) * n + (jc + jr);
+                                microkernel_f64_6x8(apanel, bpanel, ctile, kc, n, mr, nr);
+                            }
                         }
                     }
+                    aligned_delete(Ap);
                 }
             }
         }
 
-        aligned_delete(Ap);
         aligned_delete(Bp);
     }
 }
