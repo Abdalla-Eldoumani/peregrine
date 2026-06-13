@@ -149,4 +149,73 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 template void gemm_host<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 template void gemm_host<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 
+template <typename T>
+float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
+                  int reps, int warmups) {
+    // The operands are already device-resident, so the timed region is the GEMM
+    // and nothing else (no H2D/D2H). reps must be positive: the caller divides by
+    // it, and a zero-rep timing is meaningless. An empty output (m==0 || n==0)
+    // has no work to time and would make the per-rep cost ill-defined; reject it
+    // rather than return a fake zero.
+    if (reps <= 0) {
+        throw ::fme::cuda_error("cuda time_matmul: reps must be positive");
+    }
+    if (m == 0 || n == 0) {
+        throw ::fme::cuda_error(
+            "cuda time_matmul: empty output has no work to time");
+    }
+
+    Context& ctx = context();
+    const cudaStream_t stream = ctx.compute;
+    const size_t c_bytes =
+        static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T);
+
+    // One output buffer from the context mempool on the compute stream, reused
+    // across every warmup and timed rep (the inputs do not change, so the GEMM
+    // overwrites C each iteration -- beta is 0 in gemm). Allocated once so no
+    // allocation lands inside the timed region.
+    T* dc = nullptr;
+    FME_CUDA_CHECK(
+        cudaMallocAsync(reinterpret_cast<void**>(&dc), c_bytes, stream));
+
+    cudaEvent_t e0 = nullptr;
+    cudaEvent_t e1 = nullptr;
+    FME_CUDA_CHECK(cudaEventCreate(&e0));
+    FME_CUDA_CHECK(cudaEventCreate(&e1));
+
+    // Warm the clocks: the first GEMM on a cold GPU pays clock ramp and any lazy
+    // cuBLAS init, so timing it would overstate the cost (RESEARCH/skill: warm
+    // before timing, report warm). These run on the compute stream and are not
+    // bracketed by the events.
+    for (int i = 0; i < warmups; ++i) {
+        gemm<T>(a, b, dc, m, k, n);
+    }
+
+    // Sync before the start event so the warmups are fully drained and e0 marks a
+    // quiet stream; then the timed region is exactly `reps` GEMMs between the two
+    // events on the same stream. cudaEventElapsedTime measures device time between
+    // them, the only correct way to time an async launch.
+    FME_CUDA_CHECK(cudaStreamSynchronize(stream));
+    FME_CUDA_CHECK(cudaEventRecord(e0, stream));
+    for (int i = 0; i < reps; ++i) {
+        gemm<T>(a, b, dc, m, k, n);
+    }
+    FME_CUDA_CHECK(cudaEventRecord(e1, stream));
+    FME_CUDA_CHECK(cudaEventSynchronize(e1));
+
+    float ms = 0.0f;
+    FME_CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
+
+    // Destroy the events and return the buffer to the pool. These are live-path
+    // calls (not teardown), so CHECK-wrapping is correct here.
+    FME_CUDA_CHECK(cudaEventDestroy(e0));
+    FME_CUDA_CHECK(cudaEventDestroy(e1));
+    FME_CUDA_CHECK(cudaFreeAsync(dc, stream));
+
+    return ms / static_cast<float>(reps);
+}
+
+template float time_matmul<float>(const float*, const float*, int64_t, int64_t, int64_t, int, int);
+template float time_matmul<double>(const double*, const double*, int64_t, int64_t, int64_t, int, int);
+
 } // namespace fme::cuda
