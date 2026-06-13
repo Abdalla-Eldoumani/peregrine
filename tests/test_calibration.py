@@ -547,6 +547,69 @@ def test_schema_mismatch(tmp_path):
     assert policy._load_cache(path, sig) is None
 
 
+def test_malformed_body_recalibrate(tmp_path):
+    # A cache that parses, carries the right schema AND the running signature, but
+    # whose BODY is structurally malformed -> None (recalibrate / static), never a
+    # partial dict reaching choose_backend. This is the corruption class the
+    # schema+signature gate alone passes: a truncated file, a non-atomic external
+    # writer, or a foreign tool can stamp the matching schema and signature onto a
+    # broken body. Each variant below must collapse to None like every other
+    # rejection, and the resulting static path must not raise.
+    sig = "synthetic|test|table"
+    path = str(tmp_path / "calibration.json")
+
+    def _valid():
+        # a complete, schema+signature-matching dict to mutate per variant
+        payload = synthetic_calibration()
+        payload["signature"] = sig
+        return payload
+
+    # empty cpu grid: choose_backend's _interp_time would do grid[0][0] -> IndexError
+    bad = _valid()
+    bad["cpu"]["float32"] = []
+    _write_cache_file(path, bad)
+    assert policy._load_cache(path, sig) is None
+
+    # missing cpu key entirely: choose_backend's calibration["cpu"][dtype] -> KeyError
+    bad = _valid()
+    del bad["cpu"]
+    _write_cache_file(path, bad)
+    assert policy._load_cache(path, sig) is None
+
+    # a grid point that is not an [n, time] pair (wrong arity)
+    bad = _valid()
+    bad["cpu"]["float64"] = [[128, 0.001], [256]]
+    _write_cache_file(path, bad)
+    assert policy._load_cache(path, sig) is None
+
+    # gpu present but transfer absent: choose_backend's calibration["transfer"]
+    # for a host product -> KeyError
+    bad = _valid()
+    del bad["transfer"]
+    _write_cache_file(path, bad)
+    assert policy._load_cache(path, sig) is None
+
+    # gpu present, transfer present but with a zero bandwidth: _transfer_time would
+    # divide by zero on the dispatch hot path
+    bad = _valid()
+    bad["transfer"]["h2d_gbps"] = 0.0
+    _write_cache_file(path, bad)
+    assert policy._load_cache(path, sig) is None
+
+    # the load-bearing consequence: with the cache rejected to None, the dispatch
+    # path falls back to the conservative static choice and does NOT crash, for
+    # every (dtype, residency) -- the fail-safe contract DISP-03 promises.
+    for dtype in ("float32", "float64"):
+        for residency in ("host", "device"):
+            assert (
+                policy.choose_backend(
+                    dtype, 256, 256, 256, residency=residency,
+                    calibration=None, backend="auto",
+                )
+                == "cpu"
+            )
+
+
 def test_signature_mismatch(tmp_path):
     # A cache written on a different machine/build (signature mismatch) -> None,
     # so a foreign cache never claims this machine's crossovers. A matching
