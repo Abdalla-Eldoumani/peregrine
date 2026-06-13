@@ -5,31 +5,70 @@
 #include "cpu/pack.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <type_traits>
+#include <vector>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace fme::cpu {
 
-blocking& current_blocking() {
-    // Sweep winner on zpicy (i7-10750H, 6 threads pinned, Ultimate Performance):
-    // MC=96 KC=320 NC=2048. Ap = 96x320x8 = 240KB fits the 256K L2; Bp panel =
-    // 320x8x8 = 20KB sits in the 32K L1d; NC=2048 is a single jc block at every
-    // bench size. Chosen on the noise-robust median-of-min GFLOP/s across a
-    // randomized-order, cooldown-separated f64 n=1024 run (a background antivirus
-    // on this machine inflated CV above the protocol gate, so the spike-resistant
-    // floor decided, not the raw median). Measured f64 n=1024 floors, GF/s:
-    //   mc96 kc320 nc2048 = 55.4 (median floor) / 83.9 (best min) -- winner
-    //   mc72 kc256 nc2048 = 52.3 / 80.0
-    //   mc48 kc256 nc2048 = 47.9 / 92.5   mc48 kc192 nc2048 = 41.2 / 78.0
-    //   mc72 kc256 nc4080 = 39.2 (the prior {72,256,4080} default) / 64.6
-    // Full 24-point MC{48,72,96,144} x KC{192,256,320} x NC{2048,4080} grid is in
-    // benchmarks/results/tuning/sweep_zpicy.json. Runtime-settable so the sweep
-    // walks the grid in one process; re-sweep when the machine or toolchain moves.
-    static blocking b{96, 320, 2048};
-    return b;
+namespace {
+
+// Sweep winner on zpicy (i7-10750H, 6 threads pinned, Ultimate Performance):
+// MC=96 KC=320 NC=2048. Ap = 96x320x8 = 240KB fits the 256K L2; Bp panel =
+// 320x8x8 = 20KB sits in the 32K L1d; NC=2048 is a single jc block at every
+// bench size. Chosen on the noise-robust median-of-min GFLOP/s across a
+// randomized-order, cooldown-separated f64 n=1024 run (a background antivirus
+// on this machine inflated CV above the protocol gate, so the spike-resistant
+// floor decided, not the raw median). Measured f64 n=1024 floors, GF/s:
+//   mc96 kc320 nc2048 = 55.4 (median floor) / 83.9 (best min) -- winner
+//   mc72 kc256 nc2048 = 52.3 / 80.0
+//   mc48 kc256 nc2048 = 47.9 / 92.5   mc48 kc192 nc2048 = 41.2 / 78.0
+//   mc72 kc256 nc4080 = 39.2 (the prior {72,256,4080} default) / 64.6
+// Full 24-point MC{48,72,96,144} x KC{192,256,320} x NC{2048,4080} grid is in
+// benchmarks/results/tuning/sweep_zpicy.json. Runtime-settable so the sweep
+// walks the grid in one process; re-sweep when the machine or toolchain moves.
+//
+// std::atomic so the sweep hook can publish a new triple while a kernel reads
+// it: blocking is trivially copyable (three int64_t), so the whole struct moves
+// in one atomic store/load and no reader ever sees a torn (mc-new, nc-old) pair.
+// On a 24-byte struct this is not lock-free, but it is correct and off any hot
+// path (the kernel loads it once per call, never per tile).
+std::atomic<blocking> g_blocking{blocking{96, 320, 2048}};
+
+} // namespace
+
+void store_blocking(blocking b) noexcept {
+    g_blocking.store(b, std::memory_order_relaxed);
+}
+
+blocking load_blocking() noexcept {
+    return g_blocking.load(std::memory_order_relaxed);
 }
 
 namespace {
+
+// RAII owner for an aligned panel buffer so a throw between allocation and the
+// trailing free does not leak it, and so the throwing aligned_new never sits on
+// the OpenMP region's unwinding path. An exception that tries to leave an omp
+// structured block is undefined behavior (std::terminate on both the MSVC
+// /openmp:llvm and GCC runtimes); every Ap is therefore allocated here, in
+// serial code, before the region, where std::bad_alloc unwinds normally to the
+// binding and surfaces as MemoryError.
+template <typename T>
+struct aligned_buf {
+    T* p;
+    explicit aligned_buf(int64_t n) : p(aligned_new<T>(n)) {}
+    ~aligned_buf() { aligned_delete(p); }
+    aligned_buf(const aligned_buf&) = delete;
+    aligned_buf& operator=(const aligned_buf&) = delete;
+    aligned_buf(aligned_buf&& o) noexcept : p(o.p) { o.p = nullptr; }
+    aligned_buf& operator=(aligned_buf&&) = delete;
+};
 
 // The register-tile shape the f64 microkernel computes. Structural, shared with
 // microkernel_avx2_f64.cpp and pack.cpp; not a tuning knob, so it is a local
@@ -160,14 +199,35 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // pack layout and the microkernel callee differ by dtype, dispatched here at
     // compile time so neither path carries a runtime dtype branch in its hot loop.
     if constexpr (std::is_same_v<T, float>) {
-        const blocking& blk = current_blocking();
+        // Snapshot the blocking once, before the GIL-free loops: a concurrent
+        // _set_gemm_blocking publishes a whole new triple atomically, so MC/KC/NC
+        // below are mutually consistent and fixed for the duration of this call.
+        const blocking blk = load_blocking();
         const int64_t MC = blk.mc;
         const int64_t KC = blk.kc;
         const int64_t NC = blk.nc;
 
         const int64_t ap_cap = ((MC + MR_F32 - 1) / MR_F32) * MR_F32 * KC;
         const int64_t bp_cap = ((NC + NR_F32 - 1) / NR_F32) * NR_F32 * KC;
-        float* Bp = aligned_new<float>(bp_cap);
+        aligned_buf<float> bp_owner(bp_cap);
+        float* Bp = bp_owner.p;
+
+        // One Ap per thread, all allocated here in serial code: aligned_new can
+        // throw std::bad_alloc, and a throw must never cross the omp region below
+        // (UB -> std::terminate). Inside the region each thread reads its own
+        // buffer by omp_get_thread_num(), so no allocation happens on the
+        // unwinding path. omp_get_max_threads() is the upper bound the region can
+        // use; the non-OpenMP build needs exactly one.
+#if defined(_OPENMP)
+        const int num_threads = omp_get_max_threads();
+#else
+        const int num_threads = 1;
+#endif
+        std::vector<aligned_buf<float>> ap_pool;
+        ap_pool.reserve(static_cast<size_t>(num_threads));
+        for (int t = 0; t < num_threads; ++t) {
+            ap_pool.emplace_back(ap_cap);
+        }
 
         for (int64_t jc = 0; jc < n; jc += NC) {
             const int64_t nc = std::min(NC, n - jc);
@@ -180,7 +240,11 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 #pragma omp parallel
 #endif
                 {
-                    float* Ap = aligned_new<float>(ap_cap);
+#if defined(_OPENMP)
+                    float* Ap = ap_pool[static_cast<size_t>(omp_get_thread_num())].p;
+#else
+                    float* Ap = ap_pool[0].p;
+#endif
 #if defined(_OPENMP)
 #pragma omp for schedule(dynamic)
 #endif
@@ -199,15 +263,14 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
                             }
                         }
                     }
-                    aligned_delete(Ap);
                 }
             }
         }
 
-        aligned_delete(Bp);
         return;
     } else {
-        const blocking& blk = current_blocking();
+        // Snapshot the blocking once, before the GIL-free loops (see the f32 arm).
+        const blocking blk = load_blocking();
         const int64_t MC = blk.mc;
         const int64_t KC = blk.kc;
         const int64_t NC = blk.nc;
@@ -217,12 +280,28 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
         // for the maximum (full-block) extents and reused across edge blocks; the
         // packers zero-pad the live sub-block into the same layout. Bp is shared
         // and read-only inside the parallel region (packed once per (jc, pc) by the
-        // serial thread that owns the loop), so it is allocated here; Ap is written
-        // by every thread that packs its own A panel, so each thread allocates a
-        // private Ap inside the region (below).
+        // serial thread that owns the loop). Ap is written by every thread that
+        // packs its own A panel, so each thread needs a private buffer; they are
+        // all allocated below in serial code (one per thread), never inside the
+        // region, because aligned_new can throw and a throw must not cross the omp
+        // boundary (UB -> std::terminate).
         const int64_t ap_cap = ((MC + MR - 1) / MR) * MR * KC;
         const int64_t bp_cap = ((NC + NR - 1) / NR) * NR * KC;
-        double* Bp = aligned_new<double>(bp_cap);
+        aligned_buf<double> bp_owner(bp_cap);
+        double* Bp = bp_owner.p;
+
+        // Per-thread Ap pool, allocated here so std::bad_alloc unwinds to the
+        // binding (MemoryError) instead of terminating from inside the region.
+#if defined(_OPENMP)
+        const int num_threads = omp_get_max_threads();
+#else
+        const int num_threads = 1;
+#endif
+        std::vector<aligned_buf<double>> ap_pool;
+        ap_pool.reserve(static_cast<size_t>(num_threads));
+        for (int t = 0; t < num_threads; ++t) {
+            ap_pool.emplace_back(ap_cap);
+        }
 
         // jc has a single block at n <= NC (every bench size), so all of CPU-05's
         // scaling has to come from the ic loop: a jc-only parallel region would
@@ -240,15 +319,20 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
                 const int64_t num_ic = (m + MC - 1) / MC;
                 // The parallel region wraps the ic loop. Each thread owns a disjoint
                 // set of ic blocks (disjoint C row ranges, so no two threads write
-                // the same C element), packs them into its own private Ap, and runs
-                // the macro kernel. schedule(dynamic) balances the ragged final ic
-                // block across threads. The pragmas are guarded so the kernel still
-                // builds and runs single-threaded without an OpenMP runtime.
+                // the same C element), packs them into its own private Ap from the
+                // pool, and runs the macro kernel. schedule(dynamic) balances the
+                // ragged final ic block across threads. The pragmas are guarded so
+                // the kernel still builds and runs single-threaded without an
+                // OpenMP runtime.
 #if defined(_OPENMP)
 #pragma omp parallel
 #endif
                 {
-                    double* Ap = aligned_new<double>(ap_cap);
+#if defined(_OPENMP)
+                    double* Ap = ap_pool[static_cast<size_t>(omp_get_thread_num())].p;
+#else
+                    double* Ap = ap_pool[0].p;
+#endif
 #if defined(_OPENMP)
 #pragma omp for schedule(dynamic)
 #endif
@@ -267,12 +351,9 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
                             }
                         }
                     }
-                    aligned_delete(Ap);
                 }
             }
         }
-
-        aligned_delete(Bp);
     }
 }
 
