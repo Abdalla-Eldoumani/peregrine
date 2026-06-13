@@ -224,8 +224,14 @@ def _transfer_time(transfer, dtype, n) -> float:
     """
     itemsize = 8 if dtype == "float64" else 4
     nbytes = n * n * itemsize
-    h2d = 2 * nbytes / (transfer["h2d_gbps"] * 1e9)
-    d2h = nbytes / (transfer["d2h_gbps"] * 1e9)
+    # Floor the bandwidth before dividing: _load_cache rejects a cache whose
+    # bandwidths are <= 0, but a degenerate-but-positive reading (a fast device
+    # against a coarse timer) could still round low, and this function must never
+    # raise ZeroDivisionError on the dispatch hot path. A 1e-12 GB/s floor makes a
+    # near-zero bandwidth read as effectively infinite transfer time (the GPU
+    # loses), which is the conservative direction.
+    h2d = 2 * nbytes / (max(transfer["h2d_gbps"], 1e-12) * 1e9)
+    d2h = nbytes / (max(transfer["d2h_gbps"], 1e-12) * 1e9)
     return h2d + d2h + transfer["fixed_overhead_s"]
 
 
