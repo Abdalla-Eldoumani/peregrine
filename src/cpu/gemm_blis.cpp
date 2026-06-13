@@ -11,12 +11,21 @@
 namespace fme::cpu {
 
 blocking& current_blocking() {
-    // Starting grid from the cache budget: KC=256 puts a 256x8 f64 Bp panel at
-    // 16KB (half of L1d); MC=72 puts a 72x256 f64 Ap block at 144KB (just over
-    // half of 256K L2); NC=4080 puts a 256x4080 f64 Bp block at 8.2MB of the
-    // 12M shared L3. Runtime-settable so the sweep walks
-    // MC{48,72,96,144} x KC{192,256,320} x NC{2048,4080} without rebuilding.
-    static blocking b{72, 256, 4080};
+    // Sweep winner on zpicy (i7-10750H, 6 threads pinned, Ultimate Performance):
+    // MC=96 KC=320 NC=2048. Ap = 96x320x8 = 240KB fits the 256K L2; Bp panel =
+    // 320x8x8 = 20KB sits in the 32K L1d; NC=2048 is a single jc block at every
+    // bench size. Chosen on the noise-robust median-of-min GFLOP/s across a
+    // randomized-order, cooldown-separated f64 n=1024 run (a background antivirus
+    // on this machine inflated CV above the protocol gate, so the spike-resistant
+    // floor decided, not the raw median). Measured f64 n=1024 floors, GF/s:
+    //   mc96 kc320 nc2048 = 55.4 (median floor) / 83.9 (best min) -- winner
+    //   mc72 kc256 nc2048 = 52.3 / 80.0
+    //   mc48 kc256 nc2048 = 47.9 / 92.5   mc48 kc192 nc2048 = 41.2 / 78.0
+    //   mc72 kc256 nc4080 = 39.2 (the prior {72,256,4080} default) / 64.6
+    // Full 24-point MC{48,72,96,144} x KC{192,256,320} x NC{2048,4080} grid is in
+    // benchmarks/results/tuning/sweep_zpicy.json. Runtime-settable so the sweep
+    // walks the grid in one process; re-sweep when the machine or toolchain moves.
+    static blocking b{96, 320, 2048};
     return b;
 }
 
