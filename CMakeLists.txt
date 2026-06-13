@@ -64,6 +64,24 @@ else()
   target_compile_options(_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O3;-Wall;-Wextra>)
   set_source_files_properties(${FME_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+
+  # libatomic on GCC/Clang. The MC/KC/NC sweep hook publishes its triple through
+  # a std::atomic<blocking> (gemm_blis.cpp); blocking is three int64 (24 bytes),
+  # which is NOT lock-free on x86. GCC lowers a non-lock-free std::atomic to
+  # __atomic_load/__atomic_store libcalls that live in libatomic, but does so
+  # NON-deterministically: depending on inlining it sometimes emits an inline
+  # cmpxchg16b instead and needs no library. When it emits the libcalls and
+  # libatomic is not linked, _core.so has undefined __atomic_store/__atomic_load
+  # and fails to import (caught only by a from-clean GCC build -- a prior build
+  # happened to inline and imported fine, which is exactly the flakiness). Link
+  # libatomic when present so the libcall path always resolves; it is a no-op when
+  # GCC inlines. MSVC handles the 16-byte atomic intrinsically, so this is the
+  # GNU/Clang branch only. find_library keeps it portable (no hard -latomic on a
+  # toolchain that lacks a separate libatomic).
+  find_library(FME_LIBATOMIC NAMES atomic libatomic.so.1)
+  if (FME_LIBATOMIC)
+    target_link_libraries(_core PRIVATE ${FME_LIBATOMIC})
+  endif()
 endif()
 
 if (FME_ENABLE_CUDA)
