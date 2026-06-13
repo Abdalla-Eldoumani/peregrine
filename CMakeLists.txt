@@ -82,12 +82,14 @@ if (FME_ENABLE_CUDA)
   find_package(CUDAToolkit REQUIRED)
   # probe.cu is the trivial-compile attestation; context.cu is the process-
   # lifetime singleton (streams, mempool, cublas/cublasLt handles, atexit
-  # teardown); gemm_cublas.cu is the f32/f64 cuBLAS GEMM. transfer.cu is
-  # appended by 04-04.
+  # teardown); gemm_cublas.cu is the f32/f64 cuBLAS GEMM; transfer.cu is the
+  # async H2D/D2H + pinned staging cache + device allocator with the OOM
+  # pre-flight (04-04).
   target_sources(_core PRIVATE
     src/cuda/probe.cu
     src/cuda/context.cu
     src/cuda/gemm_cublas.cu
+    src/cuda/transfer.cu
   )
   # _core is created by nanobind_add_module above, before CUDA is enabled, so
   # the global CMAKE_CUDA_ARCHITECTURES default never reached its property and
