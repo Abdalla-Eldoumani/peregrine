@@ -264,10 +264,17 @@ nb::ndarray<nb::array_api> array_dlpack_view(nb::handle self, const Array& arr) 
 // fme.Array. Accepts both f32 and f64 (Open Q3: to_device is just memory; the
 // f64-never-auto-routes rule is a dispatch concern in 04-05, not a to_device
 // rejection). alloc_device pre-flights cudaMemGetInfo; copy_h2d runs on the
-// transfer stream. The H2D is async, but the device buffer is only handed back
-// inside the returned Array -- any later device read (the matmul) is ordered
-// after this copy by being queued behind it, so no host-visible sync is needed
-// here (sync is the D2H/from_device contract, not H2D).
+// transfer stream. The H2D is async on the transfer stream, but cuBLAS runs on
+// the SEPARATE compute stream and the two streams are unordered -- so the buffer
+// must be fully resident before it is handed back, or a later GEMM on compute
+// can read an operand whose H2D copy has not landed (a cross-stream
+// use-before-ready race: compute-sanitizer --track-stream-ordered-races all
+// reports it as use-before-alloc and the GEMM returns garbage under
+// instrumentation). sync_transfer() after the copy makes the operand ready
+// before any compute-stream op can touch it, symmetric to from_device's
+// D2H-before-return sync. A pure H2D (no compute consumer) would not strictly
+// need it, but to_device's whole purpose is to feed the device GEMM, so the
+// fence belongs here at the residency boundary.
 template <typename T>
 Array* to_device_typed(
     const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a) {
@@ -280,13 +287,16 @@ Array* to_device_typed(
 
     fme::cuda::DeviceBuffer buf{nullptr, rows, cols, dt};
     {
-        // Drop the GIL around the allocation + copy: alloc_device and copy_h2d
-        // touch no Python object. a.data() stays valid -- nanobind holds the
-        // ndarray alive across the call -- and the copy reads from it on the
-        // transfer stream.
+        // Drop the GIL around the allocation + copy + sync: alloc_device,
+        // copy_h2d, and sync_transfer touch no Python object. a.data() stays
+        // valid -- nanobind holds the ndarray alive across the call -- and the
+        // copy reads from it on the transfer stream.
         nb::gil_scoped_release release;
         buf.ptr = fme::cuda::alloc_device(bytes);
         fme::cuda::copy_h2d(buf.ptr, a.data(), bytes);
+        // Fence the transfer stream so the operand is fully resident before the
+        // returned Array can be read by a GEMM on the unordered compute stream.
+        fme::cuda::sync_transfer();
     }
     return new Array(buf);
 }
@@ -347,13 +357,25 @@ Array* matmul_device(const Array& a, const Array& b) {
 
     fme::cuda::DeviceBuffer out{nullptr, d.m, d.n, dt};
     {
-        // Drop the GIL around the alloc + device GEMM. gemm<T> launches on the
-        // compute stream and the operands' buffers were filled by to_device on
-        // the transfer stream; cuBLAS reads them correctly because the buffers
-        // are complete (to_device's H2D is queued before this call, and the
-        // result is consumed only through a later from_device that syncs).
+        // Drop the GIL around the alloc + device GEMM + syncs: none touch a
+        // Python object. The ordering is the correctness contract here, NOT an
+        // accident of which stream wins a race:
+        //   - The operands were made resident by to_device's sync_transfer, so
+        //     cuBLAS on the compute stream can read them.
+        //   - The output buffer is allocated on the TRANSFER stream
+        //     (alloc_device), but the GEMM writes it on the COMPUTE stream, and
+        //     the two streams are unordered -- so sync_transfer() fences the
+        //     allocation complete before the GEMM can write the buffer (without
+        //     it, compute-sanitizer --track-stream-ordered-races all flags the
+        //     GEMM's writes as use-before-alloc).
+        //   - sync_compute() after the GEMM fences the result fully written
+        //     before the Array crosses back to Python, the compute-side twin of
+        //     from_device's D2H sync.
         nb::gil_scoped_release release;
         out.ptr = fme::cuda::alloc_device(out_bytes);
+        // Fence the output allocation (transfer stream) before the GEMM writes it
+        // on the unordered compute stream.
+        fme::cuda::sync_transfer();
         // Route through the dispatch tier, not cuda::gemm directly: the
         // device-resident routing decision (and the f64-never-AUTO-routes rule it
         // documents) belongs in src/dispatch. Both operands are already an
@@ -371,6 +393,10 @@ Array* matmul_device(const Array& a, const Array& b) {
                 static_cast<const float*>(b.buf.ptr),
                 static_cast<float*>(out.ptr), d.m, d.k, d.n);
         }
+        // Fence the GEMM complete: the output buffer is fully written before the
+        // result Array is usable (a from_device on it must see the finished
+        // product, not a half-written buffer).
+        fme::cuda::sync_compute();
     }
     return new Array(out);
 }
