@@ -3,6 +3,7 @@
 
 #include "core/common.hpp"
 #include "cpu/feature_detect.hpp"
+#include "cpu/gemm_blis.hpp"
 #include "dispatch/dispatch.hpp"
 
 namespace nb = nanobind;
@@ -48,6 +49,28 @@ NB_MODULE(_core, m) {
         d["avx2"] = f.avx2;
         d["fma"] = f.fma;
         d["avx512f"] = f.avx512f;
+        return d;
+    });
+
+    // Private blocking hooks for the MC/KC/NC sweep. MC, KC, NC are loop bounds,
+    // not unroll factors, so mutating them at runtime lets benchmarks/sweep_blocking.py
+    // walk the whole grid in one process instead of forcing a rebuild per point.
+    // Underscore-private: these are a measurement tool, not part of the public API,
+    // and changing blocking shifts results bitwise within tolerance (KC repartitions
+    // each element's k accumulation), so they must never be reached on a result path.
+    m.def("_set_gemm_blocking", [](int64_t mc, int64_t kc, int64_t nc) {
+        fme::cpu::blocking& b = fme::cpu::current_blocking();
+        b.mc = mc;
+        b.kc = kc;
+        b.nc = nc;
+    });
+
+    m.def("_get_gemm_blocking", [] {
+        const fme::cpu::blocking& b = fme::cpu::current_blocking();
+        nb::dict d;
+        d["mc"] = b.mc;
+        d["kc"] = b.kc;
+        d["nc"] = b.nc;
         return d;
     });
 
