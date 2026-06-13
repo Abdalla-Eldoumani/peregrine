@@ -35,6 +35,73 @@ nb::ndarray<nb::numpy, T, nb::ndim<2>> matmul_typed(
     return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
 }
 
+// Zero-copy in, owned (n, m) copy out: the same capsule pattern as matmul with
+// the output extents swapped. transpose deliberately returns an owned buffer,
+// not a view, so a caller can never alias the input through the result.
+template <typename T>
+nb::ndarray<nb::numpy, T, nb::ndim<2>> transpose_typed(
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a) {
+
+    const int64_t m = static_cast<int64_t>(a.shape(0));
+    const int64_t n = static_cast<int64_t>(a.shape(1));
+
+    T* out = new T[static_cast<size_t>(m) * static_cast<size_t>(n)];
+    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+
+    {
+        nb::gil_scoped_release release;
+        fme::dispatch::transpose<T>(a.data(), out, m, n);
+    }
+
+    const size_t shape[2] = {static_cast<size_t>(n), static_cast<size_t>(m)};
+    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+}
+
+// Full reduction: returns the scalar in the input dtype. nanobind marshals it
+// to a Python float; the wrapper casts it back to the result dtype (f32 round
+// trips losslessly through a double-precision Python float). No allocation, so
+// no capsule, but the GIL still drops around the kernel for consistency and to
+// keep a large reduction from blocking other host threads.
+template <typename T>
+T sum_all_typed(
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a) {
+
+    const int64_t m = static_cast<int64_t>(a.shape(0));
+    const int64_t n = static_cast<int64_t>(a.shape(1));
+
+    T result;
+    {
+        nb::gil_scoped_release release;
+        result = fme::dispatch::sum_all<T>(a.data(), m, n);
+    }
+    return result;
+}
+
+// Axis reduction into an owned 1-D buffer: length n for axis 0 (reduce over
+// rows), length m for axis 1 (reduce over columns). The wrapper validates axis
+// is 0 or 1 before calling, so the binding trusts it and the int crosses
+// plainly; None-handling and the axis error wording live in the wrapper.
+template <typename T>
+nb::ndarray<nb::numpy, T, nb::ndim<1>> sum_axis_typed(
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a,
+    int axis) {
+
+    const int64_t m = static_cast<int64_t>(a.shape(0));
+    const int64_t n = static_cast<int64_t>(a.shape(1));
+    const int64_t len = (axis == 0) ? n : m;
+
+    T* out = new T[static_cast<size_t>(len)];
+    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+
+    {
+        nb::gil_scoped_release release;
+        fme::dispatch::sum_axis<T>(a.data(), out, m, n, axis);
+    }
+
+    const size_t shape[1] = {static_cast<size_t>(len)};
+    return nb::ndarray<nb::numpy, T, nb::ndim<1>>(out, 1, shape, owner);
+}
+
 } // namespace
 
 NB_MODULE(_core, m) {
@@ -42,6 +109,17 @@ NB_MODULE(_core, m) {
 
     m.def("matmul", &matmul_typed<double>, nb::arg("a"), nb::arg("b"));
     m.def("matmul", &matmul_typed<float>, nb::arg("a"), nb::arg("b"));
+
+    // double before float in every set: the first matching overload wins, and a
+    // float64 array must never bind the float32 overload (a silent narrowing).
+    m.def("transpose", &transpose_typed<double>, nb::arg("a"));
+    m.def("transpose", &transpose_typed<float>, nb::arg("a"));
+
+    m.def("sum_all", &sum_all_typed<double>, nb::arg("a"));
+    m.def("sum_all", &sum_all_typed<float>, nb::arg("a"));
+
+    m.def("sum_axis", &sum_axis_typed<double>, nb::arg("a"), nb::arg("axis"));
+    m.def("sum_axis", &sum_axis_typed<float>, nb::arg("a"), nb::arg("axis"));
 
     m.def("cpu_features", [] {
         const auto& f = fme::cpu::detect();
