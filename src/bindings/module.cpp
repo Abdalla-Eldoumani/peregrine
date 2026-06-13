@@ -65,6 +65,16 @@ cuda_device_info device_probe();
 template <typename T>
 float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
                   int reps, int warmups);
+
+// time_fused_chain: the cudaEvent-timed warm fused CHAIN (the FUSE-05 measurement
+// primitive plan 05 consumes). x, y, z are DEVICE pointers; the timed region runs
+// the 3-op chain axpby->fma3->scaled_relu (three launches per iteration) on
+// compute-stream scratch -- no transfer. Forward-declared CUDA-free so the
+// event/stream body stays in fused.cu and no CUDA header reaches this TU. Returns
+// warm elapsed ms per rep for the whole chain.
+template <typename T>
+float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
+                       int warmups);
 } // namespace fme::cuda
 
 namespace fme::dispatch {
@@ -75,6 +85,18 @@ namespace fme::dispatch {
 // in the dispatch tier. CUDA-free signature (pointers + int64), forward-declared.
 template <typename T>
 void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
+
+// The device-resident fused routing entries (06-04): x, y, z, out are DEVICE
+// pointers. The binding's device fused Array overloads call THESE rather than
+// cuda::fused_* directly, so the routing stays in the dispatch tier (symmetric to
+// matmul_device). CUDA-free signatures, forward-declared; fused.cu's explicit
+// instantiations satisfy them across the TU boundary.
+template <typename T>
+void fused_axpby_device(const T* x, const T* y, T* out, int64_t n, T a, T b);
+template <typename T>
+void fused_fma3_device(const T* x, const T* y, const T* z, T* out, int64_t n);
+template <typename T>
+void fused_scaled_relu_device(const T* x, T* out, int64_t n, T scale);
 } // namespace fme::dispatch
 #endif
 
@@ -535,6 +557,172 @@ float time_matmul_entry(const Array& x, const Array& y, int reps, int warmups) {
     }
     return ms;
 }
+
+// The device-resident fused ops: device-in/device-out, fme.Array -> fme.Array.
+// Each mirrors matmul_device's Array overload (validate, checked_bytes,
+// alloc_device, GIL release, route via the dispatch tier) but is SIMPLER: the
+// output buffer is allocated on the COMPUTE stream and the kernel runs on the
+// SAME compute stream, so there is NO transfer->compute cross-stream fence to add
+// (matmul_device fences because it allocs the output on the transfer stream; the
+// fused path stays single-stream by construction, which is exactly why v1 fused
+// is device-resident-only -- it removes the 04-07 race surface entirely). The
+// wrapper sends only all-fme.Array same-residency operands here; a dtype/shape
+// mismatch raises shape_error -> ValueError rather than computing garbage. The
+// same-shape rule (no broadcast) is the wrapper's guarantee, so these validate
+// only dtype + exact rows/cols equality across operands.
+
+// Allocate an output device buffer of the same shape/dtype on the compute stream.
+// alloc_device pre-flights cudaMemGetInfo and allocates from the context mempool;
+// it runs on the transfer stream internally, so the caller fences with
+// sync_transfer before the compute-stream kernel reads/writes it -- the one fence
+// the single-stream fused path needs is the alloc-before-kernel ordering, the same
+// transfer->compute boundary matmul_device fences. checked_bytes guards the int64
+// element-count -> byte-count product first (WR-02).
+Array* fused_axpby_device_entry(const Array& x, const Array& y, double a,
+                                double b) {
+    if (x.buf.dtype != y.buf.dtype) {
+        throw fme::shape_error("axpby: device operands must have the same dtype");
+    }
+    if (x.buf.rows != y.buf.rows || x.buf.cols != y.buf.cols) {
+        throw fme::shape_error(
+            "axpby: device operands must have the same shape");
+    }
+    const fme::cuda::DType dt = x.buf.dtype;
+    const int64_t rows = x.buf.rows;
+    const int64_t cols = x.buf.cols;
+    const int64_t n = rows * cols;
+    const int64_t out_bytes =
+        fme::checked_bytes(rows, cols, fme::cuda::dtype_size(dt));
+
+    fme::cuda::DeviceBuffer out{nullptr, rows, cols, dt};
+    {
+        nb::gil_scoped_release release;
+        out.ptr = fme::cuda::alloc_device(out_bytes);
+        // Fence the output allocation (transfer stream) before the kernel writes
+        // it on the compute stream, then run the kernel; sync_compute fences the
+        // result fully written before the Array crosses back to Python.
+        fme::cuda::sync_transfer();
+        if (dt == fme::cuda::DType::f64) {
+            fme::dispatch::fused_axpby_device<double>(
+                static_cast<const double*>(x.buf.ptr),
+                static_cast<const double*>(y.buf.ptr),
+                static_cast<double*>(out.ptr), n, a, b);
+        } else {
+            fme::dispatch::fused_axpby_device<float>(
+                static_cast<const float*>(x.buf.ptr),
+                static_cast<const float*>(y.buf.ptr),
+                static_cast<float*>(out.ptr), n, static_cast<float>(a),
+                static_cast<float>(b));
+        }
+        fme::cuda::sync_compute();
+    }
+    return new Array(out);
+}
+
+Array* fused_fma3_device_entry(const Array& x, const Array& y, const Array& z) {
+    if (x.buf.dtype != y.buf.dtype || x.buf.dtype != z.buf.dtype) {
+        throw fme::shape_error("fma3: device operands must have the same dtype");
+    }
+    if (x.buf.rows != y.buf.rows || x.buf.cols != y.buf.cols ||
+        x.buf.rows != z.buf.rows || x.buf.cols != z.buf.cols) {
+        throw fme::shape_error("fma3: device operands must have the same shape");
+    }
+    const fme::cuda::DType dt = x.buf.dtype;
+    const int64_t rows = x.buf.rows;
+    const int64_t cols = x.buf.cols;
+    const int64_t n = rows * cols;
+    const int64_t out_bytes =
+        fme::checked_bytes(rows, cols, fme::cuda::dtype_size(dt));
+
+    fme::cuda::DeviceBuffer out{nullptr, rows, cols, dt};
+    {
+        nb::gil_scoped_release release;
+        out.ptr = fme::cuda::alloc_device(out_bytes);
+        fme::cuda::sync_transfer();
+        if (dt == fme::cuda::DType::f64) {
+            fme::dispatch::fused_fma3_device<double>(
+                static_cast<const double*>(x.buf.ptr),
+                static_cast<const double*>(y.buf.ptr),
+                static_cast<const double*>(z.buf.ptr),
+                static_cast<double*>(out.ptr), n);
+        } else {
+            fme::dispatch::fused_fma3_device<float>(
+                static_cast<const float*>(x.buf.ptr),
+                static_cast<const float*>(y.buf.ptr),
+                static_cast<const float*>(z.buf.ptr),
+                static_cast<float*>(out.ptr), n);
+        }
+        fme::cuda::sync_compute();
+    }
+    return new Array(out);
+}
+
+Array* fused_scaled_relu_device_entry(const Array& x, double scale) {
+    const fme::cuda::DType dt = x.buf.dtype;
+    const int64_t rows = x.buf.rows;
+    const int64_t cols = x.buf.cols;
+    const int64_t n = rows * cols;
+    const int64_t out_bytes =
+        fme::checked_bytes(rows, cols, fme::cuda::dtype_size(dt));
+
+    fme::cuda::DeviceBuffer out{nullptr, rows, cols, dt};
+    {
+        nb::gil_scoped_release release;
+        out.ptr = fme::cuda::alloc_device(out_bytes);
+        fme::cuda::sync_transfer();
+        if (dt == fme::cuda::DType::f64) {
+            fme::dispatch::fused_scaled_relu_device<double>(
+                static_cast<const double*>(x.buf.ptr),
+                static_cast<double*>(out.ptr), n, scale);
+        } else {
+            fme::dispatch::fused_scaled_relu_device<float>(
+                static_cast<const float*>(x.buf.ptr),
+                static_cast<float*>(out.ptr), n, static_cast<float>(scale));
+        }
+        fme::cuda::sync_compute();
+    }
+    return new Array(out);
+}
+
+// The cudaEvent-timed device fused CHAIN timer (the FUSE-05 primitive plan 05
+// consumes). Three device-resident operands x, y, z; the timed region is the 3-op
+// chain axpby->fma3->scaled_relu (three launches/iter) on compute-stream scratch
+// -- no transfer. Same dtype + same-shape validation as the fused device entries
+// (a mismatch is a shape_error -> ValueError, never a fake measurement). The GIL
+// drops around the whole warmup + timed run; time_fused_chain itself allocates the
+// scratch buffers and creates/destroys the events. This is the exact 3-operand
+// signature plan 05's _cuda_time_fused(...) call binds to.
+float time_fused_chain_entry(const Array& x, const Array& y, const Array& z,
+                             int reps, int warmups) {
+    if (x.buf.dtype != y.buf.dtype || x.buf.dtype != z.buf.dtype) {
+        throw fme::shape_error(
+            "time_fused: device operands must have the same dtype");
+    }
+    if (x.buf.rows != y.buf.rows || x.buf.cols != y.buf.cols ||
+        x.buf.rows != z.buf.rows || x.buf.cols != z.buf.cols) {
+        throw fme::shape_error(
+            "time_fused: device operands must have the same shape");
+    }
+    const fme::cuda::DType dt = x.buf.dtype;
+    const int64_t n = x.buf.rows * x.buf.cols;
+
+    float ms = 0.0f;
+    {
+        nb::gil_scoped_release release;
+        if (dt == fme::cuda::DType::f64) {
+            ms = fme::cuda::time_fused_chain<double>(
+                static_cast<const double*>(x.buf.ptr),
+                static_cast<const double*>(y.buf.ptr),
+                static_cast<const double*>(z.buf.ptr), n, reps, warmups);
+        } else {
+            ms = fme::cuda::time_fused_chain<float>(
+                static_cast<const float*>(x.buf.ptr),
+                static_cast<const float*>(y.buf.ptr),
+                static_cast<const float*>(z.buf.ptr), n, reps, warmups);
+        }
+    }
+    return ms;
+}
 #endif
 
 } // namespace
@@ -736,6 +924,30 @@ NB_MODULE(_core, m) {
     // the CUDA build (it times a device GEMM), absent on the OFF build.
     m.def("_cuda_time_matmul", &time_matmul_entry, nb::arg("x"), nb::arg("y"),
           nb::arg("reps"), nb::arg("warmups"));
+
+    // The device-resident fused ops, registered as Array overloads AFTER the host
+    // ndarray overloads above (axpby/fma3/scaled_relu) so a host operand binds the
+    // CPU path and an fme.Array operand binds these. device-in/device-out ->
+    // fme.Array. The wrapper routes here only when every operand is an fme.Array
+    // (06-04's _fused_residency "device" branch); single-stream, no cross-stream
+    // fence (the v1 device-resident-only design). a, b, scale arrive as Python
+    // floats (double); the f32 path narrows them, like the CPU axpby/scaled_relu.
+    m.def("axpby", &fused_axpby_device_entry, nb::arg("x"), nb::arg("y"),
+          nb::arg("a"), nb::arg("b"));
+    m.def("fma3", &fused_fma3_device_entry, nb::arg("x"), nb::arg("y"),
+          nb::arg("z"));
+    m.def("scaled_relu", &fused_scaled_relu_device_entry, nb::arg("x"),
+          nb::arg("scale"));
+
+    // The cudaEvent-timed device fused CHAIN timer (FUSE-05 primitive plan 05
+    // consumes). Three device-resident fme.Array operands, so the timed region is
+    // the 3-op chain only -- no transfer. Returns warm elapsed ms per rep for the
+    // whole axpby->fma3->scaled_relu chain. Underscore-private: a measurement tool
+    // the bench reaches through _core, not public surface. Defined only on the CUDA
+    // build, absent on OFF. This 3-operand (x, y, z, reps, warmups) signature is
+    // exactly what plan 05's _cuda_time_fused(...) call binds to.
+    m.def("_cuda_time_fused", &time_fused_chain_entry, nb::arg("x"), nb::arg("y"),
+          nb::arg("z"), nb::arg("reps"), nb::arg("warmups"));
 #endif
 
     nb::register_exception_translator([](const std::exception_ptr& p, void*) {
