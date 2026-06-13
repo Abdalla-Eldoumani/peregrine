@@ -24,6 +24,8 @@ nanobind_add_module(_core STABLE_ABI NB_STATIC
   src/cpu/microkernel_avx2_f64.cpp
   src/cpu/microkernel_avx2_f32.cpp
   src/cpu/gemm_blis.cpp
+  src/cpu/fused_avx2.cpp
+  src/cpu/fused_naive.cpp
   src/cpu/transpose.cpp
   src/cpu/reduce.cpp
   src/dispatch/dispatch.cpp
@@ -31,17 +33,19 @@ nanobind_add_module(_core STABLE_ABI NB_STATIC
 target_include_directories(_core PRIVATE src)
 target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
 
-# AVX2 codegen is confined to exactly these four kernel translation units. The
-# arch flag is deliberately absent at target level: AVX2 instructions in a TU
-# that the no-AVX2 fallback path links produce a module that executes an illegal
+# AVX2 codegen is confined to exactly these kernel translation units. The arch
+# flag is deliberately absent at target level: AVX2 instructions in a TU that the
+# no-AVX2 fallback path links produce a module that executes an illegal
 # instruction at import on a CPU without AVX2 (the legacy import crash). The
-# feature_detect, gemm_naive, dispatch, and module TUs must stay free of AVX2
-# codegen so the fallback path runs everywhere.
+# feature_detect, gemm_naive, fused_naive, dispatch, and module TUs must stay
+# free of AVX2 codegen so the fallback path runs everywhere; fused_naive.cpp is
+# the fused fallback and is kept OUT of this list on purpose.
 set(FME_AVX2_SOURCES
   src/cpu/pack.cpp
   src/cpu/microkernel_avx2_f64.cpp
   src/cpu/microkernel_avx2_f32.cpp
   src/cpu/gemm_blis.cpp
+  src/cpu/fused_avx2.cpp
 )
 
 if (MSVC)
