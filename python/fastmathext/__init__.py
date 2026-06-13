@@ -22,6 +22,11 @@ _REJECT = frozenset(
     map(np.dtype, ("bool", "float16", "complex64", "complex128", "object"))
 )
 
+# The dtypes the native kernel takes directly, with no promotion. A pair already
+# on one of these, both 2-D and C-contiguous, needs none of the policy chain, so
+# the fast path forwards it to the kernel untouched.
+_ACCEPTED = frozenset(map(np.dtype, ("float32", "float64")))
+
 
 def _prepare(x, name: str) -> np.ndarray:
     arr = np.asarray(x)
@@ -86,6 +91,30 @@ def matmul(a, b, *, out=None) -> np.ndarray:
     """
     if out is not None:
         raise NotImplementedError("matmul: out= is not implemented yet")
+
+    # Fast path (CPU-06): when both operands are already 2-D C-contiguous
+    # ndarrays of the same accepted float dtype, np.asarray, np.result_type, and
+    # np.ascontiguousarray are all no-ops that only cost time, so skip the whole
+    # chain and hand the kernel the arrays as-is. At n=8 the skipped helpers are
+    # ~1.8 us, the entire 2x-NumPy budget, so this branch is what makes the small
+    # win reachable rather than an optimization. It is a pre-branch, not a
+    # replacement: any operand that is not an ndarray, not 2-D, not C-contiguous,
+    # or a different/unaccepted dtype falls through to the full policy chain
+    # below, which keeps the exact rejection, promotion, and error contract. The
+    # native call still raises ValueError on mismatched inner dimensions, so the
+    # shape contract holds here too. No copy is made: a qualifying input is
+    # already contiguous, so the kernel takes a zero-copy view of it.
+    if (
+        type(a) is np.ndarray
+        and type(b) is np.ndarray
+        and a.ndim == 2
+        and b.ndim == 2
+        and a.dtype == b.dtype
+        and a.dtype in _ACCEPTED
+        and a.flags.c_contiguous
+        and b.flags.c_contiguous
+    ):
+        return _matmul_native(a, b)
 
     a_arr = _prepare(a, "a")
     b_arr = _prepare(b, "b")
