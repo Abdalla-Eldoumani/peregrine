@@ -6,7 +6,17 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
+#include <atomic>
+
 namespace fme::cuda {
+
+// True once the atexit teardown() has begun destroying the context streams and
+// handles (defined in context.cu). free_device (transfer.cu) reads it so an
+// Array still alive at interpreter finalization frees nothing rather than calling
+// cudaFreeAsync on the by-then-destroyed transfer stream -- a post-teardown free
+// is a no-op (the driver reclaims the mempool at exit), never a dead-stream
+// access. Atomic because GC at shutdown and teardown are not otherwise ordered.
+extern std::atomic<bool> g_torn_down;
 
 // The process-lifetime CUDA context. One instance exists for the whole process,
 // built once on first use (see context() below) and torn down via atexit.
