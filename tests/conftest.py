@@ -1,7 +1,17 @@
 """Shared pytest infrastructure: hypothesis profiles, the slow marker, the
-machine manifest header, and the two toleranced comparison paths in the suite,
-assert_matmul_close and its reduction sibling assert_reduce_close. An inline
-rtol/atol anywhere else is a defect.
+machine manifest header, and the three toleranced comparison paths in the suite,
+assert_matmul_close, its reduction sibling assert_reduce_close, and its fused
+elementwise sibling assert_fused_close. An inline rtol/atol anywhere else is a
+defect.
+
+The fused contract (assert_fused_close) is the third path, for the elementwise
+fused ops (axpby, fma3, scaled_relu). It is NOT k-scaled and carries no
+accumulation term: elementwise is O(1) flops per element, so the bound is a few
+ULPs, |got - ref| <= rtol*|ref| + subnormal floor (f64 rtol 1e-12, f32 8*eps32)
+against the unfused NumPy expression in the same dtype. fma3's true single
+rounding can be closer to truth than unfused NumPy's two roundings; the two-sided
+bound allows that on the accurate side. The full clause lives in the helper
+docstring.
 
 The reduction contract (assert_reduce_close) is linear in the reduced count r
 and scaled by S, the sum of magnitudes along the reduced axis, not a product of
@@ -339,4 +349,63 @@ def assert_reduce_close(got, ref, a, axis, kind="sum"):
             f"{diff.size} elements: max abs diff {float(diff.max(initial=0.0)):.3e}, "
             f"worst element diff {float(diff.flat[worst]):.3e} vs bound "
             f"{float(bound.flat[worst]):.3e} (r={r}, S={scale:.3e}, atol={atol:.3e})"
+        )
+
+
+def assert_fused_close(got, ref):
+    """Assert an elementwise fused result matches ref under the suite tolerance.
+
+    The third toleranced path, sibling of assert_matmul_close and
+    assert_reduce_close, for the fused elementwise ops (axpby, fma3,
+    scaled_relu). Elementwise is O(1) flops per element with no cross-element
+    accumulation, so the bound is a few ULPs and carries NO k or S scaling:
+
+        |got - ref| <= rtol * |ref| + floor
+        f64: rtol = 1e-12,     floor = smallest subnormal
+        f32: rtol = 8 * eps32, floor = smallest subnormal32
+
+    Pass the UNFUSED NumPy expression in the same dtype as ref (a*x + b*y for
+    axpby, x*y + z for fma3, maximum(scale*x, 0) for scaled_relu). fma3 uses a
+    true single-rounding FMA, so it can land closer to the real-number result
+    than the two-rounding unfused NumPy expression; the bound is two-sided, so a
+    fma3 result that is at least as accurate as unfused NumPy stays within it on
+    the accurate side, never flagged for being more accurate. Special values are
+    exact: NaN positions, Inf positions, and each Inf's sign must match
+    positionally; the tolerance then covers the mutually finite remainder only.
+    """
+    assert got.shape == ref.shape, f"shape mismatch: {got.shape} vs {ref.shape}"
+    assert got.dtype == ref.dtype, f"dtype mismatch: {got.dtype} vs {ref.dtype}"
+
+    if not (np.isfinite(got).all() and np.isfinite(ref).all()):
+        np.testing.assert_array_equal(np.isnan(got), np.isnan(ref))
+        np.testing.assert_array_equal(np.isinf(got), np.isinf(ref))
+        inf_positions = np.isinf(ref)
+        # value equality at the inf positions checks each inf's sign
+        np.testing.assert_array_equal(got[inf_positions], ref[inf_positions])
+        finite = np.isfinite(got) & np.isfinite(ref)
+        got = got[finite]
+        ref = ref[finite]
+        if got.size == 0:
+            return
+
+    # O(1) flops/element: a few ULPs at the operands' own scale, NOT the k-scaled
+    # matmul bound nor the S-scaled reduction bound. The subnormal floor exists
+    # for the same reason as in those clauses: without it the relative term
+    # collapses to a vacuous rtol-only check for a deep-denormal reference. The
+    # diff and bound are computed in float64 so an f32 op near its overflow edge
+    # does not wrap the bound arithmetic itself.
+    if got.dtype == np.float64:
+        rtol, floor = 1e-12, SMALLEST_SUBNORMAL
+    else:
+        rtol, floor = 8 * EPS32, SMALLEST_SUBNORMAL32
+    diff = np.abs(got.astype(np.float64) - ref.astype(np.float64))
+    bound = rtol * np.abs(ref.astype(np.float64)) + floor
+    ok = diff <= bound
+    if not ok.all():
+        worst = int(np.argmax(diff - bound))
+        raise AssertionError(
+            f"fused contract violated at {int((~ok).sum())} of {diff.size} "
+            f"elements: max abs diff {float(diff.max(initial=0.0)):.3e}, "
+            f"worst element diff {float(diff.flat[worst]):.3e} vs bound "
+            f"{float(bound.flat[worst]):.3e} (rtol={rtol:.3e}, floor={floor:.3e})"
         )
