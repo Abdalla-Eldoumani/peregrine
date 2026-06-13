@@ -24,6 +24,8 @@ nanobind_add_module(_core STABLE_ABI NB_STATIC
   src/cpu/microkernel_avx2_f64.cpp
   src/cpu/microkernel_avx2_f32.cpp
   src/cpu/gemm_blis.cpp
+  src/cpu/transpose.cpp
+  src/cpu/reduce.cpp
   src/dispatch/dispatch.cpp
 )
 target_include_directories(_core PRIVATE src)
