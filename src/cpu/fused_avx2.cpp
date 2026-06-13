@@ -59,27 +59,6 @@ inline T relu_nan_safe_scalar(T sx) {
 
 } // namespace
 
-// Declare the float/double specializations BEFORE the primary template below.
-// fused.hpp carries `extern template` declarations for these, which is an
-// instantiation declaration; without these specialization declarations preceding
-// the primary template definition, GCC treats the primary template as the
-// instantiation point and then rejects the `template <>` definitions further down
-// as "specialization after instantiation" ([temp.expl.spec]/6). MSVC accepts the
-// out-of-order form silently, so the WSL/GCC build is the only place this surfaces.
-// Declaring them here makes the AVX2 specializations visible before first use.
-template <>
-void fused_axpby<float>(const float*, const float*, float*, int64_t, float, float);
-template <>
-void fused_axpby<double>(const double*, const double*, double*, int64_t, double, double);
-template <>
-void fused_fma3<float>(const float*, const float*, const float*, float*, int64_t);
-template <>
-void fused_fma3<double>(const double*, const double*, const double*, double*, int64_t);
-template <>
-void fused_scaled_relu<float>(const float*, float*, int64_t, float);
-template <>
-void fused_scaled_relu<double>(const double*, double*, int64_t, double);
-
 template <typename T>
 void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b) {
 #if defined(_OPENMP)
