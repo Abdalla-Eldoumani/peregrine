@@ -26,6 +26,14 @@ struct blocking {
     int64_t mc, kc, nc;
 };
 
-blocking& current_blocking();
+// The blocking triple is published and consumed as one atomic unit. The sweep
+// hook (_set_gemm_blocking) holds the GIL but the kernel reads blocking after
+// releasing it, so a field-by-field write would let a GIL-free reader observe a
+// torn (mc-new, nc-old) triple and size a buffer for one MC while looping for
+// another. store_blocking publishes the whole struct in one atomic store;
+// load_blocking takes a coherent snapshot. gemm_blis calls load_blocking once at
+// entry into locals, so a concurrent store cannot change the loop bounds mid-run.
+void store_blocking(blocking b) noexcept;
+blocking load_blocking() noexcept;
 
 } // namespace fme::cpu
