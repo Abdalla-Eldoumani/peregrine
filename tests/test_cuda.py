@@ -242,21 +242,83 @@ def test_tf32_off_by_default_matches_contract(tmp_path):
 
 
 @gpu
-def test_roundtrip_placeholder():
-    # GPU-03: to_device -> from_device preserves bytes. 04-04.
-    assert fme.has_cuda_build() is True
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_to_from_device_roundtrip(dtype):
+    # GPU-03 / GPU-04: to_device copies a host array up to an fme.Array, from_device
+    # copies it back (D2H on the transfer stream, synced before the return). A pure
+    # copy must round-trip byte-IDENTICAL: this is a transfer, not a computation, so
+    # exact equality is the right assertion (assert_matmul_close is for the kernel
+    # path, not for a memcpy). Both dtypes -- to_device accepts f64 too (it is just
+    # memory; the f64-never-auto-routes rule is a dispatch concern, 04-05). Rectangular
+    # so a row/col swap in the shape plumbing would surface.
+    a = np.random.default_rng(20260613).standard_normal((7, 5)).astype(dtype)
+    x = fme._core.to_device(a)
+    assert x.shape == a.shape
+    assert x.dtype == np.dtype(dtype)
+    b = fme._core.from_device(x)
+    assert np.array_equal(a, b), "round-trip must preserve bytes exactly"
 
 
 @gpu
-def test_residency_placeholder():
-    # GPU-03: matmul(Array, Array) -> Array; mixed residency raises TypeError. 04-04.
-    assert fme.has_cuda_build() is True
+def test_from_device_returns_ndarray():
+    # GPU-03: from_device returns a numpy.ndarray, not an fme.Array -- the
+    # residency-out type (ndarray in -> ndarray out). The device handle does not
+    # leak back out of from_device.
+    a = np.ones((3, 4), dtype=np.float32)
+    b = fme._core.from_device(fme._core.to_device(a))
+    assert isinstance(b, np.ndarray)
+    assert not isinstance(b, type(fme._core.to_device(a)))
 
 
 @gpu
-def test_transfer_placeholder():
-    # GPU-04: async H2D/D2H with event sync before the host return. 04-04.
-    assert fme.has_cuda_build() is True
+def test_dlpack_device_is_cuda():
+    # GPU-03: the fme.Array dlpack export reports a CUDA device. __dlpack_device__
+    # returns (device_type, device_id); the DLPack enum for CUDA is kDLCUDA == 2.
+    # __dlpack__ produces a dlpack-protocol object whose capsule is a "dltensor" on
+    # that CUDA device. We assert the device tag and the capsule, NOT a
+    # numpy.from_dlpack zero-copy: numpy has no device memory and cannot pull a CUDA
+    # dltensor (RESEARCH line 271), and a device-aware consumer (cupy/torch) is not
+    # required to be installed.
+    a = np.ones((4, 4), dtype=np.float32)
+    x = fme._core.to_device(a)
+
+    dev_type, dev_id = x.__dlpack_device__()
+    assert dev_type == 2, f"expected kDLCUDA (2), got {dev_type}"
+    assert dev_id == 0
+
+    # nanobind's array_api export returns an nb_ndarray that is itself a dlpack
+    # producer; its __dlpack__ yields the actual PyCapsule named "dltensor". Reach
+    # through one optional layer so the assertion holds whether __dlpack__ returns
+    # the capsule directly or the producer object.
+    exported = x.__dlpack__()
+    capsule = exported.__dlpack__() if hasattr(exported, "__dlpack__") else exported
+    assert "dltensor" in repr(capsule), f"expected a dltensor capsule, got {capsule!r}"
+
+
+@gpu
+def test_device_matmul_roundtrip():
+    # GPU-03 (the REQUIRED device-resident entry): matmul(Array, Array) -> Array,
+    # device-in/device-out. to_device both f32 operands, run the device GEMM on the
+    # device buffers (no host staging), assert the result is an fme.Array, then
+    # from_device it and compare to NumPy through assert_matmul_close (the single
+    # toleranced path; f32 is judged against the f64 ground truth exactly like the
+    # CPU suite). This proves gemm (04-03) + transfers + the device matmul entry
+    # compose end to end on device buffers -- the entry 04-05's wrapper layers
+    # residency semantics on top of. Rectangular k so a wrong leading dimension
+    # would show as a value error, not hide behind a square shape.
+    rng = np.random.default_rng(20260614)
+    a = rng.standard_normal((33, 17)).astype(np.float32)
+    b = rng.standard_normal((17, 29)).astype(np.float32)
+
+    xa = fme._core.to_device(a)
+    xb = fme._core.to_device(b)
+    xc = fme._core.matmul(xa, xb)
+    assert type(xc) is type(xa), "device matmul must return an fme.Array"
+    assert xc.shape == (33, 29)
+
+    got = fme._core.from_device(xc)
+    assert isinstance(got, np.ndarray)
+    assert_matmul_close(got, a @ b, a, b)
 
 
 @gpu
