@@ -14,13 +14,22 @@ namespace nb = nanobind;
 
 #if defined(FME_HAS_CUDA)
 namespace fme::cuda {
-// Forward declaration of the CUDA-free entry point defined in src/cuda/context.cu.
-// Declared here rather than via #include "cuda/context.cuh" on purpose: that
-// header pulls in cuda_runtime.h/cublas, and a CUDA header in this TU would break
-// the deletable-src/cuda invariant and the OFF build. The return type
-// fme::cuda_device_info is CUDA-free (core/common.hpp), so the forward
-// declaration alone is enough to call across the TU boundary.
+// Forward declarations of the CUDA-free entry points defined in src/cuda.
+// Declared here rather than via #include "cuda/context.cuh"/"cuda/gemm_cublas.cuh"
+// on purpose: those headers pull in cuda_runtime.h/cublas, and a CUDA header in
+// this TU would break the deletable-src/cuda invariant and the OFF build. The
+// signatures use only CUDA-free types (fme::cuda_device_info from
+// core/common.hpp, plain pointers and int64), so the forward declarations alone
+// are enough to call across the TU boundary.
 cuda_device_info context_device_info();
+
+// gemm_host: host-pointer GEMM convenience (allocates device buffers, copies up,
+// runs the device gemm, copies the result back, syncs). The device-resident
+// matmul on fme.Array lands in 04-04; this entry exists so the GPU-02
+// correctness suite has a callable host->device->host path now. Templated in
+// src/cuda; the explicit float/double instantiations there satisfy these.
+template <typename T>
+void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 } // namespace fme::cuda
 #endif
 
@@ -118,6 +127,38 @@ nb::ndarray<nb::numpy, T, nb::ndim<1>> sum_axis_typed(
     return nb::ndarray<nb::numpy, T, nb::ndim<1>>(out, 1, shape, owner);
 }
 
+#if defined(FME_HAS_CUDA)
+// Host-pointer device GEMM for the GPU-02 correctness suite: same zero-copy-in,
+// capsule-owned-out shape as matmul_typed, but the kernel is the cuBLAS device
+// GEMM which stages the host operands to the device, computes, and copies back.
+// Underscore-private and CUDA-build-only: the public device path is matmul on
+// fme.Array (04-04); this exists so f32/f64 GPU correctness can be proven now,
+// against the same assert_matmul_close tolerance contract the CPU path uses.
+template <typename T>
+nb::ndarray<nb::numpy, T, nb::ndim<2>> gemm_host_typed(
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a,
+    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& b) {
+
+    const fme::gemm_dims d = fme::check_matmul_dims(
+        static_cast<int64_t>(a.shape(0)), static_cast<int64_t>(a.shape(1)),
+        static_cast<int64_t>(b.shape(0)), static_cast<int64_t>(b.shape(1)));
+
+    T* out = new T[static_cast<size_t>(d.m) * static_cast<size_t>(d.n)];
+    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+
+    {
+        // Drop the GIL around the staging + launch + sync, as for the CPU
+        // kernel: gemm_host touches no Python object and syncs the stream before
+        // it returns, so the result is fully in out by the time we reacquire.
+        nb::gil_scoped_release release;
+        fme::cuda::gemm_host<T>(a.data(), b.data(), out, d.m, d.k, d.n);
+    }
+
+    const size_t shape[2] = {static_cast<size_t>(d.m), static_cast<size_t>(d.n)};
+    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+}
+#endif
+
 } // namespace
 
 NB_MODULE(_core, m) {
@@ -196,6 +237,12 @@ NB_MODULE(_core, m) {
         d["reason"] = i.reason;
         return d;
     });
+
+    // double before float, like every other overload set: a float64 array must
+    // never bind the float32 overload (a silent narrowing). Private and
+    // CUDA-only; the public device matmul lands in 04-04.
+    m.def("_gemm_host", &gemm_host_typed<double>, nb::arg("a"), nb::arg("b"));
+    m.def("_gemm_host", &gemm_host_typed<float>, nb::arg("a"), nb::arg("b"));
 #endif
 
     nb::register_exception_translator([](const std::exception_ptr& p, void*) {
