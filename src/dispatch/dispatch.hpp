@@ -36,6 +36,28 @@ extern template void matmul_device<float>(const float*, const float*, float*, in
 extern template void matmul_device<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 #endif
 
+// Fused elementwise ops over a flat n-element buffer. Unlike transpose/sum_*
+// (one plain TU each, direct forward), fused has an AVX2 fast path AND a scalar
+// fallback, so these route like matmul: avx2 && fma -> cpu::fused_*<T>, else
+// cpu::fused_*_naive<T>. Both dtypes route normally -- there is no
+// f64-never-auto-routes exclusion (that is a GEMM-only, GPU-only rule). Scalars
+// a/b/scale are in the operand type T.
+template <typename T>
+void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b);
+
+template <typename T>
+void fused_fma3(const T* x, const T* y, const T* z, T* out, int64_t n);
+
+template <typename T>
+void fused_scaled_relu(const T* x, T* out, int64_t n, T scale);
+
+extern template void fused_axpby<float>(const float*, const float*, float*, int64_t, float, float);
+extern template void fused_axpby<double>(const double*, const double*, double*, int64_t, double, double);
+extern template void fused_fma3<float>(const float*, const float*, const float*, float*, int64_t);
+extern template void fused_fma3<double>(const double*, const double*, const double*, double*, int64_t);
+extern template void fused_scaled_relu<float>(const float*, float*, int64_t, float);
+extern template void fused_scaled_relu<double>(const double*, double*, int64_t, double);
+
 // transpose, sum_all, and sum_axis route through the same entry point. They
 // have one CPU implementation each (a plain, non-AVX2 TU that runs on every
 // CPU), so the routing is a direct forward today; keeping them behind dispatch
