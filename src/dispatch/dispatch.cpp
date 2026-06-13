@@ -5,6 +5,18 @@
 #include "cpu/reduce.hpp"
 #include "cpu/transpose.hpp"
 
+#if defined(FME_HAS_CUDA)
+namespace fme::cuda {
+// Forward-declared, not #included: gemm_cublas.cuh is itself CUDA-free, but the
+// forward-declare matches the binding discipline (04-03/04-04) and keeps this TU
+// from depending on any src/cuda header path. The explicit float/double
+// instantiations in gemm_cublas.cu satisfy these. gemm runs the PURE device GEMM
+// on the compute stream (no host staging, no sync).
+template <typename T>
+void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
+} // namespace fme::cuda
+#endif
+
 namespace fme::dispatch {
 
 template <typename T>
@@ -25,6 +37,27 @@ void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 
 template void matmul<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 template void matmul<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
+
+#if defined(FME_HAS_CUDA)
+template <typename T>
+void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
+    // Device-in/device-out: a, b, c are device pointers, so this is a pure
+    // forward to the cuBLAS GEMM on the compute stream -- no host staging, no
+    // sync (the binding owns the result's lifetime; from_device syncs when it
+    // crosses back to host). f32 and f64 both forward to gemm<T>: f64 is the
+    // FORCED device-resident path (both operands were explicitly to_device'd),
+    // which is allowed and correct, just slow. The f64-never-AUTO-routes
+    // exclusion (CLAUDE.md rule 2) is NOT enforced by rejecting f64 here -- a
+    // forced f64 must compute -- but UPSTREAM, by the wrapper/binding never
+    // selecting this device path for a host f64 array. Auto-routing a host f64
+    // to the GPU would be the rule-2 bug; routing an already-device-resident f64
+    // is the user's explicit choice. Pure: no warnings/logging/fallback.
+    cuda::gemm<T>(a, b, c, m, k, n);
+}
+
+template void matmul_device<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
+template void matmul_device<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
+#endif
 
 // transpose and the two sum entries have one CPU implementation each, valid on
 // every CPU, so they forward directly. No avx2/naive branch: unlike matmul
