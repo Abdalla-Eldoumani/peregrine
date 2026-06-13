@@ -1,5 +1,6 @@
 #include "dispatch/dispatch.hpp"
 #include "cpu/feature_detect.hpp"
+#include "cpu/fused.hpp"
 #include "cpu/gemm_blis.hpp"
 #include "cpu/gemm_naive.hpp"
 #include "cpu/reduce.hpp"
@@ -58,6 +59,51 @@ void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n
 template void matmul_device<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 template void matmul_device<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 #endif
+
+// Fused elementwise host entries. Same branch as matmul (the features are
+// memoized at import and fold in FME_DISABLE_AVX2, so a forced fallback routes
+// here exactly as a CPU without AVX2 would): the AVX2 body when the CPU has
+// avx2+fma, the scalar fallback otherwise. The AVX2 and naive bodies share each
+// op's signature, so the call crosses the TU boundary with no adapter and no
+// AVX2 codegen leaking into this fallback-linked unit. Pure features-in/path-out,
+// no side effects. There is no f64 exclusion -- fused never auto-routes to the
+// GPU, so both dtypes take the CPU branch here unconditionally.
+template <typename T>
+void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b) {
+    const auto& f = cpu::detect();
+    if (f.avx2 && f.fma) {
+        cpu::fused_axpby<T>(x, y, out, n, a, b);
+        return;
+    }
+    cpu::fused_axpby_naive<T>(x, y, out, n, a, b);
+}
+
+template <typename T>
+void fused_fma3(const T* x, const T* y, const T* z, T* out, int64_t n) {
+    const auto& f = cpu::detect();
+    if (f.avx2 && f.fma) {
+        cpu::fused_fma3<T>(x, y, z, out, n);
+        return;
+    }
+    cpu::fused_fma3_naive<T>(x, y, z, out, n);
+}
+
+template <typename T>
+void fused_scaled_relu(const T* x, T* out, int64_t n, T scale) {
+    const auto& f = cpu::detect();
+    if (f.avx2 && f.fma) {
+        cpu::fused_scaled_relu<T>(x, out, n, scale);
+        return;
+    }
+    cpu::fused_scaled_relu_naive<T>(x, out, n, scale);
+}
+
+template void fused_axpby<float>(const float*, const float*, float*, int64_t, float, float);
+template void fused_axpby<double>(const double*, const double*, double*, int64_t, double, double);
+template void fused_fma3<float>(const float*, const float*, const float*, float*, int64_t);
+template void fused_fma3<double>(const double*, const double*, const double*, double*, int64_t);
+template void fused_scaled_relu<float>(const float*, float*, int64_t, float);
+template void fused_scaled_relu<double>(const double*, double*, int64_t, double);
 
 // transpose and the two sum entries have one CPU implementation each, valid on
 // every CPU, so they forward directly. No avx2/naive branch: unlike matmul
