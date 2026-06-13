@@ -33,11 +33,13 @@ if os.name == "nt":
         except OSError:
             pass
 
+from . import policy
 from ._core import _has_cuda_build, cpu_features
 from ._core import matmul as _matmul_native
 from ._core import sum_all as _sum_all_native
 from ._core import sum_axis as _sum_axis_native
 from ._core import transpose as _transpose_native
+from .calibrate import calibrate
 
 # Device-side entries exist only on the CUDA build. Import them behind the build
 # flag so the OFF build imports cleanly; bind Array to a private sentinel class
@@ -72,6 +74,8 @@ __all__ = [
     "transpose",
     "sum",
     "mean",
+    "calibrate",
+    "set_backend",
     "to_device",
     "from_device",
     "Array",
@@ -165,6 +169,21 @@ _MIXED_RESIDENCY_MSG = (
 _cuda_fallback_lock = threading.Lock()
 _cuda_fallback_warned = False
 
+# The active dispatch backend: "auto" runs the measured policy, "cpu"/"cuda"
+# force that side. Read ONCE here at import from FME_BACKEND (the env hook the
+# design doc names, mirroring FME_CACHE_DIR) defaulting to "auto", and validated
+# against policy.BACKENDS so an out-of-set value can never reach choose_backend.
+# This is a plain os.environ.get plus a membership test: microseconds, NO device
+# probe and NO cache read, so the <50ms import budget holds (the probe runs only
+# inside set_backend at call time, the cache read only on first dispatch). An
+# invalid FME_BACKEND degrades to "auto" rather than raising at import: a bad env
+# var must not make the package unimportable, and "auto" is the safe default. A
+# bad value passed to set_backend at runtime DOES raise (the caller asked for it
+# explicitly), so the strict-vs-lenient split is by who set it.
+_backend = os.environ.get("FME_BACKEND", "auto")
+if _backend not in policy.BACKENDS:
+    _backend = "auto"
+
 
 def _cuda_error_name(exc: Exception) -> str:
     """Extract the cuda error name from a native cuda_error message.
@@ -228,6 +247,68 @@ def has_cuda() -> bool:
     # handles, or mempool), so importing fastmathext pays nothing for it and the
     # <50ms import budget holds.
     return _cuda_unavailable_reason() == ""
+
+
+def set_backend(name: str) -> None:
+    """Set the dispatch backend for the rest of the session.
+
+    Overrides how matmul routes a host array pair. ``"auto"`` (the default, and
+    the value at import unless FME_BACKEND says otherwise) runs the measured
+    per-machine policy: a host float32 product routes to the GPU only when the
+    calibrated crossover says the device wins after the host<->device transfer is
+    paid, and float64 never auto-routes to the GPU. ``"cpu"`` forces every product
+    onto the CPU. ``"cuda"`` forces a host float32 product onto the GPU (via a
+    host->device staging copy), and raises immediately if no usable CUDA device is
+    present, so the failure surfaces here at the set rather than later mid-matmul.
+
+    This is one of only two functions that change global state (the other is
+    calibrate). It sets a process-wide module global; it does not build a CUDA
+    context, read the calibration cache, or run any measurement, so it is cheap
+    and the cache read still happens lazily on the first dispatch.
+
+    Parameters
+    ----------
+    name : {"auto", "cpu", "cuda"}
+        The backend to use. ``"auto"`` consults the policy; ``"cpu"`` and
+        ``"cuda"`` force that side.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If ``name`` is not one of ``"auto"``, ``"cpu"``, or ``"cuda"``.
+    RuntimeError
+        If ``name`` is ``"cuda"`` but no usable CUDA device is available; the
+        message is ``"cuda backend requested but <reason>"`` (no build, no device,
+        or driver too old), the same token to_device raises.
+
+    Examples
+    --------
+    >>> import fastmathext as fme
+    >>> fme.set_backend("cpu") is None
+    True
+    >>> fme.set_backend("auto") is None
+    True
+    """
+    if name not in policy.BACKENDS:
+        raise ValueError(
+            f"set_backend: unknown backend {name!r}, "
+            f"expected one of {', '.join(policy.BACKENDS)}"
+        )
+    if name == "cuda":
+        # Validate device availability HERE, at the explicit request, reusing the
+        # exact token to_device raises (__init__.py to_device): a forced "cuda"
+        # with no usable device is a hard error, not a silent CPU fallback -- the
+        # caller asked for the GPU by name. The reason ("no build" / "no device" /
+        # "driver too old") comes from _cuda_unavailable_reason unchanged.
+        reason = _cuda_unavailable_reason()
+        if reason:
+            raise RuntimeError(f"cuda backend requested but {reason}")
+    global _backend
+    _backend = name
 
 
 def to_device(a) -> Array:
