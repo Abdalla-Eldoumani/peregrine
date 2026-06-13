@@ -48,11 +48,21 @@ if (MSVC)
   # /openmp:llvm because the legacy /openmp runtime is OpenMP 2.0 and rejects
   # modern pragmas. No /fp:fast: it changes NaN and Inf semantics and the
   # library promises NumPy-matching results.
-  target_compile_options(_core PRIVATE /O2 /openmp:llvm /permissive- /W4)
+  #
+  # Fenced behind COMPILE_LANGUAGE:CXX so these MSVC host flags reach only the
+  # .cpp TUs. nvcc rejects a raw /permissive- on its own command line ("a single
+  # input file is required for a non-link phase"); host flags for .cu files must
+  # go through -Xcompiler, which nvcc adds itself. On a CXX-only (CUDA OFF)
+  # target the generator expression is true for every TU, so the OFF build sees
+  # byte-identical flags.
+  target_compile_options(_core PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:/O2;/openmp:llvm;/permissive-;/W4>)
   set_source_files_properties(${FME_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
-  # No -ffast-math for the same reason.
-  target_compile_options(_core PRIVATE -O3 -Wall -Wextra)
+  # No -ffast-math for the same reason. CXX-fenced for the same nvcc reason as
+  # the MSVC branch (and a no-op difference on the CUDA-OFF Linux/CI build).
+  target_compile_options(_core PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-O3;-Wall;-Wextra>)
   set_source_files_properties(${FME_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
 endif()
 
@@ -75,6 +85,14 @@ if (FME_ENABLE_CUDA)
   target_sources(_core PRIVATE
     src/cuda/probe.cu
   )
+  # _core is created by nanobind_add_module above, before CUDA is enabled, so
+  # the global CMAKE_CUDA_ARCHITECTURES default never reached its property and
+  # generate fails with "CUDA_ARCHITECTURES is empty for target _core". Set the
+  # arch (and the matching C++20 standard) on the existing target explicitly.
+  set_target_properties(_core PROPERTIES
+    CUDA_ARCHITECTURES 86
+    CUDA_STANDARD 20
+    CUDA_STANDARD_REQUIRED ON)
   target_compile_definitions(_core PRIVATE FME_HAS_CUDA=1)
   target_link_libraries(_core PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
 endif()
