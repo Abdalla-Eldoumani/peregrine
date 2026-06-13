@@ -106,12 +106,16 @@ if (FME_ENABLE_CUDA)
   # lifetime singleton (streams, mempool, cublas/cublasLt handles, atexit
   # teardown); gemm_cublas.cu is the f32/f64 cuBLAS GEMM; transfer.cu is the
   # async H2D/D2H + pinned staging cache + device allocator with the OOM
-  # pre-flight (04-04).
+  # pre-flight (04-04); fused.cu is the hand-written grid-stride/float4 fused
+  # elementwise kernels (axpby/fma3/scaled_relu) + the time_fused_chain timer
+  # (06-04), device-resident only (the one place the project ships custom CUDA
+  # kernels; GEMM is cuBLAS-only).
   target_sources(_core PRIVATE
     src/cuda/probe.cu
     src/cuda/context.cu
     src/cuda/gemm_cublas.cu
     src/cuda/transfer.cu
+    src/cuda/fused.cu
   )
   # _core is created by nanobind_add_module above, before CUDA is enabled, so
   # the global CMAKE_CUDA_ARCHITECTURES default never reached its property and
