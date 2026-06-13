@@ -39,6 +39,15 @@ from ._core import matmul as _matmul_native
 from ._core import sum_all as _sum_all_native
 from ._core import sum_axis as _sum_axis_native
 from ._core import transpose as _transpose_native
+
+# calibrate() is re-exported as the public fme.calibrate. The binding is explicit
+# (not left to attribute fallthrough) BECAUSE a submodule named calibrate exists:
+# `from .calibrate import calibrate` binds the FUNCTION into the package namespace,
+# shadowing the submodule so `fme.calibrate(...)` is the callable the design doc
+# names, not the module. calibrate.py runs nothing at import (no measurement, no
+# device init -- it only defines functions and imports stdlib + this package), so
+# this costs a one-time module compile and nothing measurable on the hot path; the
+# cache read and any measurement stay lazy (calibrate() body / first dispatch).
 from .calibrate import calibrate
 
 # Device-side entries exist only on the CUDA build. Import them behind the build
@@ -394,6 +403,82 @@ def _matmul_cpu_fallback(a, b):
     return matmul(_from_device_native(a), _from_device_native(b))
 
 
+def _matmul_gpu_staged(a, b):
+    # Route a HOST array pair to the GPU by staging through the existing Phase-4
+    # entries: H2D both operands (to_device, synced at the boundary), the device
+    # matmul(Array, Array), then D2H the result (from_device, synced) back to a
+    # host ndarray. Minimal-risk by reuse -- no new native code, no new sanitizer
+    # surface; the three Python crossings are exactly the staging overhead the
+    # policy already counted when it chose this path. a and b are already
+    # promotion-/contiguity-normalized host ndarrays (the caller normalizes before
+    # routing), so this only moves bytes and computes.
+    #
+    # The body is wrapped in the SAME warn-once fallback as the device-resident
+    # path (the _cuda_fallback_lock / _cuda_fallback_warned mechanism), shared
+    # intentionally: the "falling back to cpu for this session" contract is
+    # process-wide, so whichever GPU path fails first claims the single warning
+    # and every later failure (device-resident or host-staged) silently falls
+    # back. On any CUDA runtime failure here, recompute on the HOST arrays a, b
+    # directly via the normal host chain -- NOT _matmul_cpu_fallback, which
+    # from_devices its operands (those are device Arrays; a and b here are host).
+    try:
+        xa = _to_device_native(a)
+        xb = _to_device_native(b)
+        xc = _matmul_native(xa, xb)
+        return _from_device_native(xc)
+    except RuntimeError as exc:
+        global _cuda_fallback_warned
+        with _cuda_fallback_lock:
+            should_warn = not _cuda_fallback_warned
+            _cuda_fallback_warned = True
+        if should_warn:
+            name = _cuda_error_name(exc)
+            warnings.warn(
+                f"cuda matmul failed ({name}), "
+                "falling back to cpu for this session",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        # Host operands: recompute on the host chain directly. _normalize already
+        # ran upstream, so a, b are accepted-dtype C-contiguous ndarrays and the
+        # fast path forwards them to the CPU kernel untouched.
+        return _matmul_native(a, b)
+
+
+def _host_backend_for(a_arr, b_arr) -> str:
+    # Decide CPU vs GPU for a normalized HOST pair, honoring the module-global
+    # _backend. "cpu" forces the CPU; "cuda" forces the GPU staging path (its
+    # device availability was validated when set_backend("cuda") was called, so a
+    # runtime failure here falls back via the warn-once block). "auto" consults
+    # the measured policy -- but only when a usable device actually exists: with
+    # no GPU the policy can only return "cpu" (no "gpu" series in any cache it
+    # could read), so short-circuit to skip the signature build and the cache read
+    # entirely. This is what keeps the OFF build (and any no-GPU machine) on the
+    # existing CPU fast path with zero added I/O, and it is why a bare import pays
+    # nothing: the cache is read here, on the FIRST dispatch that could route to a
+    # present GPU, never at import.
+    if _backend == "cpu":
+        return "cpu"
+    if _backend == "cuda":
+        return "cuda"
+    # auto
+    if not has_cuda():
+        return "cpu"
+    # A device is present: read the calibration cache lazily (first such dispatch)
+    # and let the pure policy decide per measured (dtype, n) crossover, paying the
+    # H2D+D2H round trip for a host pair. f64 never reaches the GPU -- the policy
+    # hardcodes the FP64 trap, so the wrapper does not special-case it here.
+    from .calibrate import _machine_signature
+
+    calibration = policy._load_cache(policy._cache_path(), _machine_signature())
+    dtype = a_arr.dtype.name
+    m, k = a_arr.shape
+    n = b_arr.shape[1]
+    return policy.choose_backend(
+        dtype, m, k, n, residency="host", calibration=calibration, backend="auto"
+    )
+
+
 def matmul(a, b, *, out=None):
     """Matrix product of two 2-D arrays.
 
@@ -483,12 +568,16 @@ def matmul(a, b, *, out=None):
             return _matmul_native(a, b)
         except RuntimeError as exc:
             # The native cuda_error arm maps every FME_CUDA_CHECK / cuBLAS / OOM
-            # failure to RuntimeError carrying the cuda error NAME. In auto mode
-            # this is recoverable: warn once with the verbatim fallback token
-            # (the cuda op and error name come from the message) and recompute on
-            # the CPU. A forced backend (set_backend("cuda")) that must NOT fall
-            # back is Phase 5; this phase has no forced-backend API wired, so the
-            # auto path is the only reachable one and it always falls back.
+            # failure to RuntimeError carrying the cuda error NAME. This is
+            # recoverable: warn once with the verbatim fallback token (the cuda op
+            # and error name come from the message) and recompute on the CPU. The
+            # warn-once flag below is SHARED with the host-staging path
+            # (_matmul_gpu_staged): whichever GPU path fails first this session
+            # claims the single warning, by design (the "for this session" contract
+            # is process-wide). Both the auto policy and a forced set_backend("cuda")
+            # reach a device GEMM, and both fall back here on a runtime device
+            # failure -- the forced choice still degrades rather than crashing mid
+            # matmul, since set_backend already validated availability at the set.
             global _cuda_fallback_warned
             # Atomic check-then-set under the lock (WR-05) so exactly one thread
             # ever sees the flag as unset and wins the warning, even when several
@@ -531,6 +620,15 @@ def matmul(a, b, *, out=None):
         and a.flags.c_contiguous
         and b.flags.c_contiguous
     ):
+        # The pair is already a normalized host ndarray pair, so route it on the
+        # module-global backend (Phase 5). _host_backend_for is "cpu" in one cheap
+        # comparison when _backend is "cpu" OR when auto sees no usable device --
+        # the OFF build and any no-GPU machine pay only that test and fall straight
+        # into the existing CPU kernel call, so the fast path stays a no-overhead
+        # pre-branch. A GPU route only happens for a host f32 pair the policy (or a
+        # forced set_backend("cuda")) sends to the device.
+        if _host_backend_for(a, b) == "cuda":
+            return _matmul_gpu_staged(a, b)
         return _matmul_native(a, b)
 
     a_arr = _prepare(a, "a")
@@ -556,7 +654,16 @@ def matmul(a, b, *, out=None):
             )
         common = np.dtype(np.float64)
 
-    return _matmul_native(_normalize(a_arr, common), _normalize(b_arr, common))
+    # Normalize to the promoted dtype + C-contiguity, THEN route on the backend
+    # (the staging path needs accepted-dtype contiguous host operands, which these
+    # now are). Same backend decision as the fast path: CPU unless a present GPU's
+    # measured crossover (or a forced "cuda") wins for this host f32 pair. The CPU
+    # route is byte-identical to the prior single _matmul_native call.
+    a_norm = _normalize(a_arr, common)
+    b_norm = _normalize(b_arr, common)
+    if _host_backend_for(a_norm, b_norm) == "cuda":
+        return _matmul_gpu_staged(a_norm, b_norm)
+    return _matmul_native(a_norm, b_norm)
 
 
 def transpose(a) -> np.ndarray:
