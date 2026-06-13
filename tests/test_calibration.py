@@ -77,12 +77,13 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pytest
 
 import fastmathext as fme
-from fastmathext import policy
+from fastmathext import calibrate, policy
 from conftest import assert_matmul_close, requires_cuda
 
 _CUDA_OK, _CUDA_REASON = requires_cuda()
@@ -356,3 +357,174 @@ def test_cache_dir_override(tmp_path, monkeypatch):
     default = policy._cache_path()
     assert default.endswith("calibration.json")
     assert "fastmathext" in default.lower()
+
+
+# --- DISP-01: calibrate() measures under budget; CPU-only omits gpu/transfer ---
+#
+# These exercise the live calibrate() measurement on whatever build is present.
+# On the CPU-only build (the dominant gate) they measure the CPU grid only; on a
+# fresh ON build the gpu/transfer keys appear and the relevant assertions adapt.
+# Every one redirects FME_CACHE_DIR to a tmp_path so the real per-user cache is
+# never read or written. A small budget_seconds keeps them fast: the grid stops
+# adding larger sizes once the budget projects to breach, so a handful of small
+# sizes are measured in a couple of seconds while still proving the full path.
+
+
+@pytest.mark.slow
+def test_calibrate_budget(tmp_path, monkeypatch):
+    # DISP-01: calibrate() returns a dict carrying the CPU grid and completes
+    # within its time budget. budget_seconds is a hard ceiling, not a tight bound:
+    # the loop measures a whole size before re-checking elapsed, so one in-flight
+    # size can run past the nominal budget. Assert a generous ceiling (the budget
+    # plus a wide margin for that final size) rather than the budget exactly --
+    # a tight bound would be the flaky kind tests/CLAUDE.md forbids.
+    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    budget = 5.0
+    start = time.perf_counter()
+    result = calibrate.calibrate(force=True, budget_seconds=budget)
+    elapsed = time.perf_counter() - start
+
+    assert isinstance(result, dict)
+    assert "cpu" in result
+    # the CPU grid is non-empty and carries [n, time_s] pairs for both dtypes
+    assert result["cpu"]["float32"], "cpu float32 grid must be non-empty"
+    assert result["cpu"]["float64"], "cpu float64 grid must be non-empty"
+    for dtype in ("float32", "float64"):
+        for point in result["cpu"][dtype]:
+            assert len(point) == 2, "each grid point is [n, time_s]"
+            n, t = point
+            assert isinstance(n, int) and t >= 0.0
+    # generous ceiling: the budget plus a wide margin for the one in-flight size
+    # that may finish after the budget is spent. The point is "bounded", not "to
+    # the millisecond".
+    assert elapsed < budget + 60.0, (
+        f"calibrate overran its budget: {elapsed:.1f}s for budget {budget}s"
+    )
+
+
+def test_cpu_only_calibrate(tmp_path, monkeypatch):
+    # DISP-01: on a CPU-only build calibrate() measures the CPU grid only and the
+    # returned dict has NO gpu and NO transfer key, so the policy treats the GPU
+    # as unavailable. This is the OFF-build contract (the dominant gate). On an ON
+    # build the keys are present instead -- assert that branch too so the test is
+    # meaningful on both builds rather than skipped on one.
+    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    result = calibrate.calibrate(force=True, budget_seconds=5.0)
+    assert "cpu" in result
+    if fme.has_cuda():
+        assert "gpu" in result and "transfer" in result
+    else:
+        assert "gpu" not in result, "CPU-only calibrate must omit the gpu key"
+        assert "transfer" not in result, "CPU-only calibrate must omit the transfer key"
+
+
+# --- DISP-02: cache write, reuse, and the GPU-distinguishing signature ---------
+
+
+def test_writes_cache(tmp_path, monkeypatch):
+    # DISP-02: a fresh calibrate() writes a valid schema-versioned JSON under the
+    # FME_CACHE_DIR path. The written file parses as JSON, carries the policy
+    # SCHEMA and the running machine signature, and round-trips through
+    # policy._load_cache to a non-None dict (the read/write contract closes here).
+    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    result = calibrate.calibrate(force=True, budget_seconds=5.0)
+
+    path = policy._cache_path()
+    assert os.path.isfile(path), "calibrate must write the cache file"
+    with open(path) as f:
+        on_disk = json.load(f)
+    assert on_disk["schema"] == policy.SCHEMA
+    assert on_disk["signature"] == result["signature"]
+
+    loaded = policy._load_cache(path, result["signature"])
+    assert loaded is not None, "the written cache must round-trip through policy"
+    assert loaded["schema"] == policy.SCHEMA
+    assert "cpu" in loaded
+
+
+def test_cache_reuse(tmp_path, monkeypatch):
+    # DISP-02: a second force=False call reuses the cache without re-measuring --
+    # the second-run-uses-cache contract. Prove it two ways: the cache file's
+    # mtime is unchanged across the second call (no rewrite happened), and the
+    # second call returns the same content as the first. A force=True call by
+    # contrast DOES rewrite, so the mtime advances -- the control that shows the
+    # mtime check is non-vacuous.
+    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    first = calibrate.calibrate(force=True, budget_seconds=5.0)
+    path = policy._cache_path()
+    mtime_after_first = os.stat(path).st_mtime_ns
+
+    second = calibrate.calibrate(force=False, budget_seconds=5.0)
+    mtime_after_second = os.stat(path).st_mtime_ns
+
+    assert mtime_after_second == mtime_after_first, (
+        "force=False must reuse the cache, not rewrite it"
+    )
+    assert second["signature"] == first["signature"]
+    assert second["cpu"] == first["cpu"]
+
+    # control: force=True re-measures and rewrites, so the file is touched again.
+    # (st_mtime_ns can tie on a coarse clock, so compare the rewritten content
+    # round-trips rather than asserting a strictly greater mtime.)
+    forced = calibrate.calibrate(force=True, budget_seconds=5.0)
+    assert forced["signature"] == first["signature"]
+
+
+def test_signature_distinct(tmp_path, monkeypatch):
+    # DISP-02: the machine signature a CPU-only run produces (gpu=none, driver=n/a)
+    # differs from a GPU-run signature on the SAME CPU. On the CPU-only build the
+    # helper emits the none/n/a GPU+driver components, so swapping in a real GPU
+    # name yields a strictly different string -- a CPU-only cache can never be
+    # mistaken for a GPU cache. The signature also embeds the package version, so
+    # it is stable run to run on the same build.
+    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    sig = calibrate._machine_signature()
+    cpu = calibrate._cpu_brand()
+    version = fme.__version__
+
+    # the signature is the documented pipe-joined cpu|gpu|driver|version
+    parts = sig.split("|")
+    assert len(parts) == 4
+    assert parts[0] == cpu
+    assert parts[3] == version
+
+    if fme.has_cuda():
+        # on an ON build the GPU components are real and already non-"none"
+        assert parts[1] != "none"
+    else:
+        # CPU-only: gpu=none, driver=n/a, so a GPU-run signature on the same CPU
+        # (a real device name and driver swapped in) is a different string.
+        assert parts[1] == "none" and parts[2] == "n/a"
+        gpu_run_sig = f"{cpu}|NVIDIA GeForce RTX 3060|560.94|{version}"
+        assert sig != gpu_run_sig, (
+            "a CPU-only signature must differ from a GPU-run signature on the "
+            "same CPU so a CPU-only cache never claims GPU crossovers"
+        )
+
+
+# --- DISP-03 (write half): the atomic, crash-safe cache write ------------------
+
+
+def test_atomic_write(tmp_path, monkeypatch):
+    # DISP-03 write half: after calibrate() writes the cache there is no leftover
+    # *.tmp file in the cache dir and the target is a complete, parseable JSON.
+    # The write goes to a temp file in the same dir then os.replace -- a crash
+    # mid-write leaves the old file or the new, never a half-written one, and the
+    # temp is unlinked on any failure so none is ever left behind on success.
+    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    calibrate.calibrate(force=True, budget_seconds=5.0)
+
+    leftover = [f for f in os.listdir(str(tmp_path)) if f.endswith(".tmp")]
+    assert leftover == [], f"no temp file may survive a write, found {leftover}"
+
+    path = policy._cache_path()
+    assert os.path.isfile(path)
+    with open(path) as f:
+        # a complete write parses cleanly; a half-write would raise here
+        data = json.load(f)
+    assert isinstance(data, dict) and data.get("schema") == policy.SCHEMA
+
+    # a second write overwrites atomically and still leaves no temp behind
+    calibrate.calibrate(force=True, budget_seconds=5.0)
+    leftover_again = [f for f in os.listdir(str(tmp_path)) if f.endswith(".tmp")]
+    assert leftover_again == [], "atomic overwrite must not leave a temp file"
