@@ -44,9 +44,27 @@ finite remainder.
 
 import os
 import platform
+import shutil
+import subprocess
 
 import numpy as np
 from hypothesis import settings
+
+# A CUDA-enabled _core links cublas64_12.dll / cublasLt64_12.dll, which live in
+# the toolkit bin and are NOT found by the secure DLL search Python uses for
+# extension modules on Windows (PATH is ignored there since 3.8). Without this
+# the CUDA build raises "DLL load failed" at import and test_cuda would error at
+# collection instead of skipping cleanly. Best-effort and Windows-only: on the
+# CPU-only build _core has no CUDA dependency so this changes nothing, and a
+# missing CUDA_PATH simply skips. The production package wires its own import-
+# time discovery when has_cuda() lands in 04-05; this is test-harness setup.
+if os.name == "nt":
+    _cuda_bin = os.path.join(os.environ.get("CUDA_PATH", ""), "bin")
+    if _cuda_bin.strip(os.sep) and os.path.isdir(_cuda_bin):
+        try:
+            os.add_dll_directory(_cuda_bin)
+        except OSError:
+            pass
 
 import fastmathext as fme
 
@@ -73,8 +91,75 @@ SMALLEST_SUBNORMAL32 = float(np.finfo(np.float32).smallest_subnormal)
 C_HIGHAM = 4.0
 
 
+def _usable_cuda_device():
+    """Best-effort "is a GPU present" probe that needs no CUDA headers.
+
+    nvidia-smi ships with the driver; a non-empty `-L` listing means a device
+    and a loaded driver. This is deliberately a placeholder: in 04-05 the public
+    fme.has_cuda() runtime chain (build flag, driver load, device count, compute
+    capability >= 7.0) replaces it and requires_cuda is rewritten to call that.
+    Until then a build flag plus this probe is enough to gate the suite so a
+    CPU-only or driverless machine skips instead of erroring.
+    """
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        return False
+    try:
+        out = subprocess.run(
+            [smi, "-L"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and "GPU 0" in out.stdout
+
+
+def requires_cuda():
+    """Return (ok, reason): whether the CUDA path can actually run here.
+
+    ok is True only when _core was built with CUDA AND a usable device is
+    present, so the CUDA suite runs on the GPU build and skips with a stated
+    reason on a CPU-only build or a machine without a device. Every CUDA test
+    consumes this through the module-level skip below so CPU-only and the WSL/GCC
+    clone stay green. Migrates to fme.has_cuda() in 04-05 (this composes the same
+    build-flag + device-present predicate by hand until that public API exists).
+    """
+    if not fme.has_cuda_build():
+        return False, "built without cuda (FME_ENABLE_CUDA=OFF)"
+    if not _usable_cuda_device():
+        return False, "no usable cuda device present"
+    return True, ""
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: long-running property spikes")
+
+
+def _gpu_manifest():
+    """(gpu, driver) for the manifest header, best-effort, never raises.
+
+    Returns ("none", "n/a") when there is no build, no device, or no nvidia-smi,
+    so the header reads identically on CPU-only and WSL. The DESIGN_SYSTEM
+    manifest keys are gpu and driver; this is the test-run provenance line, not a
+    capability gate (requires_cuda is the gate).
+    """
+    if not fme.has_cuda_build():
+        return "none", "n/a"
+    smi = shutil.which("nvidia-smi")
+    if smi is None:
+        return "none", "n/a"
+    try:
+        out = subprocess.run(
+            [smi, "--query-gpu=name,driver_version",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "none", "n/a"
+    if out.returncode != 0 or not out.stdout.strip():
+        return "none", "n/a"
+    first = out.stdout.strip().splitlines()[0]
+    name, _, driver = first.partition(",")
+    return name.strip() or "none", driver.strip() or "n/a"
 
 
 def pytest_report_header(config):
@@ -86,11 +171,13 @@ def pytest_report_header(config):
             f"({d.get('num_threads')} threads)"
             for d in threadpool_info()
         )
+    gpu, driver = _gpu_manifest()
     return [
         f"machine: {platform.platform()} | python {platform.python_version()}",
         f"numpy {np.__version__} | fme {fme.__version__} "
         f"| cpu_features {fme.cpu_features()}",
         f"threadpools: {pools}",
+        f"gpu: {gpu} | driver: {driver}",
     ]
 
 
