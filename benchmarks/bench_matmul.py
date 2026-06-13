@@ -164,6 +164,76 @@ def _bench(fn, reps: int, warmup: int) -> dict:
     }
 
 
+def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
+    # The device-resident GPU f32 series (GPU-08). Gated on has_cuda() so a
+    # CPU-only build or a machine without a usable device simply omits it and the
+    # CPU bench above still runs. Timing CONSUMES fme._core._cuda_time_matmul (the
+    # cudaEvent-timed warm GEMM created in 04-05): operands are device-resident,
+    # the timed region is the GEMM only (no H2D/D2H), so this measures device work,
+    # not a wall-clock around an async launch (which would report nonsense). The
+    # transfer happens ONCE, outside the timed region; cold and warm are both
+    # event-timed (cold = warmups=0/reps=1 before the clocks warm, warm = the
+    # protocol warmups/reps result). verified=true is published only after the
+    # single sanctioned toleranced path (assert_matmul_close) passes -- a bench
+    # that loosens tolerance or times a transfer is a bench that lies.
+    if not fme.has_cuda():
+        return []
+    series = []
+    for n in sizes:
+        rng = np.random.default_rng(0)
+        a = rng.standard_normal((n, n)).astype(np.float32)
+        b = rng.standard_normal((n, n)).astype(np.float32)
+
+        xa = fme.to_device(a)
+        xb = fme.to_device(b)
+
+        # Verify ONCE before any timing, on the single sanctioned toleranced path:
+        # from_device the device result and compare to the NumPy reference. f32 is
+        # judged against the f64 ground truth assert_matmul_close recomputes,
+        # exactly like the CPU suite -- no inline rtol.
+        got = fme.from_device(fme.matmul(xa, xb))
+        assert_matmul_close(got, a @ b, a, b)
+
+        gflop = 2 * n**3 / 1e9
+        # Cold: a single event-timed call before the clocks warm (low-clock first
+        # launch after idle). Warm: the protocol warmups/reps event-timed mean.
+        # Both numbers come from cudaEvent pairs inside _cuda_time_matmul, never
+        # wall-clock; the timed region is transfer-free.
+        cold_ms = fme._core._cuda_time_matmul(xa, xb, 1, 0)
+        warm_ms = fme._core._cuda_time_matmul(xa, xb, reps, warmup)
+        warm_gflops = gflop / (warm_ms / 1e3)
+        # NumPy CPU f32 at the same n, on the wall-clock path (a CPU GEMM is
+        # synchronous, so perf_counter is the honest timer here). This is the
+        # GPU-08 denominator: warm device-resident f32 GFLOP/s vs NumPy CPU f32
+        # GFLOP/s, an f32-vs-f32 ratio independent of the CPU series --dtype.
+        numpy_t = _bench(lambda: a @ b, reps, warmup)
+        numpy_gflops = gflop / numpy_t["median_s"]
+        series.append(
+            {
+                "n": n,
+                "gflop": gflop,
+                "cold_ms": cold_ms,
+                "median_ms": warm_ms,
+                "gflops": warm_gflops,
+                "cold_gflops": gflop / (cold_ms / 1e3),
+                "numpy_cpu_f32_gflops": numpy_gflops,
+                "ratio_vs_numpy_cpu_f32": warm_gflops / numpy_gflops,
+                "reps": reps,
+                "warmup": warmup,
+                # True only because assert_matmul_close passed above. The bench
+                # never publishes a verified-false series (benchmarks/CLAUDE.md).
+                "verified": True,
+            }
+        )
+        print(
+            f"n={n:5d}  gpu  warm {warm_ms:9.3f} ms ({warm_gflops:8.1f} GF/s)"
+            f"  cold {cold_ms:9.3f} ms ({series[-1]['cold_gflops']:8.1f} GF/s)"
+            f"  numpy-cpu-f32 ({numpy_gflops:7.1f} GF/s)"
+            f"  ratio {series[-1]['ratio_vs_numpy_cpu_f32']:.1f}x  (device-resident, transfer excluded)"
+        )
+    return series
+
+
 def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
     dt = np.dtype(dtype)
     results = {"manifest": _machine_manifest(), "dtype": dtype, "cases": []}
@@ -197,6 +267,13 @@ def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
             f"  speedup {case['speedup_vs_numpy']:.2f}x"
             f"  cv {ours['cv']*100:4.1f}%/{numpy_t['cv']*100:4.1f}%"
         )
+    # The device-resident GPU f32 series (GPU-08) runs over the same size grid,
+    # event-timed and transfer-free; omitted cleanly on a CPU-only build or a
+    # machine without a usable device. Reported under its own key so the CPU
+    # cases above are never conflated with device-resident GPU numbers.
+    gpu_cases = _gpu_series(sizes, reps, warmup)
+    if gpu_cases:
+        results["gpu_cases"] = gpu_cases
     return results
 
 
