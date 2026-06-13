@@ -36,17 +36,22 @@ _CUDA_OK, _CUDA_REASON = requires_cuda()
 gpu = pytest.mark.skipif(not _CUDA_OK, reason=_CUDA_REASON)
 
 
-def test_build_flag_smoke():
-    # Runs everywhere, including CPU-only. has_cuda_build is the compile-time
-    # flag; the runtime has_cuda() predicate is introduced in 04-05.
-    assert isinstance(fme.has_cuda_build(), bool)
+def test_has_cuda_runtime():
+    # Runs everywhere, including CPU-only and WSL: the public runtime predicate
+    # must exist and return a bool on every build, the cross-platform half of the
+    # API-04 surface. has_cuda() composes the build flag AND a usable-device probe
+    # (driver, count>0, cc>=7.0); on a CPU-only build it is simply False, never an
+    # exception, so auto-mode code can branch on it without a try/except.
+    assert isinstance(fme.has_cuda(), bool)
 
 
 @gpu
-def test_has_cuda_build_true_on_cuda_build():
-    # Under the gate, reaching here means the build flag and a device are both
-    # present, so the compile-time flag must be True.
-    assert fme.has_cuda_build() is True
+def test_has_cuda_true_on_cuda_build_with_device():
+    # Under the gate, the build flag and a usable device are both present, so the
+    # public runtime predicate must be True. The private build flag is also True
+    # here, but the public surface is has_cuda(); has_cuda_build is gone (API-04).
+    assert fme.has_cuda() is True
+    assert not hasattr(fme, "has_cuda_build")
 
 
 # A CUDA-built _core links cublas64_12.dll / cublasLt64_12.dll from the toolkit
@@ -322,12 +327,145 @@ def test_device_matmul_roundtrip():
 
 
 @gpu
-def test_routing_placeholder():
-    # GPU-05: f32 device-resident routes to GPU; f64 never auto-routes. 04-05.
-    assert fme.has_cuda_build() is True
+def test_mixed_residency_raises():
+    # GPU-06 residency: exactly one device-resident operand is the verbatim
+    # mixed-residency TypeError (DESIGN_SYSTEM.md), never a silent host<->device
+    # transfer. Both operand orders, since the wrapper must reject either side
+    # being the device one.
+    rng = np.random.default_rng(7)
+    a = rng.standard_normal((6, 4)).astype(np.float32)
+    b = rng.standard_normal((4, 5)).astype(np.float32)
+    xa = fme.to_device(a)
+    with pytest.raises(TypeError, match="one input is on cuda and one on cpu"):
+        fme.matmul(xa, b)
+    with pytest.raises(TypeError, match="one input is on cuda and one on cpu"):
+        fme.matmul(a, fme.to_device(b))
 
 
 @gpu
-def test_oom_fallback_placeholder():
-    # GPU-06: forced OOM (alloc > current free) -> warn once -> CPU fallback. 04-05.
-    assert fme.has_cuda_build() is True
+def test_f32_device_routes_to_gpu():
+    # GPU-05: two f32 device-resident operands route to the GPU. The return type
+    # is the proof the device path was taken (residency-out: fme.Array in ->
+    # fme.Array out). from_device of the result then matches NumPy through the
+    # single toleranced path. Rectangular k so a wrong leading dimension surfaces.
+    rng = np.random.default_rng(20260615)
+    k = 37
+    a = rng.standard_normal((29, k)).astype(np.float32)
+    b = rng.standard_normal((k, 41)).astype(np.float32)
+    xc = fme.matmul(fme.to_device(a), fme.to_device(b))
+    assert isinstance(xc, fme.Array), "f32 device-resident matmul must return an fme.Array"
+    assert xc.shape == (29, 41)
+    assert_matmul_close(fme.from_device(xc), a @ b, a, b)
+
+
+@gpu
+def test_f64_never_auto_routes():
+    # GPU-05 hard exclusion (the FP64 trap): a HOST f64 matmul returns an ndarray
+    # computed on the CPU and never silently lands on the GPU (GA106 FP64 is 1/64
+    # FP32, measured slower than this CPU). A forced device-resident f64 (both
+    # operands explicitly to_device'd) is allowed and computes correctly -- forced
+    # is permitted, auto is not. Both arms through assert_matmul_close.
+    rng = np.random.default_rng(20260616)
+    k = 23
+    a = rng.standard_normal((31, k))
+    b = rng.standard_normal((k, 19))
+    assert a.dtype == np.float64 and b.dtype == np.float64
+
+    # Host f64: ndarray out, CPU path. The return TYPE is the assertion that no
+    # auto-route to the GPU happened -- a host f64 never becomes an fme.Array.
+    got = fme.matmul(a, b)
+    assert isinstance(got, np.ndarray)
+    assert not isinstance(got, fme.Array)
+    assert got.dtype == np.float64
+    assert_matmul_close(got, a @ b, a, b)
+
+    # Forced device-resident f64: allowed, computes correctly (slowly). Returns an
+    # fme.Array, proving forced f64 reaches the device path; the exclusion is only
+    # on AUTO-routing a host f64, not on a user's explicit device placement.
+    xc = fme.matmul(fme.to_device(a), fme.to_device(b))
+    assert isinstance(xc, fme.Array)
+    assert_matmul_close(fme.from_device(xc), a @ b, a, b)
+
+
+# Forced-OOM runs in a subprocess so the once-only warn sentinel and the large
+# transient device state are isolated from the rest of the suite (a recurring
+# sentinel would suppress the warning in a later test; the device allocation must
+# be freed on a clean child exit, never wedging the display GPU). The child sizes
+# the allocation against CURRENT free VRAM (nvidia-smi memory.free), NEVER the
+# nominal 6144 (Pitfall 5): free fluctuates with the display. A rank-1 product
+# (K=1) keeps the INPUTS tiny so the OOM fires on the matmul OUTPUT allocation,
+# the path the auto-mode fallback wraps. The child DLL shim is required because a
+# bare interpreter does not load conftest's toolkit-bin registration -- though
+# 04-05 also gives the package its own import-time discovery, the shim stays
+# belt-and-suspenders for a child that imports before any package code runs.
+_OOM_SCRIPT = _CHILD_DLL_SETUP + (
+    "import subprocess, sys, warnings\n"
+    "import numpy as np\n"
+    "import fastmathext as fme\n"
+    # Current free VRAM in bytes, from the driver (not the nominal total).
+    "out = subprocess.run(['nvidia-smi','--query-gpu=memory.free',"
+    "'--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=15)\n"
+    "free_mib = int(out.stdout.strip().splitlines()[0])\n"
+    # Output bytes sized to free + 128MB: safely past alloc_device's 64MB
+    # pre-flight margin so the request reliably exceeds current free and throws
+    # cudaErrorMemoryAllocation, without over-committing far beyond free.
+    "req_bytes = (free_mib + 128) * 1024 * 1024\n"
+    "m = 8\n"
+    "n = int(req_bytes // (m * 4))\n"  # f32 output, (m, n)
+    # Rank-1 inputs: tiny (m + n floats), so to_device succeeds and only the
+    # output (m, n) allocation OOMs. Seeded so the parent need not see the data.
+    "rng = np.random.default_rng(909)\n"
+    "a = rng.standard_normal((m, 1)).astype(np.float32)\n"
+    "b = rng.standard_normal((1, n)).astype(np.float32)\n"
+    "xa = fme.to_device(a)\n"
+    "xb = fme.to_device(b)\n"
+    "with warnings.catch_warnings(record=True) as caught:\n"
+    "    warnings.simplefilter('always')\n"
+    "    got = fme.matmul(xa, xb)\n"
+    # The fallback ran on the CPU: the result is a host ndarray, not an fme.Array.
+    "assert isinstance(got, np.ndarray), type(got)\n"
+    "assert not isinstance(got, fme.Array)\n"
+    # Exactly one warning, carrying the verbatim fallback token with the cuda
+    # error name (cudaErrorMemoryAllocation) inside the parentheses.
+    "msgs = [str(w.message) for w in caught]\n"
+    "fb = [s for s in msgs if 'falling back to cpu for this session' in s]\n"
+    "assert len(fb) == 1, msgs\n"
+    "assert fb[0].startswith('cuda matmul failed ('), fb[0]\n"
+    "assert 'cudaErrorMemoryAllocation' in fb[0], fb[0]\n"
+    # The CPU fallback result is correct: it is the rank-1 outer product. Verify a
+    # small CORNER through the single toleranced path so the check stays cheap
+    # (the full f64 ground truth of a free-sized result would double the memory).
+    "corner = got[:, :64]\n"
+    "ac = a\n"
+    "bc = b[:, :64]\n"
+    "from conftest import assert_matmul_close\n"
+    "assert_matmul_close(corner, ac @ bc, ac, bc)\n"
+    "print('OOM_FALLBACK_OK')\n"
+)
+
+
+@gpu
+def test_forced_oom_warns_once_and_falls_back(tmp_path):
+    # GPU-06: a device-resident f32 matmul whose output allocation exceeds CURRENT
+    # free VRAM raises cudaErrorMemoryAllocation in the native pre-flight, which
+    # the wrapper catches in auto mode, warns ONCE with the verbatim fallback
+    # token, and recomputes on the CPU. The subprocess isolates the warn-once
+    # sentinel and frees the device state on exit (no display wedge). The hard
+    # gates: the warn-once token fired exactly once AND the CPU-fallback result is
+    # correct (a corner verified through assert_matmul_close). The child runs the
+    # whole assertion and prints a sentinel; the parent gates on a clean exit.
+    env = dict(os.environ)  # full env copy: Windows DLL resolution in the child
+    # conftest sets the tests dir on sys.path for the parent; the child needs it
+    # too so `from conftest import assert_matmul_close` resolves.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [os.path.dirname(os.path.abspath(__file__)), env.get("PYTHONPATH", "")]
+    )
+    p = subprocess.run(
+        [sys.executable, "-c", _OOM_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "OOM_FALLBACK_OK" in p.stdout, (p.stdout, p.stderr)
