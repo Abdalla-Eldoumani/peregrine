@@ -69,7 +69,22 @@ void copy_d2h(void* dst_host, const void* src_dev, int64_t bytes);
 // completed. This is the "async wins live inside a call, never across the API
 // boundary" rule made concrete -- from_device calls it after copy_d2h and before
 // returning the host ndarray, so a caller can never read a half-filled buffer.
+// to_device also calls it after copy_h2d so operands are fully resident before a
+// later compute-stream GEMM reads them: alloc_device/copy_h2d run on the transfer
+// stream, the GEMM on the compute stream, and the two streams are unordered, so
+// without this fence cuBLAS can read an operand whose H2D copy has not landed (a
+// cross-stream use-before-ready race; compute-sanitizer memcheck
+// --track-stream-ordered-races all reports it as use-before-alloc).
 void sync_transfer();
+
+// Synchronize the compute stream: blocks until every launch on it (the cuBLAS
+// GEMM) has completed. The device-resident matmul entry calls it after the GEMM
+// so the output buffer is fully written before the result Array crosses back to
+// Python -- the compute-side twin of sync_transfer's D2H fence. Without it a
+// caller could from_device an output whose GEMM has not finished, the same
+// across-the-API-boundary race the D2H sync closes for transfers. CHECK-wrapped
+// (a sync can surface an asynchronous launch error) and never used at teardown.
+void sync_compute();
 
 // Pinned host-staging cache (cudaHostAlloc), total capped at 256MB.
 //
