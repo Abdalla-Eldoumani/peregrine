@@ -1,6 +1,16 @@
 """Shared pytest infrastructure: hypothesis profiles, the slow marker, the
-machine manifest header, and assert_matmul_close, the only toleranced
-comparison path in the suite. An inline rtol/atol anywhere else is a defect.
+machine manifest header, and the two toleranced comparison paths in the suite,
+assert_matmul_close and its reduction sibling assert_reduce_close. An inline
+rtol/atol anywhere else is a defect.
+
+The reduction contract (assert_reduce_close) is linear in the reduced count r
+and scaled by S, the sum of magnitudes along the reduced axis, not a product of
+operand extremes: reductions add, they do not multiply. NumPy reduces
+sequentially along the non-contiguous axis (its axis=0 column sums err 1.44 at
+r=1e5 where a pairwise bound predicts ~1e-3), so a logarithmic bound is vacuous;
+Higham's sequential (r-1)*eps*S bounds both sides and therefore their
+difference. Mean divides the sum atol by r. The full clause lives in the helper
+docstring.
 
 Tolerance contract rationale, float64. A pure relative bound cannot hold for
 matmul: elements produced by cancellation have references near zero, so a
@@ -59,6 +69,7 @@ settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "dev"))
 EPS64 = float(np.finfo(np.float64).eps)
 EPS32 = float(np.finfo(np.float32).eps)
 SMALLEST_SUBNORMAL = float(np.finfo(np.float64).smallest_subnormal)
+SMALLEST_SUBNORMAL32 = float(np.finfo(np.float32).smallest_subnormal)
 C_HIGHAM = 4.0
 
 
@@ -163,4 +174,100 @@ def assert_matmul_close(got, ref, a, b):
         assert err_got <= bound, (
             f"f32 max abs error {err_got:.3e} exceeds bound {bound:.3e} "
             f"(numpy's own error vs float64 truth: {err_ref:.3e})"
+        )
+
+
+def assert_reduce_close(got, ref, a, axis, kind="sum"):
+    """Assert a reduction result matches ref under the suite tolerance contract.
+
+    The sibling of assert_matmul_close and the only other toleranced path in
+    the suite. The bound is LINEAR in the reduced count r, scaled by S, the sum
+    of magnitudes along the reduced axis:
+
+        |got - ref| <= 1e-12 * |ref| + atol
+        r    = a.size for axis=None, a.shape[0] for axis=0, a.shape[1] for axis=1
+        S    = max over outputs of sum(|finite addends|) along the reduced axis
+        sum  f64 atol = max(4 * r * eps64 * S, smallest subnormal)
+        sum  f32 atol = max(4 * r * eps32 * S, smallest subnormal32)
+        mean atol     = sum atol / r
+
+    The scale is S, not amax(a) * amax(b): reductions add rather than multiply,
+    so the relevant magnitude is the running sum, not a product of operand
+    extremes. The bound is linear, not logarithmic, because NumPy reduces
+    sequentially along the non-contiguous axis (its axis=0 column sums err 1.44
+    at r=1e5 where a pairwise bound predicts ~1e-3); Higham's sequential bound
+    (r-1) * eps * S bounds both NumPy's accumulation and ours, so it bounds
+    their difference, with c = 4 for 2x margin. Pure addition has no FMA
+    asymmetry, so there is no dual-ground-truth arm.
+
+    Pass the operand actually reduced as a; S is computed from it over finite
+    addends only, so an injected NaN or Inf cannot poison the finite-remainder
+    bound. A non-finite S fails outright: an infinite bound passes any result.
+    For kind="mean" the atol is the sum atol divided by r; the final division
+    adds one rounding absorbed by the rtol term. r = 0 sum compares exactly
+    (atol collapses to the subnormal floor); the r = 0 mean is the exact-NaN /
+    "Mean of empty slice" warning path, tested separately, and never reaches
+    this toleranced branch.
+    """
+    assert got.shape == ref.shape, f"shape mismatch: {got.shape} vs {ref.shape}"
+    assert got.dtype == ref.dtype, f"dtype mismatch: {got.dtype} vs {ref.dtype}"
+
+    if not (np.isfinite(got).all() and np.isfinite(ref).all()):
+        np.testing.assert_array_equal(np.isnan(got), np.isnan(ref))
+        np.testing.assert_array_equal(np.isinf(got), np.isinf(ref))
+        inf_positions = np.isinf(ref)
+        # value equality at the inf positions checks each inf's sign
+        np.testing.assert_array_equal(got[inf_positions], ref[inf_positions])
+        finite = np.isfinite(got) & np.isfinite(ref)
+        got = got[finite]
+        ref = ref[finite]
+        if got.size == 0:
+            return
+
+    # r is the reduced element count per output. axis None reduces the whole
+    # array; axis 0 reduces over rows (r = number of rows); axis 1 reduces over
+    # columns (r = number of columns).
+    if axis is None:
+        r = a.size
+        reduce_axis = None
+    elif axis == 0:
+        r = a.shape[0]
+        reduce_axis = 0
+    elif axis == 1:
+        r = a.shape[1]
+        reduce_axis = 1
+    else:
+        raise ValueError(f"assert_reduce_close: axis must be None, 0, or 1, got {axis!r}")
+
+    # S is the largest per-output sum of absolute finite addends. Non-finite
+    # operand entries are zeroed before the sum, never masked away, so the count
+    # of addends (and therefore r) is unchanged: only their magnitude is dropped
+    # so an injected special cannot inflate S. Through Python float, never the
+    # operand dtype, mirroring the matmul helper's amax_prod: an f32 column sum
+    # can overflow to inf, and an infinite bound passes any result.
+    finite_addends = np.where(np.isfinite(a), np.abs(a), 0.0)
+    scale = float(finite_addends.sum(axis=reduce_axis, dtype=np.float64).max(initial=0.0))
+    assert np.isfinite(scale), (
+        "reduction addend magnitudes overflow the tolerance bound; "
+        "contract unenforceable"
+    )
+
+    eps = EPS64 if got.dtype == np.float64 else EPS32
+    floor = SMALLEST_SUBNORMAL if got.dtype == np.float64 else SMALLEST_SUBNORMAL32
+    sum_atol = max(C_HIGHAM * r * eps * scale, floor)
+    # mean = sum / count: the division shrinks both the value and its error by r,
+    # so the absolute atol divides by r too (r >= 1 here; the r = 0 mean never
+    # reaches this branch, it is the exact-NaN/warning path).
+    atol = sum_atol / r if kind == "mean" else sum_atol
+
+    diff = np.abs(got - ref)
+    bound = 1e-12 * np.abs(ref) + atol
+    ok = diff <= bound
+    if not ok.all():
+        worst = int(np.argmax(diff - bound))
+        raise AssertionError(
+            f"{kind} reduction contract violated at {int((~ok).sum())} of "
+            f"{diff.size} elements: max abs diff {float(diff.max(initial=0.0)):.3e}, "
+            f"worst element diff {float(diff.flat[worst]):.3e} vs bound "
+            f"{float(bound.flat[worst]):.3e} (r={r}, S={scale:.3e}, atol={atol:.3e})"
         )
