@@ -78,6 +78,22 @@ _CLEAN_SHUTDOWN_SCRIPT = _CHILD_DLL_SETUP + (
     "assert info['present'] is True, info\n"
 )
 
+# CR-01 regression: an fme.Array bound to a MODULE GLOBAL is still alive when the
+# interpreter finalizes, so its ~Array runs AFTER the atexit teardown destroyed
+# the context's transfer stream. Before the teardown-tolerant free_device, that
+# ~Array called cudaFreeAsync on the destroyed stream (a use-after-teardown the
+# sanitizer surfaces) through the throwing CHECK macro (a throw from a destructor
+# at finalization). The child binds the Array at module scope, never deletes it,
+# and exits: a clean teardown returns 0 with no CUDA shutdown error and no abort.
+_GLOBAL_ARRAY_SHUTDOWN_SCRIPT = _CHILD_DLL_SETUP + (
+    "import numpy as np\n"
+    "import fastmathext as fme\n"
+    # Module-global device array: deliberately never freed before exit so ~Array
+    # runs at finalization, the dangerous post-teardown ordering.
+    "g = fme.to_device(np.ones((8, 8), dtype=np.float32))\n"
+    "assert g.shape == (8, 8), g.shape\n"
+)
+
 
 @gpu
 def test_context_inits():
@@ -114,6 +130,29 @@ def test_context_clean_shutdown():
     assert "cudaErrorCudartUnloading" not in p.stderr, p.stderr
     # Catch a native abort/crash at shutdown that still left returncode 0 on some
     # paths: none of these strings should appear on a clean teardown.
+    for bad in ("Traceback", "terminate", "abort", "access violation"):
+        assert bad not in p.stderr, p.stderr
+
+
+@gpu
+def test_module_global_array_clean_shutdown():
+    # CR-01 regression fence: an fme.Array held in a module global is alive at
+    # interpreter finalization, so ~Array runs AFTER the atexit teardown
+    # destroyed the transfer stream. The teardown-tolerant free_device must make
+    # that a no-op (g_torn_down skips the free; the live path never throws), so
+    # the child exits 0 with no CUDA shutdown error and no destructor-throw abort.
+    # Without the fix this is where the use-after-teardown + throw-from-destructor
+    # surfaces (a cudaErrorCudartUnloading print, a nonzero exit, or an abort).
+    env = dict(os.environ)
+    p = subprocess.run(
+        [sys.executable, "-c", _GLOBAL_ARRAY_SHUTDOWN_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "cudaErrorCudartUnloading" not in p.stderr, p.stderr
     for bad in ("Traceback", "terminate", "abort", "access violation"):
         assert bad not in p.stderr, p.stderr
 
