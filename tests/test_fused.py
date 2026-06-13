@@ -507,20 +507,122 @@ test_property_matches_unfused_numpy = example(
 
 
 # ---------------------------------------------------------------------------
-# FUSE-03: the device path matches the same oracle. Bodies land in 06-04; the
-# marker resolves to a clean skip on CPU-only and WSL. -k "gpu"
+# FUSE-03: the device path matches the same oracle. The device-resident kernels
+# (grid-stride/float4) compute on fme.Array operands; the result, brought back
+# with from_device, must match the SAME assert_fused_close oracle as the CPU
+# path. The marker resolves to a clean skip on CPU-only and WSL. -k "gpu"
 # ---------------------------------------------------------------------------
 
 
+# Device callables mirroring the host OPS table: to_device the operands the op
+# consumes, run the fused op (returns an fme.Array), from_device the result. The
+# oracle is the SAME unfused-NumPy expression as the host path (the _*_oracle
+# functions above), so the GPU is held to the identical assert_fused_close bound.
+def _axpby_call_gpu(x, y, z):
+    return fme.from_device(fme.axpby(fme.to_device(x), fme.to_device(y), a=2.0, b=3.0))
+
+
+def _fma3_call_gpu(x, y, z):
+    return fme.from_device(
+        fme.fma3(fme.to_device(x), fme.to_device(y), fme.to_device(z))
+    )
+
+
+def _scaled_relu_call_gpu(x, y, z):
+    return fme.from_device(fme.scaled_relu(fme.to_device(x), scale=3.0))
+
+
+OPS_GPU = [
+    ("axpby", _axpby_call_gpu, _axpby_oracle, 2),
+    ("fma3", _fma3_call_gpu, _fma3_oracle, 3),
+    ("scaled_relu", _scaled_relu_call_gpu, _scaled_relu_oracle, 1),
+]
+
+
 @gpu
-@pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS, ids=OP_IDS)
+@pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS_GPU, ids=OP_IDS)
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
-def test_gpu_matches_oracle(op_id, call, oracle, n_operands, dtype):
-    # The device-resident fused path (06-04) must match the same unfused-NumPy
-    # oracle as the CPU path. Skips cleanly until the device kernels + the
-    # device-resident wrapper branch land; the host oracle above is the contract
-    # this mirrors on the GPU.
-    pytest.skip("device-resident fused ops land in 06-04")
+@pytest.mark.parametrize("size", SIZES)
+def test_gpu_matches_oracle_square(op_id, call, oracle, n_operands, dtype, size):
+    # The device-resident fused path must match the same unfused-NumPy oracle as
+    # the CPU path across the legacy-killer + round grid. The square (size, size)
+    # flat extent spans the float4/double2 aligned prefix AND the scalar tail (size
+    # not a multiple of the pack width); the odd legacy-killer sizes are the tail
+    # probe. Both f32 and f64 route to the device (no f64 auto-route exclusion on
+    # the fused device path -- the operands were explicitly placed there).
+    x, y, z = _operands((size, size), dtype, n_operands)
+    got = call(x, y, z)
+    ref = oracle(x, y, z)
+    assert_fused_close(np.asarray(got), ref)
+
+
+@gpu
+@pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS_GPU, ids=OP_IDS)
+@pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
+def test_gpu_matches_oracle_zero_sized(op_id, call, oracle, n_operands, dtype):
+    # Size 0 in each dimension: the device op returns an empty fme.Array of the
+    # right shape/dtype, the boundary the kernel's n==0 zero-dim guard handles
+    # without a launch (and from_device round-trips an empty buffer).
+    for shape in [(0, 0), (0, 5), (5, 0)]:
+        x, y, z = _operands(shape, dtype, n_operands)
+        got = call(x, y, z)
+        ref = oracle(x, y, z)
+        assert_fused_close(np.asarray(got), ref)
+
+
+@gpu
+@pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS_GPU, ids=OP_IDS)
+@pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
+def test_gpu_matches_oracle_nan_inf(op_id, call, oracle, n_operands, dtype):
+    # The device kernels must reproduce the host NaN/Inf behavior: scaled_relu(NaN)
+    # propagates (the device fmax NaN-quieting trap, the GPU twin of the CPU bare
+    # max trap), fma3 inf*0+z=NaN (the device fmaf single rounding), axpby Inf
+    # propagates. Specials land at offset 0, the middle, and the LAST element (the
+    # scalar-tail lane) so the float4 path and the tail path are both exercised.
+    n = 37  # several float4/double2 packs + a non-empty scalar tail
+    rng = np.random.default_rng(7)
+    x = (rng.standard_normal((1, n)).astype(dtype) ** 2 + dtype(0.5))
+    y = (rng.standard_normal((1, n)).astype(dtype) ** 2 + dtype(0.5))
+    z = (rng.standard_normal((1, n)).astype(dtype) ** 2 + dtype(0.5))
+    for pos in (0, n // 2, n - 1):
+        x[0, pos] = np.nan
+    x[0, 1] = np.inf
+    x[0, n - 2] = -np.inf
+    with np.errstate(invalid="ignore"):
+        got = call(x, y, z)
+        ref = oracle(x, y, z)
+    assert_fused_close(np.asarray(got), ref)
+
+
+@gpu
+@pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS_GPU, ids=OP_IDS)
+@pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
+@pytest.mark.parametrize("n", [LARGE_SIZE, LARGE_ODD_SIZE], ids=["16M", "16M-1"])
+def test_gpu_matches_oracle_large(op_id, call, oracle, n_operands, dtype, n):
+    # The 0..16M FUSE-04 range and the 16M-1 odd-tail float4 probe on the device:
+    # 16M-1 is odd so the last element is a scalar-tail element after the last full
+    # float4/double2 pack -- the float4 OOB risk compute-sanitizer memcheck catches
+    # (RESEARCH Pitfall 4). A few explicit (1, n) examples, not the cartesian grid.
+    x, y, z = _operands((1, n), dtype, n_operands)
+    got = call(x, y, z)
+    ref = oracle(x, y, z)
+    assert_fused_close(np.asarray(got), ref)
+
+
+@gpu
+def test_gpu_mixed_residency_is_type_error():
+    # One operand on the device, one on the host: the fused per-op mixed-residency
+    # TypeError, never a silent host<->device transfer. Mirrors the matmul mixed
+    # residency contract, extended to the fused ops (every operand must be on the
+    # same side).
+    h = np.ones((4, 4), np.float32)
+    d = fme.to_device(h)
+    with pytest.raises(TypeError, match="same device"):
+        fme.axpby(d, h)
+    with pytest.raises(TypeError, match="same device"):
+        fme.fma3(d, h, h)
+    with pytest.raises(TypeError, match="same device"):
+        fme.axpby(h, d)
 
 
 def test_fused_helper_smoke():
