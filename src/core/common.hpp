@@ -49,6 +49,31 @@ struct gemm_dims {
     int64_t n;
 };
 
+// Element count -> byte count with an overflow and negative-extent check, used
+// on every binding allocation (to_device, from_device, the device matmul output)
+// before a size_t cast feeds new T[] or alloc_device. Without it, an int64
+// rows*cols*elem product that overflows wraps to a small or negative value while
+// the copy is told the full size -- a truncated buffer with a full-size copy is a
+// heap overflow (WR-02), and a negative product cast to size_t becomes ~SIZE_MAX
+// (WR-03). CUDA-free (only int64 + shape_error) so it lives in core and both the
+// binding and any future caller share one checked path. MSVC has no
+// __builtin_mul_overflow, so the check is division-based: a*b overflows iff
+// a != 0 and the product divided back by a does not equal b.
+inline int64_t checked_bytes(int64_t rows, int64_t cols, int64_t elem) {
+    if (rows < 0 || cols < 0 || elem < 0) {
+        throw shape_error("array size: negative extent");
+    }
+    int64_t elems = rows * cols;
+    if (rows != 0 && elems / rows != cols) {
+        throw shape_error("array size: element count overflows int64");
+    }
+    int64_t bytes = elems * elem;
+    if (elem != 0 && bytes / elem != elems) {
+        throw shape_error("array size: byte count overflows int64");
+    }
+    return bytes;
+}
+
 inline gemm_dims check_matmul_dims(int64_t am, int64_t ak, int64_t bk, int64_t bn) {
     if (ak != bk) {
         throw shape_error(
