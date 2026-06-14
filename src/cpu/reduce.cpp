@@ -1,6 +1,6 @@
 #include "cpu/reduce.hpp"
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 namespace {
 
@@ -88,4 +88,4 @@ template double sum_all<double>(const double*, int64_t, int64_t);
 template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
 template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
