@@ -40,7 +40,7 @@ import time
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 
 # Reuse the matmul harness rather than re-deriving the protocol: the manifest
 # capture, the CV-gated timing core, AND the device-resident _gpu_series (the
@@ -74,7 +74,7 @@ def _without_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[d
     # _cuda_time_matmul; the redundant guard here keeps this function honest about
     # never touching a device entry on OFF and makes the gate visible at this call
     # site too.
-    if not fme.has_cuda():
+    if not pg.has_cuda():
         return []
     series = []
     for record in _gpu_series(sizes, reps, warmup):
@@ -101,7 +101,7 @@ def _with_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict
     # the honest timer -- the one sanctioned wall-clock GPU exception (rule 12).
     # Gated on has_cuda() so the OFF build returns [] before reaching to_device /
     # the device matmul overload, which do not exist there.
-    if not fme.has_cuda():
+    if not pg.has_cuda():
         return []
     series = []
     for n in sizes:
@@ -115,9 +115,9 @@ def _with_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict
         # recomputes, exactly like the CPU suite -- no inline rtol. Bind the
         # device handles to locals and drop them after the verify so they do not
         # straggle to interpreter finalization (the 06-04 nanobind-leak lesson).
-        xa = fme.to_device(a)
-        xb = fme.to_device(b)
-        got = fme.from_device(fme.matmul(xa, xb))
+        xa = pg.to_device(a)
+        xb = pg.to_device(b)
+        got = pg.from_device(pg.matmul(xa, xb))
         assert_matmul_close(got, a @ b, a, b)
         del xa, xb, got
 
@@ -128,9 +128,9 @@ def _with_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict
             # operands, the device GEMM, D2H the result. from_device syncs the
             # boundary, so the closure returns only after all device work
             # completes -- perf_counter around it is honest.
-            ra = fme.to_device(a)
-            rb = fme.to_device(b)
-            return fme.from_device(fme.matmul(ra, rb))
+            ra = pg.to_device(a)
+            rb = pg.to_device(b)
+            return pg.from_device(pg.matmul(ra, rb))
 
         # Cold FIRST, before any warm rep touches the device: a single round-trip
         # is the honest first-launch-after-idle number. It is timed directly with
@@ -264,13 +264,13 @@ if __name__ == "__main__":
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 
-    if not fme.has_cuda():
+    if not pg.has_cuda():
         # The OFF build has no device entries; the series functions return [] and
         # the run carries only the manifest. Say so plainly rather than writing an
         # empty-series file silently.
         print(
             "has_cuda() is False (OFF build or no usable device): the GPU series "
-            "are omitted. Rebuild with FME_ENABLE_CUDA=ON to measure the matrix."
+            "are omitted. Rebuild with PG_ENABLE_CUDA=ON to measure the matrix."
         )
 
     _start = time.perf_counter()
