@@ -15,7 +15,7 @@ verifies its own result through the single toleranced path before reporting; a
 verified-false child fails the run rather than contributing a number.
 
 Usage:
-    python benchmarks/scaling.py --save benchmarks/results/tuning/scaling_zpicy.json
+    python benchmarks/scaling.py --save benchmarks/results/tuning/scaling_refbox.json
 """
 
 from __future__ import annotations
