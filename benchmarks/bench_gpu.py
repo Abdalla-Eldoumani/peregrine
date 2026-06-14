@@ -132,13 +132,20 @@ def _with_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict
             rb = fme.to_device(b)
             return fme.from_device(fme.matmul(ra, rb))
 
+        # Cold FIRST, before any warm rep touches the device: a single round-trip
+        # is the honest first-launch-after-idle number. It is timed directly with
+        # perf_counter (not _bench) because _bench's _measure_once computes
+        # quantiles, which need >=2 samples; a cold measurement is exactly one
+        # sample. The round-trip is synchronous (from_device syncs), so
+        # perf_counter is honest here (the rule-12 wall-clock exception).
+        _t0 = time.perf_counter_ns()
+        round_trip()
+        cold_s = (time.perf_counter_ns() - _t0) / 1e9
         # Warm: the protocol warmups/reps wall-clock, CV-gated (the round-trip
         # runs on the CPU-visible timeline, so the AV-vs-OpenMP noise that gates
         # CPU series applies; the gate reruns a noisy median and records high_cv,
-        # never dropping the series). Cold: a single round-trip before the clocks
-        # warm (first launch after idle), reps=1 warmup=0.
+        # never dropping the series).
         warm = _bench(round_trip, reps, warmup, cv_gate=True)
-        cold = _bench(round_trip, 1, 0)
 
         # NumPy CPU f32 at the same n on the wall-clock floor (a CPU GEMM is
         # synchronous, so perf_counter's min is the honest denominator). CuPy is
@@ -147,7 +154,7 @@ def _with_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict
         # honest "is the GPU worth the transfer for a host array" answer.
         numpy_t = _bench(lambda: a @ b, reps, warmup)
         warm_ms = warm["min_s"] * 1e3
-        cold_ms = cold["min_s"] * 1e3
+        cold_ms = cold_s * 1e3
         numpy_floor_ms = numpy_t["min_s"] * 1e3
         warm_gflops = gflop / warm["min_s"]
         numpy_gflops = gflop / numpy_t["min_s"]
@@ -183,8 +190,8 @@ def _with_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict
             {
                 "phase": "cold",
                 "round_trip_ms": cold_ms,
-                "gflops": gflop / cold["min_s"],
-                "ratio_vs_numpy_cpu_f32": (gflop / cold["min_s"]) / numpy_gflops,
+                "gflops": gflop / cold_s,
+                "ratio_vs_numpy_cpu_f32": (gflop / cold_s) / numpy_gflops,
             }
         )
         series.append(warm_row)
