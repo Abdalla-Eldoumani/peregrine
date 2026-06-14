@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <new>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // First aligned buffer in the project: the packed A and B panels must start on
 // a 64-byte boundary so the microkernel's aligned vector loads never straddle a
@@ -21,4 +21,4 @@ inline void aligned_delete(void* p) noexcept {
     ::operator delete(p, std::align_val_t{64});
 }
 
-} // namespace fme::cpu
+} // namespace pg::cpu
