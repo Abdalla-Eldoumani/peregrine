@@ -4,7 +4,7 @@
     "processor": "Intel64 Family 6 Model 165 Stepping 2, GenuineIntel",
     "python": "3.12.4",
     "numpy": "2.4.6",
-    "fastmathext": "3.0.0.dev0",
+    "peregrine": "3.0.0.dev0",
     "cpu_features": {
       "avx2": true,
       "fma": true,
@@ -40,7 +40,7 @@
     {
       "n": 8,
       "gflop": 1.024e-06,
-      "fastmathext": {
+      "peregrine": {
         "median_s": 3.5e-06,
         "p25_s": 3.4250000000000002e-06,
         "p75_s": 3.6e-06,
@@ -56,14 +56,14 @@
         "cv": 0.024426077941697717,
         "reps": 40
       },
-      "fme_gflops": 0.2925714285714286,
+      "pg_gflops": 0.2925714285714286,
       "numpy_gflops": 0.5389473684210526,
       "speedup_vs_numpy": 0.5428571428571428
     },
     {
       "n": 16,
       "gflop": 8.192e-06,
-      "fastmathext": {
+      "peregrine": {
         "median_s": 6e-06,
         "p25_s": 6e-06,
         "p75_s": 6.1e-06,
@@ -79,14 +79,14 @@
         "cv": 0.0347930586309024,
         "reps": 40
       },
-      "fme_gflops": 1.3653333333333333,
+      "pg_gflops": 1.3653333333333333,
       "numpy_gflops": 3.5617391304347827,
       "speedup_vs_numpy": 0.3833333333333333
     },
     {
       "n": 32,
       "gflop": 6.5536e-05,
-      "fastmathext": {
+      "peregrine": {
         "median_s": 2.76e-05,
         "p25_s": 2.74e-05,
         "p75_s": 2.795e-05,
@@ -102,14 +102,14 @@
         "cv": 0.018779643411264355,
         "reps": 40
       },
-      "fme_gflops": 2.3744927536231883,
+      "pg_gflops": 2.3744927536231883,
       "numpy_gflops": 12.850196078431372,
       "speedup_vs_numpy": 0.1847826086956522
     },
     {
       "n": 64,
       "gflop": 0.000524288,
-      "fastmathext": {
+      "peregrine": {
         "median_s": 0.000232,
         "p25_s": 0.000163925,
         "p75_s": 0.00027377500000000003,
@@ -125,43 +125,43 @@
         "cv": 0.01697095367922792,
         "reps": 40
       },
-      "fme_gflops": 2.2598620689655173,
+      "pg_gflops": 2.2598620689655173,
       "numpy_gflops": 18.33174825174825,
       "speedup_vs_numpy": 0.12327586206896551
     }
   ],
   "small_path_analysis": {
-    "goal": "fme small path >= 2x NumPy end-to-end at n in {8,16,32,64}, both dtypes",
-    "verdict": "NOT met (measured well below 2x at every size; the shortfall is structural, not primarily AV noise \u2014 fme CVs are mostly 3-30%)",
-    "metric": "speedup_vs_numpy = numpy_median_s / fme_median_s, end-to-end Python time (the small-path metric, not kernel GFLOP/s)",
+    "goal": "pg small path >= 2x NumPy end-to-end at n in {8,16,32,64}, both dtypes",
+    "verdict": "NOT met (measured well below 2x at every size; the shortfall is structural, not primarily AV noise \u2014 pg CVs are mostly 3-30%)",
+    "metric": "speedup_vs_numpy = numpy_median_s / pg_median_s, end-to-end Python time (the small-path metric, not kernel GFLOP/s)",
     "floor_and_median": {
       "n8": {
         "median_speedup": 0.543,
         "floor_speedup": 0.559,
-        "fme_median_us": 3.5,
+        "pg_median_us": 3.5,
         "numpy_median_us": 1.9,
-        "fme_cv": 0.296
+        "pg_cv": 0.296
       },
       "n16": {
         "median_speedup": 0.383,
         "floor_speedup": 0.373,
-        "fme_median_us": 6.0,
+        "pg_median_us": 6.0,
         "numpy_median_us": 2.3,
-        "fme_cv": 0.189
+        "pg_cv": 0.189
       },
       "n32": {
         "median_speedup": 0.185,
         "floor_speedup": 0.183,
-        "fme_median_us": 27.6,
+        "pg_median_us": 27.6,
         "numpy_median_us": 5.1,
-        "fme_cv": 0.085
+        "pg_cv": 0.085
       },
       "n64": {
         "median_speedup": 0.123,
         "floor_speedup": 0.169,
-        "fme_median_us": 232.0,
+        "pg_median_us": 232.0,
         "numpy_median_us": 28.6,
-        "fme_cv": 0.236
+        "pg_cv": 0.236
       }
     },
     "root_cause": [
