@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace fme::cuda {
+namespace pg::cuda {
 
 // Device-resident fused elementwise kernels: axpby (a*x + b*y), fma3 (x*y + z,
 // one rounding), scaled_relu (maximum(scale*x, 0), NaN-propagating). x, y, z and
@@ -14,7 +14,7 @@ namespace fme::cuda {
 //
 // v1 is DEVICE-RESIDENT ONLY: there is no fused_host / staging twin (unlike
 // gemm + gemm_host). A host ndarray fused call computes on the CPU; the GPU path
-// is reached only for already-resident fme.Array operands, so the kernel and its
+// is reached only for already-resident pg.Array operands, so the kernel and its
 // output buffer live on the single compute stream and there is no transfer ->
 // compute cross-stream race surface to fence (sidestepped by construction). The
 // kernels match the SAME unfused-NumPy oracle + elementwise
@@ -61,4 +61,4 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
 extern template float time_fused_chain<float>(const float*, const float*, const float*, int64_t, int, int);
 extern template float time_fused_chain<double>(const double*, const double*, const double*, int64_t, int, int);
 
-} // namespace fme::cuda
+} // namespace pg::cuda
