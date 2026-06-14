@@ -118,9 +118,9 @@ same machine. The two are not directly comparable per operation, only per regime
 | 1024 | 65.4 | 104.2 | 0.63 |
 | 2048 | 76.2 | 112.5 | 0.68 |
 
-At n=2048 the cleanest measured run reaches 0.79 of OpenBLAS (high-effort best
-floor). float64 mid-size parity is the target; FastMathExt does not beat OpenBLAS
-here.
+At n=2048 the fresh per-rep sweep measures 0.58 of OpenBLAS on the floor and 0.74
+on the median. float64 mid-size parity is the target; FastMathExt does not beat
+OpenBLAS here.
 
 ### Small-matrix float32 (CPU)
 
@@ -201,16 +201,29 @@ seeded generator outside the timed region, so no conversion time is counted. CPU
 timing uses `perf_counter_ns`; GPU device work is timed with CUDA event pairs after
 a stream sync, never a wall clock around an asynchronous launch. The host
 round-trip series is the one wall-clocked GPU case, because the transfer
-synchronizes at the boundary. Each measured repetition is checked against the NumPy
-oracle before its time is recorded, so an unverified result never reaches a table.
+synchronizes at the boundary. Each series is checked against the NumPy oracle on
+the same inputs before any time is recorded, so an unverified series never reaches
+a table; the published `verified` flag is set only after that toleranced check
+passes.
 
-The headline statistic is the floor (min over reps), with median, IQR, and
-coefficient of variation recorded alongside as a noise readout. On this machine a
-background antivirus preempts an OpenMP worker at the fork/join barrier, which
-inflates the median and maximum of every multi-threaded CPU series; the floor is
-the noise-free best case, and the coefficient of variation documents the residual
-rather than hiding it. The size grid includes non-multiples of the vector width so
-a kernel cannot hide its tail path.
+The statistic reported depends on the regime, because the timers differ:
+
+- CPU regimes (float64 matmul, small-matrix, thread scaling): the floor (min over
+  reps) of FastMathExt against the floor of NumPy. On this machine a background
+  antivirus preempts an OpenMP worker at the fork/join barrier, which inflates the
+  median and maximum of every multi-threaded CPU series; the floor is the
+  noise-free best case, and the coefficient of variation, recorded alongside,
+  documents the residual rather than hiding it.
+- GPU device-resident (the without-transfer headline): the warm cudaEvent-timed
+  mean over reps for the device, against the NumPy CPU f32 median. cudaEvent
+  timing reports an averaged warm figure, so this regime quotes the device mean
+  rather than a per-rep min.
+- GPU with-transfer (the host round-trip): the warm wall-clock floor of the full
+  to_device + matmul + from_device round-trip, against the NumPy CPU f32 floor.
+
+Median, IQR, and coefficient of variation are recorded alongside every regime as a
+noise readout. The size grid includes non-multiples of the vector width so a
+kernel cannot hide its tail path.
 
 ## Hardware
 
