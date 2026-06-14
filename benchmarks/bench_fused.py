@@ -60,7 +60,7 @@ from conftest import assert_fused_close
 # POSITIVE, with strictly-positive operands built below, on purpose: with mixed
 # signs a*x+b*y / t*y+z catastrophically cancels at some elements, where the
 # single-rounding fused result equals the f64 truth EXACTLY while unfused NumPy
-# carries ~1 ULP, and the design-doc fused bound (rtol*|ref| + subnormal floor,
+# carries ~1 ULP, and the fused tolerance bound (rtol*|ref| + subnormal floor,
 # no operand-magnitude atol) goes vacuous as |ref|->0 and would reject the MORE
 # accurate kernel. Positive operands keep |ref| at operand scale (the same gotcha
 # the fused oracle/property tests document); do NOT recenter the operands to zero.
