@@ -14,21 +14,20 @@ extern template void matmul<double>(const double*, const double*, double*, int64
 
 #if defined(FME_HAS_CUDA)
 // Device-resident GEMM routing. a, b, c are DEVICE pointers; the binding's
-// device matmul(Array, Array) path (04-04) calls this for operands that are
-// already on the device, so it never stages host memory. Separate from the host
-// matmul<T> above on purpose: matmul<T> is the CPU decision and stays
-// byte-identical, while this is the device-resident decision the wrapper reaches
-// only when BOTH operands are an fme.Array.
+// device matmul(Array, Array) path calls this for operands that are already on
+// the device, so it never stages host memory. Separate from the host matmul<T>
+// above on purpose: matmul<T> is the CPU decision and stays byte-identical, while
+// this is the device-resident decision the wrapper reaches only when BOTH
+// operands are an fme.Array.
 //
-// Priority rules (src/dispatch/CLAUDE.md): rule 2 (float64 GEMM never AUTO-routes
-// to this GPU -- GA106 FP64 is 1/64 FP32, measured 194 vs 6519 GFLOP/s) is
-// enforced UPSTREAM by the wrapper and binding never auto-selecting the device
-// path for host float64 arrays; a forced device-resident f64 (both operands
-// explicitly to_device'd) is allowed and computed here, slow and docstring-warned.
-// Auto-routing a host f64 array to the GPU is the bug rule 2 forbids; a forced
-// device f64 is not. Rule 3 (f32 device-resident stays on device) is the f32 arm.
-// The decision stays PURE: no warnings, no logging, no fallback -- the wrapper
-// owns those.
+// Routing rules: float64 GEMM never AUTO-routes to this GPU (GA106 FP64 is 1/64
+// FP32, measured 194 vs 6519 GFLOP/s). That exclusion is enforced UPSTREAM by the
+// wrapper and binding never auto-selecting the device path for host float64
+// arrays; a forced device-resident f64 (both operands explicitly to_device'd) is
+// allowed and computed here, slow and docstring-warned. Auto-routing a host f64
+// array to the GPU is the bug; a forced device f64 is not. An f32 device-resident
+// pair stays on the device (the f32 arm). The decision stays PURE: no warnings, no
+// logging, no fallback -- the wrapper owns those.
 template <typename T>
 void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 
