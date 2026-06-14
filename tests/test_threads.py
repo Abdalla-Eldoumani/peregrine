@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 from conftest import assert_matmul_close
 
 # odd dimensions on purpose: 333 is a legacy-killer size and the row split
@@ -37,12 +37,12 @@ import sys
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 
 rng = np.random.default_rng(42)
 a = rng.standard_normal((333, 257))
 b = rng.standard_normal((257, 199))
-np.save(sys.argv[1], fme.matmul(a, b))
+np.save(sys.argv[1], pg.matmul(a, b))
 """
 
 # 16 mixed tasks for 4 workers: the odd 333 triple, legacy-killer squares,
@@ -94,7 +94,7 @@ def _matmul_task(m, k, n, seed):
     rng = np.random.default_rng(seed)
     a = rng.standard_normal((m, k))
     b = rng.standard_normal((k, n))
-    return a, b, fme.matmul(a, b)
+    return a, b, pg.matmul(a, b)
 
 
 def test_executor_no_deadlock():
