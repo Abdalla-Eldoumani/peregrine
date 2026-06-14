@@ -79,12 +79,23 @@ void microkernel_f64_6x8(const double* ap, const double* bp, double* c, int64_t 
     const __m256i nrv = _mm256_set1_epi64x(nr);
     const __m256i m0 = _mm256_cmpgt_epi64(nrv, idx0);
     const __m256i m1 = _mm256_cmpgt_epi64(nrv, idx1);
+    // The high vector (columns 4..7) is touched only when nr > 4. When nr <= 4 its
+    // mask m1 is all-zero, so the masked store there writes nothing -- but the
+    // pointer cr + 4 would still be FORMED, and on the last row of the rightmost
+    // tile (jc+jr)+4 can exceed n, making cr + 4 more than one-past-the-end of the
+    // m*n C object. Forming such a pointer is C++ UB ([expr.add]) even unread, so
+    // guard the whole high half on nr > 4: the formation happens only when at least
+    // one high-half column is live and cr + 4 is in bounds. Results are identical
+    // (the guarded-out case stored nothing anyway).
+    const bool has_high = nr > 4;
     for (int64_t r = 0; r < mr; ++r) {
         double* cr = c + r * ldc;
         const __m256d old0 = _mm256_maskload_pd(cr + 0, m0);
-        const __m256d old1 = _mm256_maskload_pd(cr + 4, m1);
         _mm256_maskstore_pd(cr + 0, m0, _mm256_add_pd(old0, acc0[r]));
-        _mm256_maskstore_pd(cr + 4, m1, _mm256_add_pd(old1, acc1[r]));
+        if (has_high) {
+            const __m256d old1 = _mm256_maskload_pd(cr + 4, m1);
+            _mm256_maskstore_pd(cr + 4, m1, _mm256_add_pd(old1, acc1[r]));
+        }
     }
 }
 
