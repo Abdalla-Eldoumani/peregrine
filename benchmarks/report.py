@@ -15,7 +15,7 @@ below the 4x ideal), and CPU-06 (the small-matrix path losing to NumPy).
 
 The four result shapes the renderer branches on (the schema differs per file):
 - matmul / gpu matrix: top-level ``cases`` (CPU pairs, each with nested
-  ``fastmathext`` / ``numpy`` timing dicts, plus per-row ``speedup_floor`` and
+  ``peregrine`` / ``numpy`` timing dicts, plus per-row ``speedup_floor`` and
   ``speedup_vs_numpy`` derived from that per-rep timing) plus ``gpu_cases``
   (device-resident, each carrying ``ratio_vs_numpy_cpu_f32``) and optional
   ``with_transfer_cases``. The CPU-02 n=2048 parity headline is recomputed from
@@ -53,7 +53,7 @@ def _case_is_verified(case: dict) -> bool:
     #   1. The bench_matmul / gpu / fused / scaling shape carries an explicit
     #      per-case ``verified`` boolean (True to publish).
     #   2. The paired-timing shape (cpu02_f64_refbox / cpu06_f32_refbox)
-    #      records each case as a paired ``fastmathext`` + ``numpy`` timing dict
+    #      records each case as a paired ``peregrine`` + ``numpy`` timing dict
     #      with NO per-case ``verified`` flag; the per-rep verification ran
     #      against assert_matmul_close (the bench writes no unverified series: no
     #      result with verified false ever reaches a results file), and the
@@ -65,7 +65,7 @@ def _case_is_verified(case: dict) -> bool:
         return False
     if case.get("verified") is True:
         return True
-    return "fastmathext" in case and "numpy" in case
+    return "peregrine" in case and "numpy" in case
 
 
 def load_series(path: str) -> dict:
@@ -81,7 +81,7 @@ def load_series(path: str) -> dict:
     Two committed CPU-case shapes exist (see ``_case_is_verified``): the
     bench_matmul / gpu / fused / scaling shape with an explicit per-case
     ``verified`` boolean, and the paired-timing shape
-    (cpu02_f64_refbox / cpu06_f32_refbox) whose paired ``fastmathext`` + ``numpy``
+    (cpu02_f64_refbox / cpu06_f32_refbox) whose paired ``peregrine`` + ``numpy``
     timing case is verified-per-rep by construction with no per-case flag. Both
     are accepted; an EXPLICIT ``verified: False`` is rejected in either shape.
 
@@ -133,34 +133,34 @@ def _fmt(value: float, places: int = 2) -> str:
 def render_matmul_f64_table(data: dict, sweep: dict) -> str:
     """The f64 matmul floor table (CPU-02). A LOSS regime (rule 16).
 
-    The per-size floor ratio is ``numpy.min_s / fastmathext.min_s`` from each
+    The per-size floor ratio is ``numpy.min_s / peregrine.min_s`` from each
     ``cases`` entry (the floor, not the median: AV noise inflates the median).
 
     The headline n=2048 parity figure comes from ``sweep`` -- the fresh 07-02
     matmul f64 sweep (refbox_matmul_f64.json), which carries full per-rep timing
-    behind every row (``fastmathext.min_s`` / ``numpy.min_s`` over 30 reps,
+    behind every row (``peregrine.min_s`` / ``numpy.min_s`` over 30 reps,
     ``verified: true``). Both the floor ratio (``speedup_floor``, the noise-robust
     headline) and the median ratio (``speedup_vs_numpy``) are recomputed from that
     per-rep data, so the quoted number regenerates from saved measurement, not
     from a hand-entered summary scalar. The honest story is unchanged: at f64
-    mid-size FastMathExt does not beat OpenBLAS.
+    mid-size Peregrine does not beat OpenBLAS.
     """
     cases = data["cases"]
     lines = [
-        "| n | FastMathExt floor (GFLOP/s) | OpenBLAS floor (GFLOP/s) "
+        "| n | Peregrine floor (GFLOP/s) | OpenBLAS floor (GFLOP/s) "
         "| floor ratio |",
         "| --- | --- | --- | --- |",
     ]
     for case in cases:
         n = case["n"]
         gflop = case["gflop"]
-        fme_min = case["fastmathext"]["min_s"]
+        pg_min = case["peregrine"]["min_s"]
         np_min = case["numpy"]["min_s"]
-        fme_gflops = gflop / fme_min
+        pg_gflops = gflop / pg_min
         np_gflops = gflop / np_min
-        ratio = np_min / fme_min
+        ratio = np_min / pg_min
         lines.append(
-            f"| {n} | {_fmt(fme_gflops, 1)} | {_fmt(np_gflops, 1)} "
+            f"| {n} | {_fmt(pg_gflops, 1)} | {_fmt(np_gflops, 1)} "
             f"| {_fmt(ratio)} |"
         )
     n2048 = _case_by_n(sweep["cases"], 2048)
@@ -170,7 +170,7 @@ def render_matmul_f64_table(data: dict, sweep: dict) -> str:
     lines.append(
         f"At n=2048 the fresh per-rep sweep measures {_fmt(floor_ratio)} of "
         f"OpenBLAS on the floor and {_fmt(median_ratio)} on the median. float64 "
-        "mid-size parity is the target; FastMathExt does not beat OpenBLAS here."
+        "mid-size parity is the target; Peregrine does not beat OpenBLAS here."
     )
     return "\n".join(lines)
 
@@ -179,7 +179,7 @@ def render_small_matrix_table(data: dict) -> str:
     """The small-matrix f32 table (CPU-06). A LOSS regime (rule 16).
 
     ``speedup_vs_numpy`` per ``cases`` entry is end-to-end Python time
-    (numpy_median / fme_median). Below 1.0 at every size: the in-tree small path
+    (numpy_median / pg_median). Below 1.0 at every size: the in-tree small path
     loses to NumPy's OpenBLAS small-GEMM dispatch plus the irreducible
     Python+nanobind round-trip floor.
     """
