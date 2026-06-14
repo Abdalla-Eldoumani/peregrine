@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace fme::dispatch {
+namespace pg::dispatch {
 
 // Every op routes through here. v1 has one backend (cpu naive); the packed
 // CPU kernels, the CUDA backend, and the calibrated crossover table all land
@@ -12,13 +12,13 @@ void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 extern template void matmul<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 extern template void matmul<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 
-#if defined(FME_HAS_CUDA)
+#if defined(PG_HAS_CUDA)
 // Device-resident GEMM routing. a, b, c are DEVICE pointers; the binding's
 // device matmul(Array, Array) path calls this for operands that are already on
 // the device, so it never stages host memory. Separate from the host matmul<T>
 // above on purpose: matmul<T> is the CPU decision and stays byte-identical, while
 // this is the device-resident decision the wrapper reaches only when BOTH
-// operands are an fme.Array.
+// operands are a pg.Array.
 //
 // Routing rules: float64 GEMM never AUTO-routes to this GPU (GA106 FP64 is 1/64
 // FP32, measured 194 vs 6519 GFLOP/s). That exclusion is enforced UPSTREAM by the
@@ -57,13 +57,13 @@ extern template void fused_fma3<double>(const double*, const double*, const doub
 extern template void fused_scaled_relu<float>(const float*, float*, int64_t, float);
 extern template void fused_scaled_relu<double>(const double*, double*, int64_t, double);
 
-#if defined(FME_HAS_CUDA)
+#if defined(PG_HAS_CUDA)
 // Device-resident fused routing. x, y, z, out are DEVICE pointers; the binding's
 // device fused Array overloads call these for operands already on the device, so
 // they never stage host memory. Separate from the host fused_* above on purpose:
 // the host entries are the CPU avx2/naive decision and stay byte-identical, while
 // these are the device-resident decision the wrapper reaches only when ALL
-// operands are an fme.Array. Unlike matmul there is NO f64-never-auto-routes
+// operands are a pg.Array. Unlike matmul there is NO f64-never-auto-routes
 // exclusion here: the fused device path is reached only by an explicit
 // to_device, so both dtypes route through (the wrapper never auto-stages a host
 // fused array to the GPU). Pure device-in/out forward to cuda::fused_*<T>.
@@ -104,4 +104,4 @@ extern template double sum_all<double>(const double*, int64_t, int64_t);
 extern template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
 extern template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
 
-} // namespace fme::dispatch
+} // namespace pg::dispatch
