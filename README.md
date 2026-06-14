@@ -1,6 +1,11 @@
-# FastMathExt
+# Peregrine
 
-FastMathExt is a heterogeneous linear algebra library for Python with a
+![python](https://img.shields.io/badge/python-3.12%2B-blue)
+![C++](https://img.shields.io/badge/C%2B%2B-20-blue)
+![CUDA](https://img.shields.io/badge/CUDA-optional-76B900)
+![license](https://img.shields.io/badge/license-MIT-green)
+
+Peregrine is a heterogeneous linear algebra library for Python with a
 NumPy-compatible surface. It dispatches matrix and elementwise work across packed
 AVX2 CPU kernels and an optional cuBLAS CUDA backend behind one zero-copy API. The
 native core takes views of C-contiguous float32 and float64 arrays with no copy;
@@ -17,7 +22,7 @@ Linux.
 - `transpose`, `sum`, `mean` reductions with NumPy-matching results.
 - Fused elementwise ops `axpby`, `fma3`, `scaled_relu` that compute a chain in one
   memory pass.
-- An optional CUDA backend: device-resident `fme.Array` handles, `to_device` /
+- An optional CUDA backend: device-resident `pg.Array` handles, `to_device` /
   `from_device` transfers, and an auto policy that routes a host float32 product to
   the GPU only when the calibrated crossover says the device wins after the
   transfer is paid. float64 never auto-routes to the GPU.
@@ -38,61 +43,61 @@ CUDA Toolkit 12.8 (nvcc and the cuBLAS/cublasLt libraries) and an NVIDIA driver
 new enough for it; the kernels target compute capability 8.6:
 
 ```bash
-pip install -e . --config-settings=cmake.define.FME_ENABLE_CUDA=ON
+pip install -e . --config-settings=cmake.define.PG_ENABLE_CUDA=ON
 ```
 
-`fme.has_cuda()` reports whether a usable device is present at runtime. On a
+`pg.has_cuda()` reports whether a usable device is present at runtime. On a
 CPU-only build it returns False and every operation runs on the CPU.
 
 ## Quickstart
 
 ```python
 import numpy as np
-import fastmathext as fme
+import peregrine as pg
 
 a = np.array([[1.0, 2.0], [3.0, 4.0]])
 b = np.eye(2)
 
 # Matrix product (host arrays in, host array out).
-fme.matmul(a, b)
+pg.matmul(a, b)
 
 # Transpose returns an owned copy, not a view.
-fme.transpose(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+pg.transpose(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
 
 # Reductions: axis is keyword-only (None, 0, or 1).
-fme.sum(a)            # scalar
-fme.sum(a, axis=0)    # length-n vector
-fme.mean(a, axis=1)   # length-m vector
+pg.sum(a)            # scalar
+pg.sum(a, axis=0)    # length-n vector
+pg.mean(a, axis=1)   # length-m vector
 
 # Fused elementwise ops. Array operands are positional; scalars are keyword-only.
 x = np.array([[1.0, 2.0], [3.0, 4.0]])
 y = np.array([[10.0, 20.0], [30.0, 40.0]])
 z = np.array([[1.0, 1.0], [1.0, 1.0]])
-fme.axpby(x, y, a=2.0, b=-1.0)   # a*x + b*y
-fme.fma3(x, y, z)                # x*y + z, one rounding
-fme.scaled_relu(x, scale=3.0)    # maximum(scale*x, 0)
+pg.axpby(x, y, a=2.0, b=-1.0)   # a*x + b*y
+pg.fma3(x, y, z)                # x*y + z, one rounding
+pg.scaled_relu(x, scale=3.0)    # maximum(scale*x, 0)
 ```
 
 With a CUDA build and a usable device:
 
 ```python
 import numpy as np
-import fastmathext as fme
+import peregrine as pg
 
-if fme.has_cuda():
+if pg.has_cuda():
     a = np.random.default_rng(0).standard_normal((1024, 1024)).astype(np.float32)
     b = np.random.default_rng(1).standard_normal((1024, 1024)).astype(np.float32)
 
     # Place operands on the device; matmul of two device arrays returns a device
     # array (no implicit transfer back).
-    da = fme.to_device(a)
-    db = fme.to_device(b)
-    dc = fme.matmul(da, db)
-    c = fme.from_device(dc)
+    da = pg.to_device(a)
+    db = pg.to_device(b)
+    dc = pg.matmul(da, db)
+    c = pg.from_device(dc)
 
     # Measure this machine and route host float32 products by the result.
-    fme.calibrate(force=True)
-    fme.set_backend("auto")
+    pg.calibrate(force=True)
+    pg.set_backend("auto")
 ```
 
 `set_backend` accepts `"auto"`, `"cpu"`, or `"cuda"`. `calibrate` measures a square
@@ -111,7 +116,7 @@ same machine. The two are not directly comparable per operation, only per regime
 
 ### float64 matmul (CPU)
 
-| n | FastMathExt floor (GFLOP/s) | OpenBLAS floor (GFLOP/s) | floor ratio |
+| n | Peregrine floor (GFLOP/s) | OpenBLAS floor (GFLOP/s) | floor ratio |
 | --- | --- | --- | --- |
 | 256 | 29.0 | 97.3 | 0.30 |
 | 512 | 40.9 | 93.5 | 0.44 |
@@ -119,7 +124,7 @@ same machine. The two are not directly comparable per operation, only per regime
 | 2048 | 76.2 | 112.5 | 0.68 |
 
 At n=2048 the fresh per-rep sweep measures 0.58 of OpenBLAS on the floor and 0.74
-on the median. float64 mid-size parity is the target; FastMathExt does not beat
+on the median. float64 mid-size parity is the target; Peregrine does not beat
 OpenBLAS here.
 
 ### Small-matrix float32 (CPU)
@@ -185,13 +190,20 @@ nc=2048 (selected on min_gflops).
 
 ### Charts
 
-The three charts are regenerated from the same JSON:
+The three charts are regenerated from the same JSON by `benchmarks/plots.py`.
 
-- `benchmarks/results/gflops_vs_n.png`: GFLOP/s vs n per backend.
-- `benchmarks/results/speedup_bars.png`: speedup per regime, wins and losses.
-- `benchmarks/results/crossover.png`: the host float32 crossover, CPU compute vs
-  GPU compute plus transfer, showing the size where the device wins for a host
-  array.
+GFLOP/s vs n per backend:
+
+![GFLOP/s vs n per backend](benchmarks/results/gflops_vs_n.png)
+
+Speedup per regime, wins and losses:
+
+![Speedup per regime](benchmarks/results/speedup_bars.png)
+
+The host float32 crossover, CPU compute vs GPU compute plus transfer, showing the
+size where the device wins for a host array:
+
+![Host float32 crossover](benchmarks/results/crossover.png)
 
 ## Methodology
 
@@ -209,7 +221,7 @@ passes.
 The statistic reported depends on the regime, because the timers differ:
 
 - CPU regimes (float64 matmul, small-matrix, thread scaling): the floor (min over
-  reps) of FastMathExt against the floor of NumPy. On this machine a background
+  reps) of Peregrine against the floor of NumPy. On this machine a background
   antivirus preempts an OpenMP worker at the fork/join barrier, which inflates the
   median and maximum of every multi-threaded CPU series; the floor is the
   noise-free best case, and the coefficient of variation, recorded alongside,
