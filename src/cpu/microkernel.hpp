@@ -10,9 +10,9 @@ namespace fme::cpu {
 // Each computes a full MR x NR accumulator tile from packed, zero-padded panels;
 // the live extents mr and nr drive the masked C store so a partial edge tile
 // writes only its real columns and rows and never touches memory past the tile.
-// The f32 shapes 8x16 and 6x16 are both declared because CPU-03 picks the winner
-// by measurement at n=512; the loser is removed once the bench decides. No
-// intrinsics appear here: the AVX2 SIMD header is included only in the flagged
+// The f32 shapes 8x16 and 6x16 are both declared because the winning shape is
+// chosen by measurement at n=512 (8x16 won; see README). No intrinsics appear
+// here: the AVX2 SIMD header is included only in the flagged
 // .cpp files, or AVX2 codegen would leak into the fallback path and recreate the
 // legacy import crash on CPUs without AVX2.
 void microkernel_f64_6x8(const double* ap, const double* bp, double* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr);
