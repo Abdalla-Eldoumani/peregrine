@@ -107,10 +107,27 @@ def _gpu_manifest() -> tuple[str, str]:
     return name.strip() or "none", driver.strip() or "n/a"
 
 
+def _redact_threadpools(pools: list) -> list:
+    # threadpoolctl reports each loaded pool's absolute on-disk filepath, which on
+    # a dev machine is an installed-package path under the user's home directory
+    # (the OS username and home structure). That is PII and must never be written
+    # into a committed results JSON. Keep only the library basename: the version,
+    # prefix, and architecture fields already document which BLAS ran, and the
+    # absolute path adds nothing a reader needs. Each entry is copied so the live
+    # threadpoolctl dict is left untouched.
+    redacted = []
+    for entry in pools:
+        item = dict(entry)
+        if "filepath" in item and item["filepath"]:
+            item["filepath"] = os.path.basename(item["filepath"])
+        redacted.append(item)
+    return redacted
+
+
 def _machine_manifest() -> dict:
-    # bench-protocol rule 9: no manifest, no merge. Every results JSON carries
-    # the machine identity, the BLAS the comparison ran against, the power
-    # profile (thermal state changes throughput on a laptop), and a timestamp.
+    # No manifest, no merge: every results JSON carries the machine identity, the
+    # BLAS the comparison ran against, the power profile (thermal state changes
+    # throughput on a laptop), and a timestamp.
     gpu, driver = _gpu_manifest()
     info = {
         "platform": platform.platform(),
@@ -132,7 +149,7 @@ def _machine_manifest() -> dict:
         "timestamp": datetime.datetime.now().isoformat(),
     }
     if threadpool_info is not None:
-        info["threadpools"] = threadpool_info()
+        info["threadpools"] = _redact_threadpools(threadpool_info())
     return info
 
 
