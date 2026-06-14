@@ -23,8 +23,8 @@ extern std::atomic<bool> g_torn_down;
 //
 // Why a singleton: cublasCreate and cudaStreamCreate cost milliseconds each, so
 // creating a handle or stream per matmul would dominate the small-GEMM budget
-// and defeat the point of the GPU path (the cuda-sm86 skill forbids per-call
-// handle creation). Holding device props, the streams, the mempool, and the
+// and defeat the point of the GPU path (per-call handle creation is the trap this
+// avoids). Holding device props, the streams, the mempool, and the
 // cublas/cublasLt handles for the process lifetime makes every later operation a
 // borrow, not a build.
 //
@@ -37,10 +37,10 @@ struct Context {
     int device_id;            // the bound device ordinal (0 on this single-GPU box)
     cudaDeviceProp props;     // queried once at init; free/total memory is read at use, not stored
     cudaStream_t compute;     // cublas is bound to this stream; GEMM launches here
-    cudaStream_t transfer;    // H2D/D2H copies run here (04-04) so they overlap compute
+    cudaStream_t transfer;    // H2D/D2H copies run here so they overlap compute
     cudaMemPool_t pool;       // the device default mempool, release threshold raised for reuse
     cublasHandle_t cublas;    // one v2 handle, bound to the compute stream
-    cublasLtHandle_t cublaslt; // held for future use (batched/epilogue work); GEMM 04-03 uses cublasSgemm/Dgemm
+    cublasLtHandle_t cublaslt; // held for future use (batched/epilogue work); GEMM uses cublasSgemm/Dgemm
     bool tf32_enabled;        // FME_ALLOW_TF32 folded ONCE here so every GEMM sees one math-mode answer
 };
 
@@ -52,18 +52,18 @@ struct Context {
 // no-CUDA-init-at-import rule) -- only on the first device operation.
 Context& context();
 
-// Cheap device-presence probe that does NOT build the full Context. has_cuda
-// (04-05) and the requires_cuda test gate must answer "is a usable device here"
-// without paying stream/handle/pool creation, so this is separate from context()
-// on purpose: it runs cudaGetDeviceCount and reads compute capability, nothing
+// Cheap device-presence probe that does NOT build the full Context. has_cuda and
+// the requires_cuda test gate must answer "is a usable device here" without paying
+// stream/handle/pool creation, so this is separate from context() on purpose: it
+// runs cudaGetDeviceCount and reads compute capability, nothing
 // more. Returns the CUDA-free verdict POD (present + cc + reason). present is
 // true only when the driver loads, a device exists, and its compute capability
 // is >= 7.0; reason names the failure otherwise.
 cuda_device_info device_probe();
 
 // Forces context() construction and reports the bound device. This is the entry
-// the binding calls to drive context init from Python (and to read the props the
-// GPU-01 test asserts on) without including this header: it returns the CUDA-free
+// the binding calls to drive context init from Python (and to read the device
+// props) without including this header: it returns the CUDA-free
 // cuda_device_info, so module.cpp only forward-declares it. If no usable device
 // is present it returns a not-present POD (with the probe's reason) and does NOT
 // build the context, so calling it on a driverless machine cannot throw.
