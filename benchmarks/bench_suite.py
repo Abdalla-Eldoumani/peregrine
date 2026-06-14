@@ -1,9 +1,9 @@
 """The orchestrator: run every benchmark regime to a single results JSON.
 
-benchmarks/CLAUDE.md names this file. It composes the existing regimes -- the
-matmul CPU pairs + device-resident GPU slice (bench_matmul), the fused 3-op chain
-CPU + GPU series (bench_fused), and the full GPU with/without-transfer x cold/warm
-matrix (bench_gpu) -- into one dict with the shared manifest, so a single command
+This orchestrator composes the existing regimes -- the matmul CPU pairs +
+device-resident GPU slice (bench_matmul), the fused 3-op chain CPU + GPU series
+(bench_fused), and the full GPU with/without-transfer x cold/warm matrix
+(bench_gpu) -- into one dict with the shared manifest, so a single command
 captures the whole measurement set. It reuses the protocol machinery; it does not
 re-derive any of it (the manifest, the CV-gated timing core, and every series
 function are imported, the bench_fused line-48 pattern).
@@ -57,10 +57,11 @@ def run(
     # One dict, the shared manifest, every regime under its own key. Each series
     # function already verifies per size and publishes verified=true only after
     # the toleranced path passes, so the assembled dict carries no verified-false
-    # series (benchmarks/CLAUDE.md). The matmul regime returns CPU cases plus the
-    # device-resident gpu_cases (on ON); the fused regime returns cpu_cases plus
-    # gpu_cases; the GPU matrix returns the without-transfer regime under
-    # gpu_cases and the with-transfer regime under its own key.
+    # series (no result with verified false ever reaches a results file). The
+    # matmul regime returns CPU cases plus the device-resident gpu_cases (on ON);
+    # the fused regime returns cpu_cases plus gpu_cases; the GPU matrix returns
+    # the without-transfer regime under gpu_cases and the with-transfer regime
+    # under its own key.
     fused_elems = fused_elems if fused_elems is not None else _FUSED_ELEMS
     results = {
         "manifest": _machine_manifest(),
