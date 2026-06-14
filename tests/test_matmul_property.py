@@ -34,7 +34,7 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-import fastmathext as fme
+import peregrine as pg
 from conftest import assert_matmul_close
 
 # the regression fence: every entry is applied as a square @example pin on
@@ -92,7 +92,7 @@ def _rng_operands(m, k, n, seed, dtype):
 @given(operands=_drawn_operands(np.float64, _F64_ELEMENTS))
 def test_values_float64(operands):
     a, b = operands
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     ref = a @ b
     assert_matmul_close(got, ref, a, b)
 
@@ -100,7 +100,7 @@ def test_values_float64(operands):
 @given(operands=_drawn_operands(np.float32, _F32_ELEMENTS))
 def test_values_float32(operands):
     a, b = operands
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     ref = a @ b
     assert_matmul_close(got, ref, a, b)
 
@@ -111,7 +111,7 @@ def test_values_float32(operands):
 @given(m=_DIM, k=_DIM, n=_DIM, seed=_SEED, dtype=_DTYPE)
 def test_shapes(m, k, n, seed, dtype):
     a, b = _rng_operands(m, k, n, seed, dtype)
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     ref = a @ b
     assert_matmul_close(got, ref, a, b)
 
@@ -137,7 +137,7 @@ for _size in LEGACY_KILLER_SIZES:
 )
 def test_shapes_spike(m, k, n, seed, dtype):
     a, b = _rng_operands(m, k, n, seed, dtype)
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     ref = a @ b
     assert_matmul_close(got, ref, a, b)
 
@@ -168,7 +168,7 @@ def _special_value_operands(draw):
 @given(operands=_special_value_operands())
 def test_special_values_propagate(operands):
     a, b = operands
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     ref = a @ b
     # the helper's special path asserts NaN positions, Inf positions, and
     # each Inf's sign match NumPy, then bounds the mutually finite remainder
@@ -199,7 +199,7 @@ def test_layouts(m, k, n, layout_a, layout_b, seed):
     rng = np.random.default_rng(seed)
     a = _with_layout(rng, m, k, layout_a)
     b = _with_layout(rng, k, n, layout_b)
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     ref = a @ b
     assert_matmul_close(got, ref, a, b)
 
@@ -216,7 +216,7 @@ def test_promotion(m, k, n, dtype_a, dtype_b, seed):
     rng = np.random.default_rng(seed)
     a = rng.standard_normal((m, k)).astype(dtype_a)
     b = rng.standard_normal((k, n)).astype(dtype_b)
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     ref = a @ b
     # NumPy already lands float pairs on result_type, so ref needs no cast;
     # integer promotion diverges by design (int becomes float64 here, stays
