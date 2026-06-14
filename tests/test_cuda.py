@@ -1,8 +1,8 @@
 """CUDA suite skeleton. The whole file skips cleanly with a stated reason on a
 CPU-only build or a machine without a usable device, so it stays green on the
 WSL/GCC clone and on the default CPU-only Windows build, and only exercises the
-device paths on the FME_ENABLE_CUDA=ON build (tests/CLAUDE.md: GPU tests skip
-cleanly, never fail for absent hardware).
+device paths on the FME_ENABLE_CUDA=ON build (GPU tests skip cleanly, never fail
+for absent hardware).
 
 requires_cuda() (conftest) is the one gate: build flag plus a usable-device
 probe. It migrates to fme.has_cuda() in 04-05 when that public runtime predicate
@@ -199,7 +199,7 @@ def test_gemm_f64_matches_numpy(n):
 
 @gpu
 def test_gemm_zero_dims():
-    # GPU-02 / DESIGN_SYSTEM zero-sized dim semantics: the guards run before any
+    # GPU-02 zero-sized dim semantics: the guards run before any
     # cuBLAS launch (an empty GEMM must not reach cuBLAS). (m,0)@(0,n) is an m x n
     # matrix of exact zeros; (0,k)@(k,n) is an empty (0,n). Exact equality, not
     # toleranced: a k=0 product is exactly zero and an empty result has no
@@ -250,7 +250,7 @@ def test_tf32_off_by_default_matches_contract(tmp_path):
     #      TF32 is actually engaged and is why it is off by default. The TF32
     #      result is deliberately NOT run through assert_matmul_close: TF32 is
     #      opt-in and excluded from the standard contract and from headline
-    #      numbers (DESIGN_SYSTEM numeric policy).
+    #      numbers (the numeric policy).
     rng = np.random.default_rng(515)
     k = 517
     a = rng.standard_normal((512, k)).astype(np.float32)
@@ -394,7 +394,7 @@ def test_device_matmul_transfer_ordering(n):
 @gpu
 def test_mixed_residency_raises():
     # GPU-06 residency: exactly one device-resident operand is the verbatim
-    # mixed-residency TypeError (DESIGN_SYSTEM.md), never a silent host<->device
+    # mixed-residency TypeError, never a silent host<->device
     # transfer. Both operand orders, since the wrapper must reject either side
     # being the device one.
     rng = np.random.default_rng(7)
