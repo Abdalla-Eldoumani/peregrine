@@ -1,7 +1,7 @@
-// std::getenv is the standard portable read and FME_ALLOW_TF32 is only ever
+// std::getenv is the standard portable read and PEREGRINE_ALLOW_TF32 is only ever
 // compared, never used to build a path or a command, so MSVC's /W4 C4996
 // deprecation (which steers toward getenv_s) is noise here; silence it
-// TU-locally, exactly as src/cpu/feature_detect.cpp does for FME_DISABLE_AVX2.
+// TU-locally, exactly as src/cpu/feature_detect.cpp does for PEREGRINE_DISABLE_AVX2.
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "cuda/context.cuh"
@@ -13,7 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace fme::cuda {
+namespace pg::cuda {
 namespace {
 
 // The device the backend targets. Single-GPU box; multi-GPU selection is backlog.
@@ -66,7 +66,7 @@ void teardown() {
 
     // Order: handles before streams (a handle may have work queued on its
     // stream), and every result is discarded. cudaErrorCudartUnloading here is
-    // the expected benign case, not a failure. No FME_*_CHECK: see above.
+    // the expected benign case, not a failure. No PG_*_CHECK: see above.
     if (g_cublaslt != nullptr) {
         cublasLtDestroy(g_cublaslt);
         g_cublaslt = nullptr;
@@ -85,15 +85,15 @@ void teardown() {
     }
 }
 
-// Reads FME_ALLOW_TF32 exactly once, here, so the answer is folded into the
+// Reads PEREGRINE_ALLOW_TF32 exactly once, here, so the answer is folded into the
 // Context for the process lifetime and every later GEMM sees one math mode. Any
 // value except null or a literal "0" counts as enabled, matching the
-// FME_DISABLE_AVX2 convention in feature_detect.cpp. Default OFF: TF32's 10-bit
+// PEREGRINE_DISABLE_AVX2 convention in feature_detect.cpp. Default OFF: TF32's 10-bit
 // mantissa is ~830x worse abs error than DEFAULT_MATH at n=512 (measured), which
 // shatters the tolerance contract, so it is opt-in only and never in headline
 // numbers.
 bool read_tf32_flag() {
-    const char* allow = std::getenv("FME_ALLOW_TF32");
+    const char* allow = std::getenv("PEREGRINE_ALLOW_TF32");
     return allow != nullptr && std::strcmp(allow, "0") != 0;
 }
 
@@ -101,32 +101,32 @@ Context build_context() {
     Context ctx{};
     ctx.device_id = kDevice;
 
-    FME_CUDA_CHECK(cudaSetDevice(ctx.device_id));
-    FME_CUDA_CHECK(cudaGetDeviceProperties(&ctx.props, ctx.device_id));
+    PG_CUDA_CHECK(cudaSetDevice(ctx.device_id));
+    PG_CUDA_CHECK(cudaGetDeviceProperties(&ctx.props, ctx.device_id));
 
     // Two streams: GEMM launches on compute, transfers run on transfer so an
     // H2D/D2H copy can overlap an unrelated compute. Both are plain blocking
     // streams; the priority/non-blocking knobs buy nothing for this workload.
-    FME_CUDA_CHECK(cudaStreamCreate(&ctx.compute));
-    FME_CUDA_CHECK(cudaStreamCreate(&ctx.transfer));
+    PG_CUDA_CHECK(cudaStreamCreate(&ctx.compute));
+    PG_CUDA_CHECK(cudaStreamCreate(&ctx.transfer));
 
     // The device default mempool with the release threshold raised to UINT64_MAX:
     // cudaFreeAsync returns memory to the pool instead of the OS, so the next
     // matmul reuses it rather than re-allocating (set the release threshold high so
     // repeated matmuls reuse memory). The stream-ordered allocations
     // (cudaMallocAsync) rely on this policy the pool keeps.
-    FME_CUDA_CHECK(cudaDeviceGetDefaultMemPool(&ctx.pool, ctx.device_id));
+    PG_CUDA_CHECK(cudaDeviceGetDefaultMemPool(&ctx.pool, ctx.device_id));
     // Non-const: cudaMemPoolSetAttribute takes a void* value pointer (it is a
     // generic getter/setter), so a const-qualified threshold fails to bind.
     std::uint64_t release_threshold = UINT64_MAX;
-    FME_CUDA_CHECK(cudaMemPoolSetAttribute(
+    PG_CUDA_CHECK(cudaMemPoolSetAttribute(
         ctx.pool, cudaMemPoolAttrReleaseThreshold, &release_threshold));
 
     // One cublas v2 handle, bound to the compute stream so its GEMMs serialize
     // with everything else on that stream. cublasCreate is the millisecond cost
     // the singleton exists to pay exactly once.
-    FME_CUBLAS_CHECK(cublasCreate(&ctx.cublas));
-    FME_CUBLAS_CHECK(cublasSetStream(ctx.cublas, ctx.compute));
+    PG_CUBLAS_CHECK(cublasCreate(&ctx.cublas));
+    PG_CUBLAS_CHECK(cublasSetStream(ctx.cublas, ctx.compute));
 
     // Fold the TF32 flag once and set the handle's math mode to match here, so
     // the policy is decided at init and cannot be toggled mid-session into a
@@ -134,7 +134,7 @@ Context build_context() {
     // TF32_TENSOR_OP only when explicitly opted in. The GEMM also consults
     // ctx.tf32_enabled, but the handle already carries the decided mode.
     ctx.tf32_enabled = read_tf32_flag();
-    FME_CUBLAS_CHECK(cublasSetMathMode(
+    PG_CUBLAS_CHECK(cublasSetMathMode(
         ctx.cublas,
         ctx.tf32_enabled ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH));
 
@@ -142,7 +142,7 @@ Context build_context() {
     // uses the v2 cublasSgemm/Dgemm, which is simpler and equally fast for plain
     // GEMM; this handle is created now so that work never pays a per-call create
     // later.
-    FME_CUBLAS_CHECK(cublasLtCreate(&ctx.cublaslt));
+    PG_CUBLAS_CHECK(cublasLtCreate(&ctx.cublaslt));
 
     // Publish the raw handles for teardown and register it. atexit runs the
     // registered functions in reverse order at normal process exit, before the
@@ -235,4 +235,4 @@ cuda_device_info context_device_info() {
     return info;
 }
 
-} // namespace fme::cuda
+} // namespace pg::cuda
