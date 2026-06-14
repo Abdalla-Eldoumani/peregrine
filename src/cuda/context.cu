@@ -16,7 +16,7 @@
 namespace fme::cuda {
 namespace {
 
-// The device this phase targets. Single-GPU box; multi-GPU selection is backlog.
+// The device the backend targets. Single-GPU box; multi-GPU selection is backlog.
 constexpr int kDevice = 0;
 
 // Compute-capability floor for "usable". sm_70 is the first tensor-core
