@@ -9,7 +9,7 @@
 
 // Every CUDA and cuBLAS call in src/cuda goes through one of these macros: a
 // naked return code is a silent-corruption or silent-crash bug. On failure they
-// throw fme::cuda_error (defined in core/common.hpp, CUDA-include-free) carrying
+// throw pg::cuda_error (defined in core/common.hpp, CUDA-include-free) carrying
 // the error NAME plus file and line. Only the name travels up; the distinct
 // user-facing wording (cudaErrorMemoryAllocation, cudaErrorInsufficientDriver,
 // launch timeout) is composed in the Python wrapper, which owns user semantics.
@@ -20,7 +20,7 @@
 // hand and swallows cudaErrorCudartUnloading / already-freed states instead of
 // throwing. This is enforced where the context singleton's teardown lands.
 
-namespace fme::cuda {
+namespace pg::cuda {
 
 // cuBLAS error-name resolution. cublasGetStatusName has shipped since well before
 // 12.x and 12.8 is the only supported toolkit, so call it unconditionally.
@@ -37,24 +37,24 @@ inline const char* cublas_status_name(cublasStatus_t s) {
     return cublasGetStatusName(s);
 }
 
-} // namespace fme::cuda
+} // namespace pg::cuda
 
-#define FME_CUDA_CHECK(x)                                                       \
+#define PG_CUDA_CHECK(x)                                                       \
     do {                                                                        \
         cudaError_t e_ = (x);                                                   \
         if (e_ != cudaSuccess) {                                                \
-            throw ::fme::cuda_error(                                            \
+            throw ::pg::cuda_error(                                            \
                 std::string(cudaGetErrorName(e_)) + " at " + __FILE__ + ":" +   \
                 std::to_string(__LINE__));                                      \
         }                                                                       \
     } while (0)
 
-#define FME_CUBLAS_CHECK(x)                                                     \
+#define PG_CUBLAS_CHECK(x)                                                     \
     do {                                                                        \
         cublasStatus_t s_ = (x);                                                \
         if (s_ != CUBLAS_STATUS_SUCCESS) {                                      \
-            throw ::fme::cuda_error(                                            \
-                std::string(::fme::cuda::cublas_status_name(s_)) + " at " +     \
+            throw ::pg::cuda_error(                                            \
+                std::string(::pg::cuda::cublas_status_name(s_)) + " at " +     \
                 __FILE__ + ":" + std::to_string(__LINE__));                     \
         }                                                                       \
     } while (0)
