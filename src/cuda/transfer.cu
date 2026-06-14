@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace fme::cuda {
+namespace pg::cuda {
 namespace {
 
 // OOM pre-flight headroom. cudaMemGetInfo reports free VRAM that fluctuates with
@@ -28,7 +28,7 @@ void* alloc_device(int64_t bytes) {
     // from the binding, but alloc_device is a public entry in transfer.cuh and
     // must defend its own contract rather than trust the `> 0` skip.
     if (bytes < 0) {
-        throw ::fme::cuda_error("alloc_device: negative byte count");
+        throw ::pg::cuda_error("alloc_device: negative byte count");
     }
     // A zero-byte buffer is legal (an empty operand): cudaMallocAsync accepts 0
     // and returns a pointer that is valid to free. Skip the pre-flight for it --
@@ -41,16 +41,16 @@ void* alloc_device(int64_t bytes) {
         // fluctuates with the display (measured 4709-5130 MiB on the reference
         // machine at different moments), so a fixed target either fails to guard or wedges
         // the desktop. If the request plus the margin exceeds free, throw
-        // fme::cuda_error carrying the cudaErrorMemoryAllocation NAME -- the same
+        // pg::cuda_error carrying the cudaErrorMemoryAllocation NAME -- the same
         // name a real allocation failure would carry -- so the wrapper composes
         // one byte-math message off the name for both the pre-flight refusal and a
         // mid-flight OOM (the VRAM-exhaustion path).
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
-        FME_CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+        PG_CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
         const int64_t need = bytes + kOomMarginBytes;
         if (need > static_cast<int64_t>(free_bytes)) {
-            throw ::fme::cuda_error(
+            throw ::pg::cuda_error(
                 std::string(cudaGetErrorName(cudaErrorMemoryAllocation)) +
                 ": device allocation of " + std::to_string(bytes) +
                 " bytes exceeds free VRAM (" + std::to_string(free_bytes) +
@@ -60,7 +60,7 @@ void* alloc_device(int64_t bytes) {
     }
 
     void* dptr = nullptr;
-    FME_CUDA_CHECK(
+    PG_CUDA_CHECK(
         cudaMallocAsync(&dptr, static_cast<std::size_t>(bytes), stream));
     return dptr;
 }
@@ -78,7 +78,7 @@ void free_device(void* dptr) {
     //      reclaimed by the CUDA driver at process exit anyway, so leaking it
     //      here is correct, while cudaFreeAsync on the destroyed stream is a
     //      use-after-teardown.
-    //   2. On the live path, do NOT use FME_CUDA_CHECK -- it throws, and a throw
+    //   2. On the live path, do NOT use PG_CUDA_CHECK -- it throws, and a throw
     //      escaping ~Array during GC terminates the interpreter (the same hazard
     //      teardown itself avoids, check.cuh). Inspect the return code by hand
     //      and swallow the shutdown/invalid-resource codes that mean the stream
@@ -111,7 +111,7 @@ void copy_h2d(void* dst_dev, const void* src_host, int64_t bytes) {
     // orders any dependent compute on the same stream or syncs before a
     // host-visible read.
     Context& ctx = context();
-    FME_CUDA_CHECK(cudaMemcpyAsync(dst_dev, src_host,
+    PG_CUDA_CHECK(cudaMemcpyAsync(dst_dev, src_host,
                                    static_cast<std::size_t>(bytes),
                                    cudaMemcpyHostToDevice, ctx.transfer));
 }
@@ -125,7 +125,7 @@ void copy_d2h(void* dst_host, const void* src_dev, int64_t bytes) {
     // followed by sync_transfer() before the host buffer is read on the Python
     // side. This function only queues the copy; from_device owns the sync.
     Context& ctx = context();
-    FME_CUDA_CHECK(cudaMemcpyAsync(dst_host, src_dev,
+    PG_CUDA_CHECK(cudaMemcpyAsync(dst_host, src_dev,
                                    static_cast<std::size_t>(bytes),
                                    cudaMemcpyDeviceToHost, ctx.transfer));
 }
@@ -139,7 +139,7 @@ void sync_transfer() {
     // use-before-ready race this fence closes). CHECK-wrapped (a sync can surface
     // an asynchronous launch/copy error) and never used at teardown.
     Context& ctx = context();
-    FME_CUDA_CHECK(cudaStreamSynchronize(ctx.transfer));
+    PG_CUDA_CHECK(cudaStreamSynchronize(ctx.transfer));
 }
 
 void sync_compute() {
@@ -150,7 +150,7 @@ void sync_compute() {
     // same "async wins inside a call, never across the API boundary" rule applied
     // to the compute stream. CHECK-wrapped and never used at teardown.
     Context& ctx = context();
-    FME_CUDA_CHECK(cudaStreamSynchronize(ctx.compute));
+    PG_CUDA_CHECK(cudaStreamSynchronize(ctx.compute));
 }
 
-} // namespace fme::cuda
+} // namespace pg::cuda
