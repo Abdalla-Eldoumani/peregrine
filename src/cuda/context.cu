@@ -19,9 +19,9 @@ namespace {
 // The device this phase targets. Single-GPU box; multi-GPU selection is backlog.
 constexpr int kDevice = 0;
 
-// Compute-capability floor for "usable" (EDGE_CASES device chain). sm_70 is the
-// first tensor-core generation; everything this phase relies on (cudaMallocAsync
-// mempools, cublasLt, the f32 GEMM path) is present at and above it. The dev box
+// Compute-capability floor for "usable". sm_70 is the first tensor-core
+// generation; everything this backend relies on (cudaMallocAsync mempools,
+// cublasLt, the f32 GEMM path) is present at and above it. The reference machine
 // is sm_86, comfortably above the floor.
 constexpr int kMinCcMajor = 7;
 
@@ -50,8 +50,8 @@ cudaStream_t g_transfer = nullptr;
 // free_device would otherwise cudaFreeAsync on that destroyed stream. The flag
 // turns that post-teardown free into a no-op: the mempool buffer is reclaimed by
 // the driver at process exit anyway, so leaking it is correct, while freeing it
-// on a dead stream is the use-after-teardown CR-01 names. Defined in the named
-// namespace (not the anonymous one) so transfer.cu can read it via context.cuh.
+// on a dead stream is a use-after-teardown. Defined in the named namespace (not
+// the anonymous one) so transfer.cu can read it via context.cuh.
 std::atomic<bool> g_torn_down{false};
 
 namespace {
@@ -104,17 +104,17 @@ Context build_context() {
     FME_CUDA_CHECK(cudaSetDevice(ctx.device_id));
     FME_CUDA_CHECK(cudaGetDeviceProperties(&ctx.props, ctx.device_id));
 
-    // Two streams: GEMM launches on compute, transfers (04-04) run on transfer so
-    // an H2D/D2H copy can overlap an unrelated compute. Both are plain blocking
+    // Two streams: GEMM launches on compute, transfers run on transfer so an
+    // H2D/D2H copy can overlap an unrelated compute. Both are plain blocking
     // streams; the priority/non-blocking knobs buy nothing for this workload.
     FME_CUDA_CHECK(cudaStreamCreate(&ctx.compute));
     FME_CUDA_CHECK(cudaStreamCreate(&ctx.transfer));
 
     // The device default mempool with the release threshold raised to UINT64_MAX:
     // cudaFreeAsync returns memory to the pool instead of the OS, so the next
-    // matmul reuses it rather than re-allocating (the skill's "set the release
-    // threshold high so repeated matmuls reuse memory"). Stream-ordered allocation
-    // (cudaMallocAsync) lands in 04-04; this sets the policy the pool keeps.
+    // matmul reuses it rather than re-allocating (set the release threshold high so
+    // repeated matmuls reuse memory). The stream-ordered allocations
+    // (cudaMallocAsync) rely on this policy the pool keeps.
     FME_CUDA_CHECK(cudaDeviceGetDefaultMemPool(&ctx.pool, ctx.device_id));
     // Non-const: cudaMemPoolSetAttribute takes a void* value pointer (it is a
     // generic getter/setter), so a const-qualified threshold fails to bind.
@@ -131,17 +131,17 @@ Context build_context() {
     // Fold the TF32 flag once and set the handle's math mode to match here, so
     // the policy is decided at init and cannot be toggled mid-session into a
     // result that violates the tolerance contract. DEFAULT_MATH is the f32 path;
-    // TF32_TENSOR_OP only when explicitly opted in. 04-03's GEMM also consults
+    // TF32_TENSOR_OP only when explicitly opted in. The GEMM also consults
     // ctx.tf32_enabled, but the handle already carries the decided mode.
     ctx.tf32_enabled = read_tf32_flag();
     FME_CUBLAS_CHECK(cublasSetMathMode(
         ctx.cublas,
         ctx.tf32_enabled ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH));
 
-    // cublasLt handle held for future use (batched / epilogue control, Phase 6
-    // backlog) per the skill's context contract. The GEMM in 04-03 uses the v2
-    // cublasSgemm/Dgemm, which is simpler and equally fast for plain GEMM; this
-    // handle is created now so that work never pays a per-call create later.
+    // cublasLt handle held for future use (batched / epilogue control). The GEMM
+    // uses the v2 cublasSgemm/Dgemm, which is simpler and equally fast for plain
+    // GEMM; this handle is created now so that work never pays a per-call create
+    // later.
     FME_CUBLAS_CHECK(cublasLtCreate(&ctx.cublaslt));
 
     // Publish the raw handles for teardown and register it. atexit runs the
@@ -170,11 +170,11 @@ Context& context() {
 }
 
 cuda_device_info device_probe() {
-    // Cheap and never-throwing: this is what has_cuda (04-05) and the test gate
-    // call to decide "is a usable device here" without paying full context init.
-    // Every CUDA result is inspected by hand, not via the throwing CHECK macros,
-    // so a driverless or device-less machine gets a not-present verdict instead
-    // of an exception. Reason strings map to the EDGE_CASES device chain.
+    // Cheap and never-throwing: this is what has_cuda and the test gate call to
+    // decide "is a usable device here" without paying full context init. Every
+    // CUDA result is inspected by hand, not via the throwing CHECK macros, so a
+    // driverless or device-less machine gets a not-present verdict instead of an
+    // exception. Reason strings name the specific failure mode.
     cuda_device_info info{};
     info.present = false;
     info.device_id = kDevice;
