@@ -32,7 +32,7 @@ namespace {
 // compare), which does NOT match np.maximum -- NumPy propagates the NaN. The
 // fix: take the max, then blend the original v back wherever v was NaN. The NaN
 // mask is cmp(v, v, UNORD), all-ones exactly where v != v. Verified bit-for-bit
-// against np.maximum(scale*x, 0) on this CPU (06-RESEARCH Pattern 2).
+// against np.maximum(scale*x, 0).
 inline __m256 relu_nan_safe_ps(__m256 v) {
     const __m256 zero = _mm256_setzero_ps();
     const __m256 m = _mm256_max_ps(v, zero);
