@@ -12,7 +12,7 @@ zero-copy input.
 import numpy as np
 import pytest
 
-import fastmathext as fme
+import peregrine as pg
 from conftest import assert_matmul_close
 
 
@@ -29,12 +29,12 @@ def test_fast_path_skips_helper_chain(monkeypatch, dtype):
     def _boom(*args, **kwargs):
         raise AssertionError("fast path must skip the helper chain for qualifying inputs")
 
-    monkeypatch.setattr(fme, "_prepare", _boom)
-    monkeypatch.setattr(fme, "_normalize", _boom)
+    monkeypatch.setattr(pg, "_prepare", _boom)
+    monkeypatch.setattr(pg, "_normalize", _boom)
     monkeypatch.setattr(np, "result_type", _boom)
 
     a, b = _qualifying(dtype)
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     assert got.dtype == dtype
     assert got.shape == (8, 8)
 
@@ -45,7 +45,7 @@ def test_fast_path_result_matches_slow_path(dtype):
     # is deterministic and the slow path also lands on a no-copy normalize for
     # these inputs, so bitwise equality is the correct bar.
     a, b = _qualifying(dtype)
-    fast = fme.matmul(a, b)
+    fast = pg.matmul(a, b)
     ref = a @ b
     assert_matmul_close(fast, ref, a, b)
 
@@ -56,7 +56,7 @@ def test_non_contiguous_falls_through_to_slow_path():
     rng = np.random.default_rng(0)
     a = np.asfortranarray(rng.standard_normal((16, 8)))
     b = rng.standard_normal((8, 4))
-    assert_matmul_close(fme.matmul(a, b), a @ b, a, b)
+    assert_matmul_close(pg.matmul(a, b), a @ b, a, b)
 
 
 def test_mixed_dtype_falls_through_to_slow_path():
@@ -65,7 +65,7 @@ def test_mixed_dtype_falls_through_to_slow_path():
     rng = np.random.default_rng(0)
     a = rng.standard_normal((8, 8)).astype(np.float32)
     b = rng.standard_normal((8, 8)).astype(np.float64)
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     assert got.dtype == np.float64
     assert_matmul_close(got, a @ b, a, b)
 
@@ -75,7 +75,7 @@ def test_integer_input_falls_through_and_promotes():
     # fast path must decline so the int->float64 promotion still happens.
     a = np.arange(6, dtype=np.int64).reshape(2, 3)
     b = np.arange(12, dtype=np.int64).reshape(3, 4)
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     assert got.dtype == np.float64
     np.testing.assert_array_equal(got, (a @ b).astype(np.float64))
 
@@ -86,7 +86,7 @@ def test_rejected_dtype_still_raises_on_fast_path_candidate():
     # fire (the fast path is a pre-branch, not a contract replacement).
     a = np.zeros((8, 8), dtype=np.float16)
     with pytest.raises(TypeError, match="unsupported dtype float16"):
-        fme.matmul(a, a)
+        pg.matmul(a, a)
 
 
 def test_list_input_falls_through_to_slow_path():
@@ -94,7 +94,7 @@ def test_list_input_falls_through_to_slow_path():
     # decline and _prepare must run.
     a = [[1.0, 2.0], [3.0, 4.0]]
     b = [[1.0, 0.0], [0.0, 1.0]]
-    got = fme.matmul(a, b)
+    got = pg.matmul(a, b)
     np.testing.assert_array_equal(got, np.array(a) @ np.array(b))
 
 
@@ -105,7 +105,7 @@ def test_fast_path_is_zero_copy(dtype):
     # without a defensive copy (the zero-copy contract the wrapper promises).
     a, b = _qualifying(dtype)
     a_ptr, b_ptr = a.ctypes.data, b.ctypes.data
-    fme.matmul(a, b)
+    pg.matmul(a, b)
     # inputs unchanged in identity and address: no copy was made of them
     assert a.ctypes.data == a_ptr
     assert b.ctypes.data == b_ptr
