@@ -1,15 +1,15 @@
 {
-  "decision": "CPU-03 f32 microkernel shape: 8x16 vs 6x16, decided at n=512",
+  "decision": "f32 microkernel shape: 8x16 vs 6x16, decided at n=512",
   "winner": "8x16",
   "loser": "6x16",
-  "metric": "best-min floor GFLOP/s over repeated cooldown-separated single-thread runs (noise-robust; a persistent background antivirus held CV above the 5% protocol gate, so the spike-resistant floor decides, not the median, per the 03-04 finding)",
+  "metric": "best-min floor GFLOP/s over repeated cooldown-separated single-thread runs (noise-robust; a persistent background antivirus held CV above the 5% protocol gate, so the spike-resistant floor decides, not the median)",
   "measurement_mode": "single-thread (OMP_NUM_THREADS=1) at n=512 f32; the shape decision is a per-core register/port comparison, and the single-thread floor has CV ~10-26% vs the 55-155% the 6-thread region shows under the same AV load, so the per-core signal is the trustworthy one for this relative choice",
   "n": 512,
   "dtype": "float32",
   "gflop": 0.268435456,
   "reps_per_run": 50,
   "warmup_per_run": 5,
-  "rationale": "The register-budget argument predicted 6x16 would win (8x16 needs 16 ymm accumulators, the whole file, forcing B reloads each k-step; 6x16 mirrors the f64 6x8 12-accumulator budget with 2 ymm free for B and 1 for the broadcast). Measurement overruled it: 8x16's higher arithmetic density (16 FMAs per k-step) amortizes the B reloads and won by ~8% on this Comet Lake core's port layout in two independent rounds. This is exactly the case the gemm-optimization skill names: decide f32 shape by measuring, not by counting registers.",
+  "rationale": "The register-budget argument predicted 6x16 would win (8x16 needs 16 ymm accumulators, the whole file, forcing B reloads each k-step; 6x16 mirrors the f64 6x8 12-accumulator budget with 2 ymm free for B and 1 for the broadcast). Measurement overruled it: 8x16's higher arithmetic density (16 FMAs per k-step) amortizes the B reloads and won by ~8% on this Comet Lake core's port layout in two independent rounds. This is the case where f32 shape must be decided by measuring, not by counting registers.",
   "results": {
     "8x16": {
       "round1_best_min_floor_gflops": 55.1,
