@@ -302,6 +302,16 @@ def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
             "fme_gflops": gflop / ours["median_s"],
             "numpy_gflops": gflop / numpy_t["median_s"],
             "speedup_vs_numpy": numpy_t["median_s"] / ours["median_s"],
+            # The floor (min) ratio is the headline statistic on this AV-noisy
+            # machine (the median is dragged by AV-vs-OpenMP barrier preemption,
+            # Pitfall 2); recorded alongside the median speedup above so a
+            # consumer quotes the honest floor, not the inflated median.
+            "speedup_floor": numpy_t["min_s"] / ours["min_s"],
+            # True because assert_matmul_close passed above before any time was
+            # recorded (rule 11). The shared load_series validator (07-01) requires
+            # a stored verified flag on every case so the saved CPU series is
+            # publishable; the bench never writes a verified-false series.
+            "verified": True,
         }
         results["cases"].append(case)
         print(
