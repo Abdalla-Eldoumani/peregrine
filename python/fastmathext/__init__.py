@@ -47,8 +47,8 @@ from ._core import transpose as _transpose_native
 # calibrate() is re-exported as the public fme.calibrate. The binding is explicit
 # (not left to attribute fallthrough) BECAUSE a submodule named calibrate exists:
 # `from .calibrate import calibrate` binds the FUNCTION into the package namespace,
-# shadowing the submodule so `fme.calibrate(...)` is the callable the design doc
-# names, not the module. calibrate.py runs nothing at import (no measurement, no
+# shadowing the submodule so `fme.calibrate(...)` is the callable users get, not
+# the module. calibrate.py runs nothing at import (no measurement, no
 # device init -- it only defines functions and imports stdlib + this package), so
 # this costs a one-time module compile and nothing measurable on the hot path; the
 # cache read and any measurement stay lazy (calibrate() body / first dispatch).
@@ -83,7 +83,7 @@ else:
 
 # Single source of the version: pyproject.toml carries it, and importlib.metadata
 # reads it back from the installed package metadata so there is no second literal
-# to drift (the DESIGN_SYSTEM versioning token). The fallback covers a source tree
+# to drift. The fallback covers a source tree
 # with no install metadata (e.g. running from a checkout that was never pip
 # installed); it matches the pyproject value so an uninstalled tree still reports
 # the release it belongs to.
@@ -196,7 +196,7 @@ def _check_same_shape(arrs, op: str) -> None:
     # a silent NumPy broadcast. This is the genuinely new validation with no
     # matmul analog (matmul checks inner-dimension conformability; fused checks
     # exact-shape equality across every operand). Raise on the first mismatch,
-    # naming both shapes, in the design-doc error-model shape.
+    # naming both shapes, in the same error shape as the other checks.
     s0 = arrs[0].shape
     for arr in arrs[1:]:
         if arr.shape != s0:
@@ -218,8 +218,8 @@ def _check_axis(axis, op: str) -> None:
         raise ValueError(f"{op}: axis {axis} is out of bounds for 2-dimensional input")
 
 
-# The exact mixed-residency token from the API design doc (DESIGN_SYSTEM.md error
-# model). Verbatim, never paraphrased: tests match on it and it is the contract.
+# The exact mixed-residency error string, part of the public API contract.
+# Verbatim, never paraphrased: tests match on it and it is the contract.
 _MIXED_RESIDENCY_MSG = (
     "matmul: one input is on cuda and one on cpu, "
     "call to_device or from_device first"
@@ -231,7 +231,7 @@ def _mixed_residency_msg(op: str) -> str:
     # matmul-prefixed and is its own contract string; the fused ops carry the
     # SAME wording but named for the op, never the matmul-prefixed literal, so a
     # caller mixing a host and a device operand to axpby/fma3/scaled_relu sees the
-    # op they called. From the design-doc error model (same shape as matmul's).
+    # op they called. Same shape as matmul's mixed-residency token above.
     return (
         f"{op}: inputs must all be on the same device, "
         "call to_device or from_device first"
@@ -251,8 +251,8 @@ _cuda_fallback_lock = threading.Lock()
 _cuda_fallback_warned = False
 
 # The active dispatch backend: "auto" runs the measured policy, "cpu"/"cuda"
-# force that side. Read ONCE here at import from FME_BACKEND (the env hook the
-# design doc names, mirroring FME_CACHE_DIR) defaulting to "auto", and validated
+# force that side. Read ONCE here at import from FME_BACKEND (the env hook,
+# mirroring FME_CACHE_DIR) defaulting to "auto", and validated
 # against policy.BACKENDS so an out-of-set value can never reach choose_backend.
 # This is a plain os.environ.get plus a membership test: microseconds, NO device
 # probe and NO cache read, so the <50ms import budget holds (the probe runs only
@@ -272,7 +272,7 @@ def _cuda_error_name(exc: Exception) -> str:
     The CHECK macros throw fme::cuda_error carrying "<cudaErrorName> at
     <file>:<line>" (or a plain sentence for the synthetic guards). The fallback
     warning names the error, so take the leading token up to " at " when present,
-    otherwise the whole message. Keeps the design-doc token
+    otherwise the whole message. Keeps the public warning token
     "cuda <op> failed (<cuda error name>), ..." readable rather than dumping a
     file path into it.
     """
@@ -283,7 +283,7 @@ def _cuda_error_name(exc: Exception) -> str:
 def _cuda_unavailable_reason() -> str:
     """Return why the cuda backend is unavailable, or "" when it is usable.
 
-    The reason strings are the ones the design doc names for the
+    The reason strings fill the
     ``cuda backend requested but <reason>`` RuntimeError: "no build", "no
     device", "driver too old". Composed from the build flag and the cheap device
     probe (no context build, no driver load beyond the probe's own count query).
@@ -294,7 +294,7 @@ def _cuda_unavailable_reason() -> str:
     if probe["present"]:
         return ""
     reason = probe["reason"]
-    # Map the native probe's reason onto the design-doc vocabulary. The probe
+    # Map the native probe's reason onto the public vocabulary. The probe
     # already returns "driver too old" / "no device" / "compute capability too
     # low"; normalize the two device-absent variants to "no device" so the public
     # token stays in the doc's named set.
@@ -618,8 +618,8 @@ def matmul(a, b, *, out=None):
     if out is not None:
         raise NotImplementedError("matmul: out= is not implemented yet")
 
-    # Residency check, BEFORE the host fast path. Return type follows residency
-    # (DESIGN_SYSTEM.md): both operands on the device returns an fme.Array, both
+    # Residency check, BEFORE the host fast path. Return type follows residency:
+    # both operands on the device returns an fme.Array, both
     # on the host returns an ndarray, and a mix is an error -- never a silent
     # transfer. fme.Array is the CUDA-build device type; on a CPU-only build it is
     # a sentinel nothing is an instance of, so both isinstance checks are False
@@ -924,7 +924,7 @@ def mean(a, *, axis=None):
 def _fused_residency(operands, op: str) -> str:
     # Decide the residency of a fused call from its raw operands, BEFORE any host
     # normalization (the isinstance check must see the original objects). The
-    # return-type-follows-residency rule (DESIGN_SYSTEM.md), extended from
+    # return-type-follows-residency rule, extended from
     # matmul's two-operand check to N operands: every operand on the device routes
     # the device path (returns an fme.Array); every operand on the host routes the
     # host CPU path (returns an ndarray); ANY mix is a TypeError, never a silent
