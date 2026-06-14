@@ -5,7 +5,7 @@ the CPU half of FUSE-04 (all dtypes, sizes 0 to 16M, NaN/Inf). Every CPU-vs-NumP
 and GPU-vs-NumPy comparison routes through assert_fused_close (conftest), never an
 inline tolerance, exactly like the matmul and reduction suites. fma3 compares
 against the unfused NumPy x*y + z and the helper allows the single-rounding fused
-result to be at least as accurate (DESIGN_SYSTEM elementwise-fused clause).
+result to be at least as accurate (the elementwise-fused tolerance contract).
 
 The reserved -k area names from the phase Test Map (filled here):
 
@@ -17,7 +17,7 @@ The reserved -k area names from the phase Test Map (filled here):
     property        -> FUSE-04 hypothesis property over drawn shapes + large @example
 
 GPU tests skip cleanly with a stated reason on a CPU-only build or a machine
-without a device (tests/CLAUDE.md), so the whole file stays green on the WSL/GCC
+without a device, so the whole file stays green on the WSL/GCC
 clone and the default CPU-only Windows build.
 """
 
@@ -66,7 +66,7 @@ gpu = pytest.mark.skipif(not _CUDA_OK, reason=_CUDA_REASON)
 # elements, and at a cancellation element |ref| collapses toward zero while the
 # fused result equals the f64 truth EXACTLY (verified) -- so the unfused NumPy
 # reference is the one carrying a ~1 ULP error, and the fused contract's relative
-# bound (rtol*|ref|, no operand-magnitude atol -- the design-doc-locked clause)
+# bound (rtol*|ref|, no operand-magnitude atol -- the fixed tolerance contract)
 # becomes vacuous there and rejects the MORE accurate kernel. Testing accuracy at
 # operand scale (no cancellation) is the correct, non-flaky bar for an
 # elementwise op; the NaN/Inf positional behaviour is proven separately. scale is
@@ -199,19 +199,18 @@ def test_cpu_axpby_bitwise_equals_unfused(dtype):
     #   so the kernel keeps both roundings and is BITWISE-equal to the unfused NumPy
     #   reference -- the strong claim, asserted with assert_array_equal.
     #
-    #   GCC's DEFAULT model (DESIGN_SYSTEM numeric policy: "default GCC FP model ...
-    #   FMA contraction is allowed") contracts add(mul,mul) into a single fmadd even
-    #   from explicit intrinsics, so the kernel rounds once. That is the more
-    #   accurate single-rounding FMA, legitimately differing from the always-
-    #   two-rounding NumPy reference by at most one ULP -- exactly the fma3-class
-    #   contraction the design doc sanctions, NOT a kernel bug.
+    #   GCC's DEFAULT FP model allows FMA contraction, so it contracts add(mul,mul)
+    #   into a single fmadd even from explicit intrinsics, and the kernel rounds
+    #   once. That is the more accurate single-rounding FMA, legitimately differing
+    #   from the always-two-rounding NumPy reference by at most one ULP -- exactly
+    #   the fma3-class contraction the numeric policy sanctions, NOT a kernel bug.
     #
     # Detect which world we are in at runtime from the kernel's OWN output rather
     # than guessing by os.name: the NumPy reference is always two-rounding (separate
     # ufuncs never fuse), so if the kernel reproduces it bit-for-bit the build does
     # not contract and the strong bitwise claim holds; if it does not, the build
     # contracted, and we assert the divergence is a single legitimate rounding (<= 1
-    # ULP) and stays within the design-doc fused tolerance (assert_fused_close, the
+    # ULP) and stays within the fused tolerance contract (assert_fused_close, the
     # same sanctioned path the rest of the suite uses -- the contract is NOT
     # loosened). The size spans many AVX2 blocks (8 f32 / 4 f64) AND a scalar tail
     # (+5 is not a multiple of either width). Strictly positive operands (no
