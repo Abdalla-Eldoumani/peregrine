@@ -264,7 +264,8 @@ def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
                 "reps": reps,
                 "warmup": warmup,
                 # True only because assert_matmul_close passed above. The bench
-                # never publishes a verified-false series (benchmarks/CLAUDE.md).
+                # never publishes a verified-false series (no result with verified
+                # false ever reaches a results file).
                 "verified": True,
             }
         )
