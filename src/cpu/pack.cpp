@@ -1,6 +1,6 @@
 #include "cpu/pack.hpp"
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // MR and NR are the register-tile shape the microkernel computes (6 rows x 8
 // columns of f64 = 12 ymm accumulators). They are structural, not tuning
@@ -69,4 +69,4 @@ template void pack_a<double>(double*, const double*, int64_t, int64_t, int64_t, 
 template void pack_b<float>(float*, const float*, int64_t, int64_t, int64_t, int64_t, int64_t);
 template void pack_b<double>(double*, const double*, int64_t, int64_t, int64_t, int64_t, int64_t);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
