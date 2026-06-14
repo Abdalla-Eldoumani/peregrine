@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import threading
 import warnings
+from importlib.metadata import PackageNotFoundError, version as _version
 
 import numpy as np
 
@@ -80,7 +81,16 @@ else:
 
     _cuda_device_probe = None
 
-__version__ = "3.0.0.dev0"
+# Single source of the version: pyproject.toml carries it, and importlib.metadata
+# reads it back from the installed package metadata so there is no second literal
+# to drift (the DESIGN_SYSTEM versioning token). The fallback covers a source tree
+# with no install metadata (e.g. running from a checkout that was never pip
+# installed); it matches the pyproject value so an uninstalled tree still reports
+# the release it belongs to.
+try:
+    __version__ = _version("fastmathext")
+except PackageNotFoundError:
+    __version__ = "3.0.0"
 __all__ = [
     "matmul",
     "transpose",
