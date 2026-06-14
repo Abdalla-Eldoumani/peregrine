@@ -101,12 +101,22 @@ void microkernel_f32_8x16(const float* ap, const float* bp, float* c, int64_t kc
 
     __m256i m0, m1;
     edge_masks_f32(nr, m0, m1);
+    // The high vector (columns 8..15) is touched only when nr > 8. When nr <= 8 its
+    // mask m1 is all-zero, so the masked store there writes nothing -- but cr + 8
+    // would still be FORMED, and on the last row of the rightmost tile (jc+jr)+8 can
+    // exceed n, making cr + 8 more than one-past-the-end of the m*n C object. That
+    // pointer formation is C++ UB ([expr.add]) even unread, so guard the high half
+    // on nr > 8: it is formed only when a high-half column is live and cr + 8 is in
+    // bounds. Results are identical (the guarded-out case stored nothing anyway).
+    const bool has_high = nr > 8;
     for (int64_t r = 0; r < mr; ++r) {
         float* cr = c + r * ldc;
         const __m256 old0 = _mm256_maskload_ps(cr + 0, m0);
-        const __m256 old1 = _mm256_maskload_ps(cr + 8, m1);
         _mm256_maskstore_ps(cr + 0, m0, _mm256_add_ps(old0, acc0[r]));
-        _mm256_maskstore_ps(cr + 8, m1, _mm256_add_ps(old1, acc1[r]));
+        if (has_high) {
+            const __m256 old1 = _mm256_maskload_ps(cr + 8, m1);
+            _mm256_maskstore_ps(cr + 8, m1, _mm256_add_ps(old1, acc1[r]));
+        }
     }
 }
 
@@ -157,12 +167,18 @@ void microkernel_f32_6x16(const float* ap, const float* bp, float* c, int64_t kc
 
     __m256i m0, m1;
     edge_masks_f32(nr, m0, m1);
+    // Guard the high vector (columns 8..15) on nr > 8 so cr + 8 is never formed
+    // past one-past-the-end when its mask is empty -- same UB-avoidance and same
+    // identical results as the 8x16 path above.
+    const bool has_high = nr > 8;
     for (int64_t r = 0; r < mr; ++r) {
         float* cr = c + r * ldc;
         const __m256 old0 = _mm256_maskload_ps(cr + 0, m0);
-        const __m256 old1 = _mm256_maskload_ps(cr + 8, m1);
         _mm256_maskstore_ps(cr + 0, m0, _mm256_add_ps(old0, acc0[r]));
-        _mm256_maskstore_ps(cr + 8, m1, _mm256_add_ps(old1, acc1[r]));
+        if (has_high) {
+            const __m256 old1 = _mm256_maskload_ps(cr + 8, m1);
+            _mm256_maskstore_ps(cr + 8, m1, _mm256_add_ps(old1, acc1[r]));
+        }
     }
 }
 
