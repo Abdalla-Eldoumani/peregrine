@@ -31,6 +31,24 @@ if _BENCH_DIR not in sys.path:
 
 import report  # noqa: E402
 
+# matplotlib lives in the [bench] extra, deliberately OUT of [test] so the
+# CPU-only WSL test gate stays lean (07-04). The plot-generation tests below
+# import plots.py (which imports matplotlib at module scope), so on a [test]-only
+# fresh clone they must SKIP cleanly, never fail for an absent optional dep --
+# the same clean-skip idiom test_cuda.py uses for absent GPU hardware (the @gpu
+# skipif marker). The report.py / README round-trip tests need no matplotlib and
+# stay un-decorated so they keep running on [test]-only (the BNCH-03 guarantees).
+try:
+    import matplotlib  # noqa: F401
+
+    _HAS_MPL = True
+except ImportError:
+    _HAS_MPL = False
+
+requires_matplotlib = pytest.mark.skipif(
+    not _HAS_MPL, reason="matplotlib not installed; pip install -e .[bench]"
+)
+
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _README = os.path.join(_REPO_ROOT, "README.md")
 
@@ -245,6 +263,7 @@ def test_report_blocking_cites_saved_winner():
 # --- Task 2: the plot scripts (BNCH-02, rule 19). ---
 
 
+@requires_matplotlib
 def test_plot_colors():
     # rule 19: the four series colors are EXACTLY the DESIGN_SYSTEM tokens,
     # consistent across every chart. A drift here (a matplotlib default sneaking
@@ -259,6 +278,7 @@ def test_plot_colors():
     }
 
 
+@requires_matplotlib
 def test_plots_use_agg_backend():
     # The Agg backend is selected so plotting runs headless (no display). plots.py
     # sets it before importing pyplot; assert the active backend is Agg, the proof
@@ -270,6 +290,7 @@ def test_plots_use_agg_backend():
     assert matplotlib.get_backend().lower() == "agg"
 
 
+@requires_matplotlib
 def test_plots_smoke(tmp_path):
     # The two JSON-only charts write non-empty PNGs headless to tmp_path (so the
     # suite never dirties results/). A zero-byte file would mean savefig failed
@@ -283,6 +304,7 @@ def test_plots_smoke(tmp_path):
         assert os.path.getsize(path) > 0
 
 
+@requires_matplotlib
 def test_crossover_reads_calibration_or_skips(tmp_path):
     # The crossover chart reads the committed calibration cache when present and
     # writes a non-empty PNG; when the cache is absent it returns None (skipped
