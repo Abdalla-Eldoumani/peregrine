@@ -46,14 +46,14 @@ struct cuda_event {
 };
 
 // One templated grid-stride kernel + one functor per op (the shared-skeleton
-// recommendation, RESEARCH Alternatives). Each functor is the per-element
-// arithmetic; the kernel owns the float4-prefix / scalar-tail traversal so the
-// tail-safety logic lives in exactly one place.
+// design). Each functor is the per-element arithmetic; the kernel owns the
+// float4-prefix / scalar-tail traversal so the tail-safety logic lives in exactly
+// one place.
 //
 // float4 (f32) / double2 (f64) vectorized loads/stores are used ONLY on the
 // n & ~3 (f32) / n & ~1 (f64) aligned prefix: a vector load past the last full
 // pack, or on a misaligned base pointer, is an out-of-bounds device access (the
-// float4 odd-tail trap, RESEARCH Pitfall 4). cudaMallocAsync allocations are
+// float4 odd-tail trap). cudaMallocAsync allocations are
 // 16-byte aligned (so the f32 float4 and f64 double2 bases are aligned for a
 // full-array op), but the ELEMENT COUNT need not be a multiple of the pack width,
 // so the n % width tail always falls to a scalar grid-stride loop. The vector
@@ -230,7 +230,7 @@ __global__ void fused_ternary_kernel(const T* x, const T* y, const T* z, T* out,
 
 // Block count: 4-8 blocks/SM x 256 threads, capped at the elements actually
 // present (one pack per thread-step is enough). threads=256, blocks =
-// min((n+255)/256, 8 * SMs) per the cuda-sm86 occupancy notes. GA106 has 30 SMs
+// min((n+255)/256, 8 * SMs) for good occupancy. GA106 has 30 SMs
 // so the cap is 240 blocks; for small n the (n+255)/256 term keeps the launch
 // from over-subscribing.
 int launch_blocks(int64_t n) {
@@ -327,7 +327,7 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
     // axpby/fma3 intermediate, out = the chain result) are allocated once outside
     // the timed window so no allocation lands inside it; the chain runs
     // transfer-free on the compute stream. Fixed a/b/scale so the timed chain
-    // matches what plan 05 benches; correctness is the @gpu oracle test's job.
+    // matches what the bench measures; correctness is the @gpu oracle test's job.
     if (reps <= 0) {
         throw ::fme::cuda_error("cuda time_fused_chain: reps must be positive");
     }
@@ -362,9 +362,9 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
     // out = scaled_relu(t, scale). Three launches on the compute stream, each
     // CHECK'd. fma3 is the true 3-operand x*y + z, so the middle step reuses y and
     // z as the multiply and add operands -- this is the same axpby -> fma3 ->
-    // scaled_relu composition plan 05 benches, and the in-place t (read and write
-    // the same buffer) is safe because the op is elementwise (no cross-element
-    // dependency, each thread reads then writes its own index).
+    // scaled_relu composition the bench measures, and the in-place t (read and
+    // write the same buffer) is safe because the op is elementwise (no
+    // cross-element dependency, each thread reads then writes its own index).
     auto chain = [&]() {
         fused_axpby<T>(x, y, t, n, a, b);
         fused_fma3<T>(t, y, z, t, n);
