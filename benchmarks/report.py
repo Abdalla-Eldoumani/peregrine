@@ -346,40 +346,92 @@ def render_manifest_table(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _load_optional(*parts: str) -> dict | None:
+    """load_series the file at parts, or return None when it is absent.
+
+    Mirrors the crossover chart's os.path.exists skip: a missing input on a fresh
+    clone or a partial-results run degrades the corresponding README section to a
+    printed skip rather than crashing the whole render with FileNotFoundError. A
+    file that EXISTS but is unverified or manifest-less still raises through
+    load_series -- absence is the only condition softened here, not invalidity.
+    """
+    path = _results_path(*parts)
+    if not os.path.exists(path):
+        return None
+    return load_series(path)
+
+
 def render_report() -> str:
     """Render every per-regime section from the committed JSON, as one blob.
 
     This is the single function the README author and the round-trip test both
     call: the README pastes these sections, and the test asserts every headline
-    number appears in this string. Each section reads its own committed file with
-    load_series, so a verified-false or manifest-less file fails here before any
-    number is emitted.
+    number appears in this string. Each section reads its own committed file; a
+    file that exists but is verified-false or manifest-less fails through
+    load_series before any number is emitted. A file that is simply ABSENT (a
+    fresh clone, a partial-results run) degrades that one section to a printed
+    skip line so the rest of the report still renders.
     """
-    cpu02 = load_series(_results_path("cpu02_f64_refbox.json"))
-    matmul_f64 = load_series(_results_path("refbox_matmul_f64.json"))
-    cpu06 = load_series(_results_path("cpu06_f32_refbox.json"))
-    scaling = load_series(_results_path("tuning", "scaling_refbox.json"))
-    gpu_matrix = load_series(_results_path("refbox_gpu_matrix.json"))
-    fuse_cpu = load_series(_results_path("fuse05_cpu_f32_refbox.json"))
-    fuse_gpu = load_series(_results_path("fuse05_gpu_f32_refbox.json"))
-    sweep = load_series(_results_path("tuning", "sweep_refbox.json"))
+    cpu02 = _load_optional("cpu02_f64_refbox.json")
+    matmul_f64 = _load_optional("refbox_matmul_f64.json")
+    cpu06 = _load_optional("cpu06_f32_refbox.json")
+    scaling = _load_optional("tuning", "scaling_refbox.json")
+    gpu_matrix = _load_optional("refbox_gpu_matrix.json")
+    fuse_cpu = _load_optional("fuse05_cpu_f32_refbox.json")
+    fuse_gpu = _load_optional("fuse05_gpu_f32_refbox.json")
+    sweep = _load_optional("tuning", "sweep_refbox.json")
 
-    sections = [
-        "## float64 matmul (CPU)",
-        render_matmul_f64_table(cpu02, matmul_f64),
-        "## Small-matrix float32 (CPU)",
-        render_small_matrix_table(cpu06),
-        "## Thread scaling (CPU)",
-        render_scaling_line(scaling),
-        "## GPU matmul",
-        render_gpu_table(gpu_matrix),
-        "## Fused 3-op chain",
-        render_fused_table(fuse_cpu, fuse_gpu),
-        "## Autotuned blocking",
-        render_blocking_note(sweep),
-        "## Hardware",
-        render_manifest_table(gpu_matrix),
-    ]
+    def _skip(name: str) -> str:
+        return f"_(skipped: {name} not found in results/; regenerate the bench)_"
+
+    sections = ["## float64 matmul (CPU)"]
+    if cpu02 is not None and matmul_f64 is not None:
+        sections.append(render_matmul_f64_table(cpu02, matmul_f64))
+    else:
+        sections.append(_skip("cpu02_f64_refbox.json / refbox_matmul_f64.json"))
+
+    sections.append("## Small-matrix float32 (CPU)")
+    sections.append(
+        render_small_matrix_table(cpu06)
+        if cpu06 is not None
+        else _skip("cpu06_f32_refbox.json")
+    )
+
+    sections.append("## Thread scaling (CPU)")
+    sections.append(
+        render_scaling_line(scaling)
+        if scaling is not None
+        else _skip("tuning/scaling_refbox.json")
+    )
+
+    sections.append("## GPU matmul")
+    sections.append(
+        render_gpu_table(gpu_matrix)
+        if gpu_matrix is not None
+        else _skip("refbox_gpu_matrix.json")
+    )
+
+    sections.append("## Fused 3-op chain")
+    if fuse_cpu is not None and fuse_gpu is not None:
+        sections.append(render_fused_table(fuse_cpu, fuse_gpu))
+    else:
+        sections.append(
+            _skip("fuse05_cpu_f32_refbox.json / fuse05_gpu_f32_refbox.json")
+        )
+
+    sections.append("## Autotuned blocking")
+    sections.append(
+        render_blocking_note(sweep)
+        if sweep is not None
+        else _skip("tuning/sweep_refbox.json")
+    )
+
+    sections.append("## Hardware")
+    sections.append(
+        render_manifest_table(gpu_matrix)
+        if gpu_matrix is not None
+        else _skip("refbox_gpu_matrix.json")
+    )
     return "\n\n".join(sections)
 
 
