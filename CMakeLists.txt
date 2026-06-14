@@ -102,16 +102,15 @@ if (FME_ENABLE_CUDA)
   # find locates it and exposes CUDA::cudart/cublas/cublasLt. A "13" here
   # returns FALSE on 12.8 and FATALs the configure (verified on-machine).
   find_package(CUDAToolkit REQUIRED)
-  # probe.cu is the trivial-compile attestation; context.cu is the process-
-  # lifetime singleton (streams, mempool, cublas/cublasLt handles, atexit
-  # teardown); gemm_cublas.cu is the f32/f64 cuBLAS GEMM; transfer.cu is the
-  # async H2D/D2H + pinned staging cache + device allocator with the OOM
-  # pre-flight (04-04); fused.cu is the hand-written grid-stride/float4 fused
-  # elementwise kernels (axpby/fma3/scaled_relu) + the time_fused_chain timer
-  # (06-04), device-resident only (the one place the project ships custom CUDA
-  # kernels; GEMM is cuBLAS-only).
+  # context.cu is the process-lifetime singleton (streams, mempool,
+  # cublas/cublasLt handles, atexit teardown); gemm_cublas.cu is the f32/f64
+  # cuBLAS GEMM; transfer.cu is the async H2D/D2H + device allocator with the OOM
+  # pre-flight; fused.cu is the hand-written grid-stride/float4 fused elementwise
+  # kernels (axpby/fma3/scaled_relu) + the time_fused_chain timer, device-resident
+  # only (the one place the project ships custom CUDA kernels; GEMM is
+  # cuBLAS-only). enable_language(CUDA) plus any one .cu here keeps the CUDA
+  # toolchain active.
   target_sources(_core PRIVATE
-    src/cuda/probe.cu
     src/cuda/context.cu
     src/cuda/gemm_cublas.cu
     src/cuda/transfer.cu
