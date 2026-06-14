@@ -464,12 +464,22 @@ def test_f64_never_auto_routes():
 # 04-05 also gives the package its own import-time discovery, the shim stays
 # belt-and-suspenders for a child that imports before any package code runs.
 #
-# The OOM is forced by RESERVING most of free VRAM in a device-resident array
-# first, leaving a small fixed GAP, so the matmul output need only exceed that gap
-# to OOM -- NOT the whole multi-GB free pool. This keeps the test bounded in TIME.
+# The OOM is forced by RESERVING free VRAM in device-resident arrays first, so the
+# matmul output need only exceed the residual free to OOM -- NOT the whole multi-GB
+# free pool. This keeps the test bounded in TIME. The reserve is ADAPTIVE, not a
+# single fixed-gap allocation: the mempool keeps ReleaseThreshold=UINT64_MAX
+# (context.cu), so after prior GPU tests cudaFreeAsync returns freed buffers to the
+# POOL not the OS and nvidia-smi over-reports truly-available VRAM. A one-shot
+# free-minus-gap reserve then undershoots, the residual free stays above the gap,
+# and the output alloc SUCCEEDS instead of OOMing -- the flake that passed this
+# test in isolation but failed it in-suite. So after a free-read-seeded first
+# chunk, the child PROBES by allocating an output-sized array in a bounded loop:
+# while a probe succeeds it is retained as more reserve, driving the residual free
+# down until a probe throws cudaErrorMemoryAllocation, which guarantees the real
+# output alloc that follows OOMs regardless of pool-retained memory.
 # The output is a SQUARE (N, N), rank-1 (K=1): a square output keeps BOTH the row
-# AND column counts at ~N (N ~ 8192 for a 256MB f32 output), so the CPU fallback
-# is a normal cache-friendly outer product (~0.3s measured). A skinny (8, huge-n)
+# AND column counts at ~N (N ~ 16384 for a ~1GB f32 output), so the CPU fallback
+# is a normal cache-friendly outer product (seconds measured). A skinny (8, huge-n)
 # output of the same BYTE size is pathological in the BLIS kernel -- millions of
 # n-columns with M=8, K=1 packs and loops per column and ran for MINUTES, blowing
 # past the subprocess timeout once free VRAM was large enough to size n into the
@@ -483,31 +493,52 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     "import subprocess, sys, warnings\n"
     "import numpy as np\n"
     "import fastmathext as fme\n"
-    # Current free VRAM in bytes, from the driver (not the nominal total).
+    # SQUARE output (N, N) sized to gap+256MB = ~1GB: far past the 64MB pre-flight
+    # margin once the reserve below leaves the residual free under this size, so the
+    # OUTPUT alloc reliably throws cudaErrorMemoryAllocation, while N ~ 16384 keeps
+    # the CPU fallback a fast cache-friendly outer product (seconds) rather than a
+    # skinny millions-of-columns one (minutes, timeout-prone). Defined first so the
+    # adaptive reserve can probe at exactly this byte size.
+    "gap_mib = 768\n"
+    "out_bytes = (gap_mib + 256) * 1024 * 1024\n"
+    "N = int((out_bytes // 4) ** 0.5)\n"  # f32 square output (N, N)
+    # Adaptive reserve: do NOT trust a single nvidia-smi free read. The mempool is
+    # created with ReleaseThreshold=UINT64_MAX (context.cu), so after prior GPU
+    # tests cudaFreeAsync returns freed buffers to the POOL, not the OS, and
+    # nvidia-smi over-reports truly-available VRAM. A fixed free-gap reserve then
+    # undershoots, the residual free exceeds the gap, and the output alloc SUCCEEDS
+    # instead of OOMing (the in-suite flake). Instead, occupy VRAM in device-
+    # resident chunks kept alive in `reserve`, then PROBE by trying to allocate an
+    # output-sized (N, N) array: while a probe SUCCEEDS the residual free is still
+    # >= the output request, so keep that probe as additional reserve and loop. The
+    # moment a probe throws cudaErrorMemoryAllocation the residual free is below the
+    # output request, so the real output alloc that follows is guaranteed to OOM --
+    # regardless of how much memory the pool retained. np.empty (not RNG) keeps the
+    # host cost to the allocation itself; each H2D at PCIe rate is sub-second.
     "out = subprocess.run(['nvidia-smi','--query-gpu=memory.free',"
     "'--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=15)\n"
     "free_mib = int(out.stdout.strip().splitlines()[0])\n"
-    # Reserve free VRAM down to a fixed GAP with one device-resident array, so the
-    # matmul output OOMs at a SIZE WE CONTROL regardless of how much VRAM is free.
-    # The gap (768MB) comfortably holds the tiny rank-1 inputs (~32KB each) and
-    # absorbs cudaMallocAsync pool rounding and display-compositor fluctuation; the
-    # square output request below (1GB) sits far past the 64MB pre-flight margin so
-    # the OUTPUT alloc reliably OOMs even if the residual free after the reserve is
-    # somewhat below the nominal gap. The reserve is a square f32 array sized
-    # free-gap; np.empty (not RNG) keeps the host cost to the allocation itself and
-    # one H2D at PCIe rate is sub-second. Kept alive in `reserve` until after the
-    # matmul so the device memory stays occupied.
-    "gap_mib = 768\n"
-    "reserve_bytes = max(0, (free_mib - gap_mib)) * 1024 * 1024\n"
-    "rside = int((reserve_bytes // 4) ** 0.5)\n"
-    "reserve = fme.to_device(np.empty((rside, rside), dtype=np.float32))\n"
-    # SQUARE output (N, N) sized to gap+256MB = ~1GB: far past the 64MB pre-flight
-    # margin given the reserve, so the OUTPUT alloc reliably throws
-    # cudaErrorMemoryAllocation, while N ~ 16384 keeps the CPU fallback a fast
-    # cache-friendly outer product (seconds) rather than a skinny millions-of-
-    # columns one (minutes, timeout-prone).
-    "out_bytes = (gap_mib + 256) * 1024 * 1024\n"
-    "N = int((out_bytes // 4) ** 0.5)\n"  # f32 square output (N, N)
+    # Seed the reserve with one large chunk sized from the (untrusted) free read
+    # down to the gap, so the common case reaches the probe loop in one allocation
+    # rather than many small steps. max(0, ...) guards a free read already below the
+    # gap; an empty (0,0) array allocates nothing and the probe loop does the work.
+    "reserve = []\n"
+    "seed_bytes = max(0, (free_mib - gap_mib)) * 1024 * 1024\n"
+    "sside = int((seed_bytes // 4) ** 0.5)\n"
+    "reserve.append(fme.to_device(np.empty((sside, sside), dtype=np.float32)))\n"
+    # Probe at the output byte size. Each successful probe is retained as reserve
+    # (occupying the residual free), so the loop monotonically drives the residual
+    # free below the output request. Bounded iterations so a child can never wedge
+    # the display GPU: at ~1GB per retained probe this covers the whole card many
+    # times over, and on this hardware the first probe after the seed already fails.
+    "for _ in range(64):\n"
+    "    try:\n"
+    "        probe = fme.to_device(np.empty((N, N), dtype=np.float32))\n"
+    "    except RuntimeError:\n"
+    # A probe alloc threw: residual free is now below the output request, so the
+    # output alloc below will OOM. Stop growing the reserve.
+    "        break\n"
+    "    reserve.append(probe)\n"
     # Rank-1 inputs: (N, 1) and (1, N), tiny (N floats each), so to_device succeeds
     # and only the (N, N) output allocation OOMs. Seeded so the parent need not see
     # the data.
