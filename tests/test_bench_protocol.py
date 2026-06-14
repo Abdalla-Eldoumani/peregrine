@@ -269,7 +269,41 @@ def test_results_schema_verified():
 
 @gpu
 def test_bench_gpu_series():
-    # Reserved slot: 07-02 fills this with the bench_gpu with/without-transfer x
-    # cold/warm matrix (4 labeled series, rule 7). Kept under @gpu so the -k name
-    # resolves on every build and 07-02 fills the body without renaming.
-    pytest.xfail("bench_gpu series filled in 07-02")
+    # The bench_gpu with/without-transfer x cold/warm matrix is four labeled
+    # series (rule 7). Under @gpu so this skips cleanly on the OFF build (and the
+    # WSL CPU-only clone) and runs on the ON build, where the device entries
+    # exist. A tiny size grid keeps the device timing short; the assertions are
+    # on the SHAPE (four labeled series + the consumer keys), not the magnitudes.
+    import bench_gpu
+
+    sizes = [64]
+    without = bench_gpu._without_transfer_series(sizes, reps=2, warmup=1)
+    with_transfer = bench_gpu._with_transfer_series(sizes, reps=2, warmup=1)
+
+    # rule 7: four distinct (label, phase) combinations across the two regimes.
+    combos = {(r["label"], r["phase"]) for r in without + with_transfer}
+    assert combos == {
+        ("without-transfer", "warm"),
+        ("without-transfer", "cold"),
+        ("with-transfer", "warm"),
+        ("with-transfer", "cold"),
+    }
+
+    # rule 11: every record in every series is verified=true (the bench publishes
+    # no verified-false series; the device result was checked through
+    # assert_matmul_close before timing).
+    for record in without + with_transfer:
+        assert record["verified"] is True
+
+    # The PRODUCER->CONSUMER contract: the without-transfer regime carries the
+    # _gpu_series shape verbatim, so each record exposes the exact keys 07-03's
+    # report.py reads as gpu_cases[i] (n, ratio_vs_numpy_cpu_f32, cold_ms,
+    # median_ms). median_ms is the warm event-timed value; the absence of any of
+    # these would break 07-03's renderer, so assert them by name here.
+    for record in without:
+        for key in ("n", "ratio_vs_numpy_cpu_f32", "cold_ms", "median_ms"):
+            assert key in record, f"without-transfer record missing {key}"
+
+    # The validator accepts the without-transfer regime under gpu_cases with the
+    # shared manifest (rule 9 + rule 11): the same load_series 07-03 imports.
+    assert load_series({"manifest": {"x": 1}, "gpu_cases": without}) is not None
