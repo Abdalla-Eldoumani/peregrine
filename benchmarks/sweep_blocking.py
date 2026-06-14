@@ -8,7 +8,7 @@ MC {48,72,96,144} x KC {192,256,320} x NC {2048,4080}, 24 points.
 Two methodology points specific to a blocking sweep:
 
 1. OMP_NUM_THREADS / OMP_PROC_BIND / OMP_PLACES are set at the top of this file
-   BEFORE fastmathext is imported. The OpenMP runtime reads them once at its
+   BEFORE peregrine is imported. The OpenMP runtime reads them once at its
    initialization, so setting them after the first parallel region measures
    unpinned noise (RESEARCH Pitfall 8). The defaults pin 6 threads (the physical
    core count) to cores; override with the flags to measure SMT or fewer threads.
@@ -40,8 +40,8 @@ os.environ.setdefault("OMP_PLACES", "cores")
 
 import numpy as np  # noqa: E402
 
-import fastmathext as fme  # noqa: E402
-import fastmathext._core as _core  # noqa: E402
+import peregrine as pg  # noqa: E402
+import peregrine._core as _core  # noqa: E402
 
 # The bench harness is the analog for manifest, timing, verification, and the
 # committed-vs-local JSON split; reuse its pieces rather than reimplement them so
@@ -99,12 +99,12 @@ def run(sizes: list[int], reps: int, warmup: int) -> dict:
                 for kc in KC_GRID:
                     for nc in NC_GRID:
                         _core._set_gemm_blocking(mc, kc, nc)
-                        got = fme.matmul(a, b)
+                        got = pg.matmul(a, b)
                         # Toleranced, never bitwise: KC changes the k-chunking and
                         # so the result bitwise, within the matmul contract. A
                         # verified-false point never reaches the JSON.
                         assert_matmul_close(got, ref, a, b)
-                        timing = _bench(lambda: fme.matmul(a, b), reps, warmup)
+                        timing = _bench(lambda: pg.matmul(a, b), reps, warmup)
                         gflops = gflop / timing["median_s"]
                         # On a contended laptop the noise is one-sided: background
                         # load only ever makes a call slower, never faster, so the
