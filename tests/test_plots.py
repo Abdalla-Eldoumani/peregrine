@@ -240,3 +240,62 @@ def test_report_blocking_cites_saved_winner():
     note = report.render_blocking_note(sweep)
     assert f"mc={sweep['winner']['mc']}" in note
     assert sweep["winner"]["mc"] == 48  # the saved winner, not 96
+
+
+# --- Task 2: the plot scripts (BNCH-02, rule 19). ---
+
+
+def test_plot_colors():
+    # rule 19: the four series colors are EXACTLY the DESIGN_SYSTEM tokens,
+    # consistent across every chart. A drift here (a matplotlib default sneaking
+    # in) would make the charts inconsistent with the documented palette.
+    import plots
+
+    assert plots.SERIES_COLORS == {
+        "cpu": "#1f77b4",
+        "cuda": "#2ca02c",
+        "numpy": "#7f7f7f",
+        "cupy": "#ff7f0e",
+    }
+
+
+def test_plots_use_agg_backend():
+    # The Agg backend is selected so plotting runs headless (no display). plots.py
+    # sets it before importing pyplot; assert the active backend is Agg, the proof
+    # the import-order contract held.
+    import matplotlib
+
+    import plots  # noqa: F401  (import triggers matplotlib.use("Agg"))
+
+    assert matplotlib.get_backend().lower() == "agg"
+
+
+def test_plots_smoke(tmp_path):
+    # The two JSON-only charts write non-empty PNGs headless to tmp_path (so the
+    # suite never dirties results/). A zero-byte file would mean savefig failed
+    # silently; assert each PNG exists and is non-empty.
+    import plots
+
+    gflops = plots.plot_gflops_vs_n(str(tmp_path / "gflops_vs_n.png"))
+    bars = plots.plot_speedup_bars(str(tmp_path / "speedup_bars.png"))
+    for path in (gflops, bars):
+        assert os.path.exists(path)
+        assert os.path.getsize(path) > 0
+
+
+def test_crossover_reads_calibration_or_skips(tmp_path):
+    # The crossover chart reads the committed calibration cache when present and
+    # writes a non-empty PNG; when the cache is absent it returns None (skipped
+    # with a reason) rather than fabricating a curve. Exercise BOTH branches: the
+    # committed file (present on this clone) and a deliberately-missing path.
+    import plots
+
+    committed = os.path.join(report.RESULTS_DIR, "zpicy_calibration.json")
+    if os.path.exists(committed):
+        out = plots.plot_crossover(str(tmp_path / "crossover.png"), committed)
+        assert out is not None
+        assert os.path.getsize(out) > 0
+
+    # An absent calibration path is skipped (None), never fabricated.
+    missing = str(tmp_path / "does_not_exist_calibration.json")
+    assert plots.plot_crossover(str(tmp_path / "crossover2.png"), missing) is None
