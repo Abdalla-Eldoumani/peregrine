@@ -49,7 +49,7 @@ SCHEMA = 1
 # The two manual-override backends route directly within rules 1-2 (correctness
 # and the hard exclusions) without consulting the table; "auto" runs the
 # measured policy. Exposed for the wrapper to validate FME_BACKEND / set_backend
-# against the design-doc vocabulary.
+# against this set.
 BACKENDS = ("auto", "cpu", "cuda")
 
 
