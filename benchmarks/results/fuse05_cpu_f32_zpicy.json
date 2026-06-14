@@ -1,0 +1,84 @@
+{
+  "manifest": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 165 Stepping 2, GenuineIntel",
+    "python": "3.12.4",
+    "numpy": "2.4.6",
+    "fastmathext": "3.0.0.dev0",
+    "cpu_features": {
+      "avx2": true,
+      "fma": true,
+      "avx512f": false
+    },
+    "cuda_build": false,
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "driver": "610.47",
+    "blas": "openblas 0.3.31.188.0",
+    "power_profile": "Power Scheme GUID: 0f443208-af27-43c1-8255-8606ca7d5000  (Ultimate Performance)",
+    "timestamp": "2026-06-13T18:12:28.281019",
+    "threadpools": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 12,
+        "prefix": "libscipy_openblas",
+        "filepath": "C:\\Users\\96654\\AppData\\Roaming\\Python\\Python312\\site-packages\\numpy.libs\\libscipy_openblas64_-63c857e738469261263c764a36be9436.dll",
+        "version": "0.3.31.188.0",
+        "threading_layer": "pthreads",
+        "architecture": "Haswell"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 12,
+        "prefix": "libomp",
+        "filepath": "C:\\Windows\\System32\\libomp140.x86_64.dll",
+        "version": null
+      }
+    ]
+  },
+  "benchmark": "fuse-05",
+  "chain": "scaled_relu(fma3(axpby(x,y,a,b),z))",
+  "constants": {
+    "a": 2.0,
+    "b": 3.0,
+    "scale": 1.0
+  },
+  "cpu_cases": [
+    {
+      "elems": 8000000,
+      "shape": [
+        2560,
+        3125
+      ],
+      "dtype": "float32",
+      "chain": "scaled_relu(fma3(axpby(x,y,a,b),z))",
+      "constants": {
+        "a": 2.0,
+        "b": 3.0,
+        "scale": 1.0
+      },
+      "fastmathext": {
+        "median_s": 0.061343800000000004,
+        "p25_s": 0.0345806,
+        "p75_s": 0.14170687499999998,
+        "min_s": 0.0315268,
+        "cv": 1.0817453770502965,
+        "reps": 30
+      },
+      "numpy": {
+        "median_s": 0.1134304,
+        "p25_s": 0.107824275,
+        "p75_s": 0.1235134,
+        "min_s": 0.1020327,
+        "cv": 0.10235199147112768,
+        "reps": 30
+      },
+      "speedup_floor": 3.236379841912278,
+      "speedup_median_readout": 1.8490931438874016,
+      "statistic": "floor(min)",
+      "floor_caveat": "CPU quoted on the floor(min): a background antivirus preempts an OpenMP worker at the barrier and inflates the median/max on this machine; the floor is the noise-free best case (the per-call-floor verdict). CV exceeds 5% by design and is a readout, not a gate.",
+      "verified": true
+    }
+  ]
+}
