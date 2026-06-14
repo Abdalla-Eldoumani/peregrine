@@ -2,10 +2,10 @@
 
 #include <cmath>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // Scalar fallback for CPUs without AVX2+FMA. A plain translation unit: it pulls
-// in no AVX2 intrinsics header and is deliberately kept OUT of FME_AVX2_SOURCES,
+// in no AVX2 intrinsics header and is deliberately kept OUT of PG_AVX2_SOURCES,
 // so the arch flag never reaches it and the no-AVX2 fallback module links it
 // without an illegal-instruction crash at import (the legacy import-crash rule,
 // the same reason gemm_naive.cpp stays plain). The WSL/GCC build is the
@@ -68,4 +68,4 @@ template void fused_fma3_naive<double>(const double*, const double*, const doubl
 template void fused_scaled_relu_naive<float>(const float*, float*, int64_t, float);
 template void fused_scaled_relu_naive<double>(const double*, double*, int64_t, double);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
