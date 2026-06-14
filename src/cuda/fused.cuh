@@ -16,8 +16,8 @@ namespace fme::cuda {
 // gemm + gemm_host). A host ndarray fused call computes on the CPU; the GPU path
 // is reached only for already-resident fme.Array operands, so the kernel and its
 // output buffer live on the single compute stream and there is no transfer ->
-// compute cross-stream race surface to fence (the 04-07 lesson is sidestepped by
-// construction). The kernels match the SAME unfused-NumPy oracle + elementwise
+// compute cross-stream race surface to fence (sidestepped by construction). The
+// kernels match the SAME unfused-NumPy oracle + elementwise
 // tolerance as the CPU path; scaled_relu propagates NaN like np.maximum (the
 // device max does NOT, so the kernel restores it), and fma3 is a true single
 // rounding via fmaf/fma.
@@ -41,8 +41,8 @@ extern template void fused_fma3<double>(const double*, const double*, const doub
 extern template void fused_scaled_relu<float>(const float*, float*, int64_t, float);
 extern template void fused_scaled_relu<double>(const double*, double*, int64_t, double);
 
-// cudaEvent-timed warm fused CHAIN, the FUSE-05 GPU measurement primitive plan
-// 05 consumes (the time_matmul twin). It takes THREE device array operands x, y,
+// cudaEvent-timed warm fused CHAIN, the GPU measurement primitive the bench
+// consumes (the time_matmul twin). It takes THREE device array operands x, y,
 // z and times the 3-op composition scaled_relu(fma3(axpby(x, y, a, b), z)) --
 // three kernel launches per iteration -- NOT a single op, because a single-op
 // timer cannot measure the chained work the bench composes. The timed region is
@@ -50,9 +50,9 @@ extern template void fused_scaled_relu<double>(const double*, double*, int64_t, 
 // the compute stream once (so no allocation lands inside the timed window and the
 // chain runs transfer-free), warms the clocks, records a start event, runs `reps`
 // chain iterations, records a stop event, syncs, and returns cudaEventElapsedTime
-// / reps in milliseconds. Device-side timing is immune to the CPU/AV-barrier
-// noise the bench-protocol skill documents. a, b, scale are fixed in-body
-// constants so the timed chain matches what plan 05 benches; correctness is the
+// / reps in milliseconds. Device-side timing is immune to the host-side
+// scheduling noise a wall-clock timer would pick up. a, b, scale are fixed in-body
+// constants so the timed chain matches what the bench measures; correctness is the
 // @gpu oracle test's job, not the timer's.
 template <typename T>
 float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
