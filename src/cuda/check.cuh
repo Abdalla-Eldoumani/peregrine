@@ -28,7 +28,7 @@ namespace fme::cuda {
 // A previous version gated a hand-written fallback switch behind
 // `#if defined(CUBLAS_VER_MAJOR)`, but CUBLAS_VER_MAJOR is defined by
 // cublas_v2.h on every versioned header, so the `#if` arm was ALWAYS taken and
-// the `#else` switch was dead, unverified code (WR-06). Worse, the guard tested
+// the `#else` switch was dead, unverified code. Worse, the guard tested
 // "is this a versioned cuBLAS header" (always yes), not "does
 // cublasGetStatusName exist" (the actual question), so it would not even have
 // covered the case it claimed to. There is no clean preprocessor test for a
