@@ -1,242 +1,229 @@
 # FastMathExt
 
-FastMathExt is a high-performance C++ extension for Python that provides efficient implementations of mathematical functions. It currently includes:
+FastMathExt is a heterogeneous linear algebra library for Python with a
+NumPy-compatible surface. It dispatches matrix and elementwise work across packed
+AVX2 CPU kernels and an optional cuBLAS CUDA backend behind one zero-copy API. The
+native core takes views of C-contiguous float32 and float64 arrays with no copy;
+the Python layer adds dtype promotion, contiguity normalization, clear errors, and
+a per-machine routing policy that decides CPU versus GPU from calibrated timings.
 
-1. **Exact Factorial Calculation** (with arbitrary precision)  
-2. **Highly Optimized Matrix Multiplication** leveraging advanced CPU features and multi-threading.
+Version 3.0.0. Windows is the primary platform (MSVC); the CPU build also runs on
+Linux.
 
-## Key Improvements in v1.2
+## What it provides
 
-### 1. Improved Memory Layout
-- **Flat memory layout** (`Matrix` class) ensures **contiguous memory access** for more efficient caching and prefetching.
-- Better **cache locality** for large matrices.
+- `matmul` for float32 and float64, matching `numpy.matmul` values including
+  zero-sized dimensions and NaN/Inf propagation.
+- `transpose`, `sum`, `mean` reductions with NumPy-matching results.
+- Fused elementwise ops `axpby`, `fma3`, `scaled_relu` that compute a chain in one
+  memory pass.
+- An optional CUDA backend: device-resident `fme.Array` handles, `to_device` /
+  `from_device` transfers, and an auto policy that routes a host float32 product to
+  the GPU only when the calibrated crossover says the device wins after the
+  transfer is paid. float64 never auto-routes to the GPU.
 
-### 2. Enhanced Cache Blocking Strategy
-- **Multi-level blocking**:
-  - **L3 blocking** (512×512)
-  - **L2 blocking** (128×128)
-  - **L1 blocking** (32×32)
-- **Explicit memory prefetching** and **thread-local block accumulation** to reduce latency and improve parallel performance.
+The naive reference kernel is permanent: it is the correctness oracle every result
+is checked against, and the fallback when AVX2 is absent.
 
-### 3. Algorithmic Enhancement: Strassen's Algorithm
-- **Strassen's algorithm** for large square matrices (n ≥ 512).
-- Reduces theoretical complexity from O(n³) to ~O(n^2.807).
-- **Adaptive threshold** to switch back to standard algorithm for smaller sub-matrices.
-- **OpenMP task-based parallelism** for Strassen's sub-multiplications.
+## Install
 
-### 4. Advanced OpenMP Parallelization
-- **Task-based parallelism** for Strassen's seven sub-multiplications.
-- Fine-grained **dynamic scheduling** with reduced thread sync points.
-- Improves **scalability** and ensures **efficient load balancing** across available threads.
+The default build is CPU-only and needs no CUDA toolkit:
 
-### 5. Advanced SIMD and Memory Optimizations
-- **AVX2** and **FMA** (Fused Multiply-Add) for efficient vectorization.
-- **Memory alignment** and **explicit prefetching** of blocks.
-- **Reduced branching** within the critical compute loops.
-
-## Features
-
-### Factorial Calculation
-- **Exact factorial** calculation using Python's arbitrary-precision arithmetic under the hood.
-- **No precision loss**, even for factorials of very large numbers.
-- Returns results as **strings** to handle extremely large outputs.
-- **Error handling** for invalid inputs (e.g., negative numbers).
-
-### Matrix Multiplication
-- **High-performance** implementation designed to rival or exceed NumPy speeds.
-- **Advanced optimizations**:
-  - AVX2 SIMD, FMA instructions, OpenMP parallelization.
-  - Cache-aware blocking strategy (L3 → L2 → L1).
-  - **Strassen's Algorithm** for very large, square matrices (≥ 512×512).
-- Supports both **square** and **non-square** matrices.
-- **Double-precision accuracy**, matching NumPy's floating-point output.
-
-## Requirements
-
-- Python 3.6 or higher
-- C++ compiler (Microsoft Visual C++ 14.0 or greater for Windows)
-- pybind11
-- NumPy (for comparison testing)
-- psutil (for benchmarking)
-
-### Windows-specific Requirements
-
-If you're on Windows, you'll need:
-- Microsoft Visual C++ Build Tools
-  - Download from: [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-  - During installation, select "Desktop development with C++"
-
-## Installation
-
-1. Clone the repository:
 ```bash
-git clone https://github.com/Abdalla-Eldoumani/FastMathExt.git
-cd FastMathExt
+pip install -e .
 ```
 
-2. Install the required Python packages:
+To build with the CUDA backend, enable it at configure time. This needs the
+CUDA Toolkit 12.8 (nvcc and the cuBLAS/cublasLt libraries) and an NVIDIA driver
+new enough for it; the kernels target compute capability 8.6:
+
 ```bash
-pip install pybind11 setuptools numpy psutil
-python setup.py build_ext --inplace
+pip install -e . --config-settings=cmake.define.FME_ENABLE_CUDA=ON
 ```
 
-## Usage
+`fme.has_cuda()` reports whether a usable device is present at runtime. On a
+CPU-only build it returns False and every operation runs on the CPU.
 
-### Factorial Calculation
+## Quickstart
+
 ```python
-import MathExt
-
-# Calculate small factorials
-result = MathExt.factorial(5)
-print(result)  # Output: 120
-
-# Calculate large factorials
-result = MathExt.factorial(100)
-print(result)  # Output: exact 100! (158 digits)
-```
-
-- You can also run the included test script:
-```bash
-python test_mathext.py
-```
-
-### Matrix Multiplication
-```python
-import MathExt
 import numpy as np
-import time
+import fastmathext as fme
 
-# Create two matrices
-A = np.random.rand(1000, 1000).tolist()
-B = np.random.rand(1000, 1000).tolist()
+a = np.array([[1.0, 2.0], [3.0, 4.0]])
+b = np.eye(2)
 
-# Time FastMathExt implementation
-start = time.time()
-result = MathExt.matrix_multiply(A, B)
-mathext_time = time.time() - start
+# Matrix product (host arrays in, host array out).
+fme.matmul(a, b)
 
-# Time NumPy implementation
-start = time.time()
-np_result = np.dot(A, B)
-numpy_time = time.time() - start
+# Transpose returns an owned copy, not a view.
+fme.transpose(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
 
-print(f"FastMathExt Time: {mathext_time:.4f} seconds")
-print(f"NumPy Time: {numpy_time:.4f} seconds")
-print("Results match:", np.allclose(result, np_result))
+# Reductions: axis is keyword-only (None, 0, or 1).
+fme.sum(a)            # scalar
+fme.sum(a, axis=0)    # length-n vector
+fme.mean(a, axis=1)   # length-m vector
+
+# Fused elementwise ops. Array operands are positional; scalars are keyword-only.
+x = np.array([[1.0, 2.0], [3.0, 4.0]])
+y = np.array([[10.0, 20.0], [30.0, 40.0]])
+z = np.array([[1.0, 1.0], [1.0, 1.0]])
+fme.axpby(x, y, a=2.0, b=-1.0)   # a*x + b*y
+fme.fma3(x, y, z)                # x*y + z, one rounding
+fme.scaled_relu(x, scale=3.0)    # maximum(scale*x, 0)
 ```
 
-### Testing and Benchmarking
-- The package includes comprehensive testing and benchmarking scripts.
+With a CUDA build and a usable device:
 
-- Basic Testing
-```bash
-python test_matrix.py           # Run default tests
-python test_matrix.py 1000 1500 # test with specified matrix sizes
+```python
+import numpy as np
+import fastmathext as fme
+
+if fme.has_cuda():
+    a = np.random.default_rng(0).standard_normal((1024, 1024)).astype(np.float32)
+    b = np.random.default_rng(1).standard_normal((1024, 1024)).astype(np.float32)
+
+    # Place operands on the device; matmul of two device arrays returns a device
+    # array (no implicit transfer back).
+    da = fme.to_device(a)
+    db = fme.to_device(b)
+    dc = fme.matmul(da, db)
+    c = fme.from_device(dc)
+
+    # Measure this machine and route host float32 products by the result.
+    fme.calibrate(force=True)
+    fme.set_backend("auto")
 ```
 
-- Advanced Benchmarking
-```bash
-python benchmark_matrix.py                      # Run default benchmark
-python benchmark_matrix.py 100 --sizes 500 1000 # Run 1000 iterations with specified sizes
-```
+`set_backend` accepts `"auto"`, `"cpu"`, or `"cuda"`. `calibrate` measures a square
+GEMM per size and dtype and caches the crossover the auto policy reads.
 
-# Comprehensive Performance Results
+## Results
 
-## Detailed Benchmark (10,000 iterations per size)
+All numbers below are regenerated from the committed results JSON by
+`benchmarks/report.py` and the charts by `benchmarks/plots.py`; none are typed by
+hand. They include the regimes where NumPy or OpenBLAS wins, because float64
+mid-size parity is the stated target, not a win. The headline statistic is the
+floor (min over reps), for the reason given under Methodology.
 
-| Matrix Size | Implementation | Mean Time  | Median Time | Std Dev    | Min Time   | Max Time   |
-|-------------|----------------|------------|-------------|------------|------------|------------|
-| 250×250     | **C++**        | 0.0103 s   | 0.0100 s    | 0.0019 s   | 0.0069 s   | 0.0165 s   |
-| 250×250     | NumPy          | 0.0174 s   | 0.0170 s    | 0.0034 s   | 0.0120 s   | 0.0290 s   |
-| 250×250     | Improvement    | **40.8%**  | **41.2%**   | Better     | Better     | Better     |
-| 500×500     | **C++**        | 0.0409 s   | 0.0410 s    | 0.0076 s   | 0.0280 s   | 0.0640 s   |
-| 500×500     | NumPy          | 0.0671 s   | 0.0660 s    | 0.0131 s   | 0.0470 s   | 0.1100 s   |
-| 500×500     | Improvement    | **39.1%**  | **37.9%**   | Better     | Better     | Better     |
-| 750×750     | **C++**        | 0.1011 s   | 0.0990 s    | 0.0189 s   | 0.0570 s   | 0.1596 s   |
-| 750×750     | NumPy          | 0.1352 s   | 0.1300 s    | 0.0306 s   | 0.0850 s   | 0.2320 s   |
-| 750×750     | Improvement    | **25.2%**  | **23.9%**   | Better     | Better     | Better     |
-| 1000×1000   | **C++**        | 0.2133 s   | 0.2030 s    | 0.0459 s   | 0.1360 s   | 0.3530 s   |
-| 1000×1000   | NumPy          | 0.2754 s   | 0.2560 s    | 0.0724 s   | 0.1550 s   | 0.4918 s   |
-| 1000×1000   | Improvement    | **22.6%**  | **20.7%**   | Better     | Better     | Better     |
-| 1250×1250   | **C++**        | 0.3573 s   | 0.3370 s    | 0.0802 s   | 0.2210 s   | 0.6066 s   |
-| 1250×1250   | NumPy          | 0.4130 s   | 0.3870 s    | 0.1052 s   | 0.2180 s   | 0.7237 s   |
-| 1250×1250   | Improvement    | **13.5%**  | **12.9%**   | Better     | Comparable | Better     |
-| 1500×1500   | **C++**        | 0.5250 s   | 0.4980 s    | 0.1125 s   | 0.3080 s   | 0.8614 s   |
-| 1500×1500   | NumPy          | 0.5854 s   | 0.5570 s    | 0.1415 s   | 0.3050 s   | 0.9991 s   |
-| 1500×1500   | Improvement    | **10.3%**  | **10.6%**   | Better     | Comparable | Better     |
-| 1750×1750   | **C++**        | 0.7471 s   | 0.7220 s    | 0.1922 s   | 0.4350 s   | 1.2938 s   |
-| 1750×1750   | NumPy          | 0.7279 s   | 0.7215 s    | 0.2113 s   | 0.3790 s   | 1.2841 s   |
-| 1750×1750   | Improvement    | **–2.6%**  | **–0.1%**   | Better     | Slower     | Comparable |
+The CPU tables come from a CPU-only build; the GPU tables from a CUDA build on the
+same machine. The two are not directly comparable per operation, only per regime.
 
----
+### float64 matmul (CPU)
 
-## Key Performance Insights
+| n | FastMathExt floor (GFLOP/s) | OpenBLAS floor (GFLOP/s) | floor ratio |
+| --- | --- | --- | --- |
+| 256 | 29.0 | 97.3 | 0.30 |
+| 512 | 40.9 | 93.5 | 0.44 |
+| 1024 | 65.4 | 104.2 | 0.63 |
+| 2048 | 76.2 | 112.5 | 0.68 |
 
-- **Size-dependent performance advantage**  
-  - Small-to-medium matrices (250×250 to 750×750): C++ is 25–41 % faster than NumPy  
-  - Medium-to-large matrices (1000×1000 to 1500×1500): C++ maintains a 10–23 % lead  
-  - Very large matrices (1750×1750): performance converges, with NumPy slightly edging out C++
+At n=2048 the cleanest measured run reaches 0.79 of OpenBLAS (high-effort best
+floor). float64 mid-size parity is the target; FastMathExt does not beat OpenBLAS
+here.
 
-- **Consistency advantages**  
-  - Lower standard deviation across all sizes  
-  - More predictable runs with fewer extreme outliers  
-  - Better minimum times on small-to-medium workloads
+### Small-matrix float32 (CPU)
 
-- **Scalability characteristics**  
-  - Near-linear runtime growth with matrix size  
-  - Excellent multi-core efficiency  
-  - Superior cache utilization on sizes fitting in each cache level
+The small-matrix path loses to NumPy at every tiny size: NumPy dispatches to an
+OpenBLAS small-GEMM, and the irreducible Python plus binding round-trip dominates
+at this scale.
 
----
+| n | speedup vs NumPy | outcome |
+| --- | --- | --- |
+| 8 | 0.52x | loses to NumPy |
+| 16 | 0.39x | loses to NumPy |
+| 32 | 0.18x | loses to NumPy |
+| 64 | 0.08x | loses to NumPy |
 
-## Performance Distribution
+### Thread scaling (CPU)
 
-The benchmark harness captured 10,000 measurements per size, automatically removed statistical outliers, and then computed metrics. This provides a robust view of typical, best-case, and worst-case timings.
+1 to 6 thread scaling at n=1024 (f64): 2.87x floor speedup, below the 4x the
+four-core plateau would give and far below linear. More threads do not help past
+four cores here.
 
----
+### GPU matmul
 
-## Implementation Details (Matrix Multiplication)
+Device-resident float32 (without transfer), warm, versus NumPy CPU f32. CuPy is
+not installed on this machine, so the GPU baseline is NumPy CPU f32.
 
-### Matrix Multiplication Optimizations
+| n | GFLOP/s | speedup vs NumPy CPU f32 |
+| --- | --- | --- |
+| 256 | 890 | 6.83x |
+| 333 | 2282 | 11.36x |
+| 512 | 4416 | 22.76x |
+| 750 | 5531 | 26.82x |
+| 1024 | 6125 | 28.21x |
+| 2048 | 4873 | 23.54x |
 
-#### SIMD Instructions
-- **AVX2** for 256-bit vector operations on doubles  
-- **FMA** to fuse multiply-add, reducing rounding errors and boosting throughput
+With the host round-trip (to_device + matmul + from_device), warm. The small sizes
+lose to the transfer cost, which is why the auto policy keeps small host arrays on
+the CPU:
 
-#### Hierarchical Cache Blocking
-- **Three-level blocking**:  
-  - L3 block = 512×512  
-  - L2 block = 128×128  
-  - L1 block = 32×32  
-- **Explicit prefetching** to minimize cache misses  
-- **Thread-local accumulators** to avoid false sharing
+| n | speedup vs NumPy CPU f32 | outcome |
+| --- | --- | --- |
+| 256 | 0.35x | loses to transfer cost |
+| 333 | 0.35x | loses to transfer cost |
+| 512 | 0.48x | loses to transfer cost |
+| 750 | 0.44x | loses to transfer cost |
+| 1024 | 2.93x | wins after transfer |
+| 2048 | 5.29x | wins after transfer |
 
-#### Parallelization
-- **OpenMP** for parallel loops and sections  
-- **Task-based Strassen** for large sub-multiplications  
-- **Dynamic scheduling** for balanced workload across cores
+### Fused 3-op chain
 
-#### Strassen’s Algorithm
-- Applied only when size ≥ 512×512  
-- Seven recursive multiplications, each parallelized  
-- Falls back to standard multiply below an adaptive threshold
+Chain `scaled_relu(fma3(axpby(x,y,a,b),z))` at 8M float32 elements. The fused
+kernel makes one memory pass where the unfused NumPy chain makes several:
 
-#### Memory Alignment and Prefetching
-- **Flat, contiguous layout** for fewer cache misses  
-- Aligned allocations and prefetch hints in critical loops  
+| backend | speedup vs NumPy unfused chain |
+| --- | --- |
+| CPU (floor) | 3.24x |
+| GPU device-resident | 71.37x |
 
----
+### Autotuned blocking
 
-## Performance Characteristics
+Autotuned CPU blocking on this machine (from the saved sweep): mc=48, kc=192,
+nc=2048 (selected on min_gflops).
 
-### Reduced Cache Misses
-- Localized access via hierarchical blocking  
-- Contiguous memory arrays minimize eviction
+### Charts
 
-### High Parallel Efficiency
-- Fewer synchronization barriers  
-- Balanced OpenMP scheduling keeps cores busy
+The three charts are regenerated from the same JSON:
 
-### Scalability
-- Near-linear speed-up up to 1500×1500 matrices  
-- Optimized data paths to reduce cache-to-cache transfers
+- `benchmarks/results/gflops_vs_n.png`: GFLOP/s vs n per backend.
+- `benchmarks/results/speedup_bars.png`: speedup per regime, wins and losses.
+- `benchmarks/results/crossover.png`: the host float32 crossover, CPU compute vs
+  GPU compute plus transfer, showing the size where the device wins for a host
+  array.
+
+## Methodology
+
+Every contender in a series takes an ndarray in and returns an ndarray out, on
+both sides, with the same dtype, layout, and data; inputs are built once with a
+seeded generator outside the timed region, so no conversion time is counted. CPU
+timing uses `perf_counter_ns`; GPU device work is timed with CUDA event pairs after
+a stream sync, never a wall clock around an asynchronous launch. The host
+round-trip series is the one wall-clocked GPU case, because the transfer
+synchronizes at the boundary. Each measured repetition is checked against the NumPy
+oracle before its time is recorded, so an unverified result never reaches a table.
+
+The headline statistic is the floor (min over reps), with median, IQR, and
+coefficient of variation recorded alongside as a noise readout. On this machine a
+background antivirus preempts an OpenMP worker at the fork/join barrier, which
+inflates the median and maximum of every multi-threaded CPU series; the floor is
+the noise-free best case, and the coefficient of variation documents the residual
+rather than hiding it. The size grid includes non-multiples of the vector width so
+a kernel cannot hide its tail path.
+
+## Hardware
+
+| Component | Value |
+| --- | --- |
+| Platform | Windows-10-10.0.19045-SP0 |
+| CPU | Intel64 Family 6 Model 165 Stepping 2, GenuineIntel |
+| GPU | NVIDIA GeForce RTX 3060 Laptop GPU |
+| CUDA driver | 610.47 |
+| Python | 3.12.4 |
+| NumPy | 2.4.6 |
+| BLAS | openblas 0.3.31.188.0 |
+
+## License
+
+MIT. See LICENSE.
