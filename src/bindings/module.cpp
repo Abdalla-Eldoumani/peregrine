@@ -35,13 +35,13 @@ cuda_device_info context_device_info();
 
 // gemm_host: host-pointer GEMM convenience (allocates device buffers, copies up,
 // runs the device gemm, copies the result back, syncs). This entry exists so the
-// GPU-02 correctness suite has a callable host->device->host path. Templated in
+// correctness suite has a callable host->device->host path. Templated in
 // src/cuda; the explicit float/double instantiations there satisfy these.
 template <typename T>
 void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 
-// gemm: the PURE device-pointer GEMM (04-03). a, b, c are DEVICE pointers; it
-// runs cuBLAS on the compute stream and never touches host memory or syncs. The
+// gemm: the PURE device-pointer GEMM. a, b, c are DEVICE pointers; it runs cuBLAS
+// on the compute stream and never touches host memory or syncs. The
 // device-resident matmul(Array, Array) entry below reaches it through
 // fme::dispatch::matmul_device (the routing tier), never by calling it here, so
 // the f64-never-AUTO-routes exclusion lives in dispatch where it is unit-testable.
@@ -57,18 +57,18 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 // the "cuda backend requested but <reason>" token.
 cuda_device_info device_probe();
 
-// time_matmul: the cudaEvent-timed warm GEMM (the GPU-08 measurement primitive
-// 04-06 consumes). a, b are DEVICE pointers; the timed region is the GEMM only
-// (no transfer). Forward-declared CUDA-free (plain pointers + int64 + float), so
-// the event/stream body stays in gemm_cublas.cu and no CUDA header reaches this
-// TU. Returns warm elapsed ms per rep.
+// time_matmul: the cudaEvent-timed warm GEMM (the measurement primitive the bench
+// consumes). a, b are DEVICE pointers; the timed region is the GEMM only (no
+// transfer). Forward-declared CUDA-free (plain pointers + int64 + float), so the
+// event/stream body stays in gemm_cublas.cu and no CUDA header reaches this TU.
+// Returns warm elapsed ms per rep.
 template <typename T>
 float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
                   int reps, int warmups);
 
-// time_fused_chain: the cudaEvent-timed warm fused CHAIN (the FUSE-05 measurement
-// primitive plan 05 consumes). x, y, z are DEVICE pointers; the timed region runs
-// the 3-op chain axpby->fma3->scaled_relu (three launches per iteration) on
+// time_fused_chain: the cudaEvent-timed warm fused CHAIN (the measurement
+// primitive the bench consumes). x, y, z are DEVICE pointers; the timed region
+// runs the 3-op chain axpby->fma3->scaled_relu (three launches per iteration) on
 // compute-stream scratch -- no transfer. Forward-declared CUDA-free so the
 // event/stream body stays in fused.cu and no CUDA header reaches this TU. Returns
 // warm elapsed ms per rep for the whole chain.
@@ -78,17 +78,17 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
 } // namespace fme::cuda
 
 namespace fme::dispatch {
-// The device-resident routing entry (04-05): a, b, c are DEVICE pointers; it
-// forwards f32/f64 to the cuBLAS GEMM behind the same FME_HAS_CUDA guard. The
-// binding's matmul(Array, Array) path calls THIS rather than cuda::gemm directly,
-// so the routing decision (and the f64-never-AUTO-routes rule it documents) stays
-// in the dispatch tier. CUDA-free signature (pointers + int64), forward-declared.
+// The device-resident routing entry: a, b, c are DEVICE pointers; it forwards
+// f32/f64 to the cuBLAS GEMM behind the same FME_HAS_CUDA guard. The binding's
+// matmul(Array, Array) path calls THIS rather than cuda::gemm directly, so the
+// routing decision (and the f64-never-AUTO-routes rule it documents) stays in the
+// dispatch tier. CUDA-free signature (pointers + int64), forward-declared.
 template <typename T>
 void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 
-// The device-resident fused routing entries (06-04): x, y, z, out are DEVICE
-// pointers. The binding's device fused Array overloads call THESE rather than
-// cuda::fused_* directly, so the routing stays in the dispatch tier (symmetric to
+// The device-resident fused routing entries: x, y, z, out are DEVICE pointers.
+// The binding's device fused Array overloads call THESE rather than cuda::fused_*
+// directly, so the routing stays in the dispatch tier (symmetric to
 // matmul_device). CUDA-free signatures, forward-declared; fused.cu's explicit
 // instantiations satisfy them across the TU boundary.
 template <typename T>
@@ -200,7 +200,7 @@ nb::ndarray<nb::numpy, T, nb::ndim<1>> sum_axis_typed(
 // only contiguity/dtype via the nanobind view type (as sum_axis_typed trusts the
 // validated axis). checked_bytes runs before every new T[]: an int64 m*n*sizeof(T)
 // product that overflows would otherwise size a truncated buffer the full-extent
-// kernel write then overruns (a heap overflow, WR-02) -- it throws shape_error
+// kernel write then overruns (a heap overflow) -- it throws shape_error
 // (-> ValueError) on overflow or a negative extent first. n is the flat element
 // count m*n; all index math is int64_t.
 
@@ -280,12 +280,12 @@ nb::ndarray<nb::numpy, T, nb::ndim<2>> fma3_typed(
 }
 
 #if defined(FME_HAS_CUDA)
-// Host-pointer device GEMM for the GPU-02 correctness suite: same zero-copy-in,
+// Host-pointer device GEMM for the GPU correctness suite: same zero-copy-in,
 // capsule-owned-out shape as matmul_typed, but the kernel is the cuBLAS device
 // GEMM which stages the host operands to the device, computes, and copies back.
 // Underscore-private and CUDA-build-only: the public device path is matmul on
-// fme.Array (04-04); this exists so f32/f64 GPU correctness can be proven now,
-// against the same assert_matmul_close tolerance contract the CPU path uses.
+// fme.Array; this exists so f32/f64 GPU correctness can be proven against the same
+// assert_matmul_close tolerance contract the CPU path uses.
 template <typename T>
 nb::ndarray<nb::numpy, T, nb::ndim<2>> gemm_host_typed(
     const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a,
@@ -315,9 +315,9 @@ nb::ndarray<nb::numpy, T, nb::ndim<2>> gemm_host_typed(
 // destructor when the Python object is garbage-collected. Single owner: nanobind
 // manages this C++ instance's lifetime, so the device buffer is freed exactly
 // once, by ~Array, never by a stray capsule deleter -- the use-after-free / leak
-// mitigation (a wrong deleter on a device pointer is a DoS, RESEARCH Security
-// Domain). The buffer is moved into the instance at construction (to_device /
-// the device matmul) and never shared between two live Arrays.
+// mitigation (a wrong deleter on a device pointer corrupts memory). The buffer is
+// moved into the instance at construction (to_device / the device matmul) and
+// never shared between two live Arrays.
 struct Array {
     fme::cuda::DeviceBuffer buf;
 
@@ -334,7 +334,7 @@ struct Array {
             // after the atexit teardown destroyed the context streams. An Array
             // held in a module global (or an inline temporary the GC keeps alive
             // past module finalization) reaches here on a dead transfer stream.
-            // free_device is teardown-tolerant for exactly that case (CR-01): it
+            // free_device is teardown-tolerant for exactly that case: it
             // skips the free once teardown has run and otherwise inspects the
             // return code by hand, never throwing. So this stays a plain call --
             // a throw escaping a destructor during GC would terminate the
@@ -370,9 +370,9 @@ nb::ndarray<nb::array_api> array_dlpack_view(nb::handle self, const Array& arr) 
 }
 
 // to_device: copy a host ndarray up to a fresh device buffer and wrap it in an
-// fme.Array. Accepts both f32 and f64 (Open Q3: to_device is just memory; the
-// f64-never-auto-routes rule is a dispatch concern in 04-05, not a to_device
-// rejection). alloc_device pre-flights cudaMemGetInfo; copy_h2d runs on the
+// fme.Array. Accepts both f32 and f64 (to_device is just memory; the
+// f64-never-auto-routes rule is a dispatch concern, not a to_device rejection).
+// alloc_device pre-flights cudaMemGetInfo; copy_h2d runs on the
 // transfer stream. The H2D is async on the transfer stream, but cuBLAS runs on
 // the SEPARATE compute stream and the two streams are unordered -- so the buffer
 // must be fully resident before it is handed back, or a later GEMM on compute
@@ -392,7 +392,7 @@ Array* to_device_typed(
     const int64_t cols = static_cast<int64_t>(a.shape(1));
     const fme::cuda::DType dt =
         std::is_same_v<T, double> ? fme::cuda::DType::f64 : fme::cuda::DType::f32;
-    // Overflow-checked (WR-02): an unbounded rows*cols*sizeof(T) product cast to
+    // Overflow-checked: an unbounded rows*cols*sizeof(T) product cast to
     // size_t for the device alloc could wrap, leaving alloc_device sized for a
     // truncated buffer while copy_h2d copies the full extent.
     const int64_t bytes =
@@ -426,7 +426,7 @@ template <typename T>
 nb::ndarray<nb::numpy, T, nb::ndim<2>> from_device_typed(const Array& arr) {
     const int64_t rows = arr.buf.rows;
     const int64_t cols = arr.buf.cols;
-    // Overflow-checked (WR-02): rows/cols come straight off the Array's buffer
+    // Overflow-checked: rows/cols come straight off the Array's buffer
     // with no bound. Before the fix, an overflowing rows*cols*sizeof(T) product
     // cast to size_t let new T[] allocate a truncated host buffer while copy_d2h
     // was told to copy the full bytes -- a heap overflow. checked_bytes throws
@@ -455,12 +455,12 @@ nb::ndarray<nb::numpy, T, nb::ndim<2>> from_device_typed(const Array& arr) {
 // GEMM (fme::cuda::gemm<T>) directly on the operands' device pointers -- NO host
 // staging, no D2H. The result is a fresh fme.Array wrapping the output buffer.
 //
-// Deliberately minimal here: this is the device-in/device-out primitive 04-05's
-// wrapper consumes for the f32 device-resident GPU path (GPU-05 routing). The
-// full residency dispatch -- the mixed-residency TypeError, the residency-out
-// return-type selection, the f64-never-auto-routes exclusion, and the warn-once
-// CPU fallback -- is layered on top in 04-05; this entry must not silently
-// transfer either (it never touches host memory). A dtype/shape mismatch raises
+// Deliberately minimal here: this is the device-in/device-out primitive the
+// wrapper consumes for the f32 device-resident GPU path. The full residency
+// dispatch -- the mixed-residency TypeError, the residency-out return-type
+// selection, the f64-never-auto-routes exclusion, and the warn-once CPU fallback
+// -- is layered on top in the wrapper; this entry must not silently transfer
+// either (it never touches host memory). A dtype/shape mismatch raises
 // (shape_error -> ValueError via the translator) rather than computing garbage.
 Array* matmul_device(const Array& a, const Array& b) {
     if (a.buf.dtype != b.buf.dtype) {
@@ -472,7 +472,7 @@ Array* matmul_device(const Array& a, const Array& b) {
 
     const fme::cuda::DType dt = a.buf.dtype;
     const int64_t elem = fme::cuda::dtype_size(dt);
-    // Overflow-checked (WR-02): the int32 cuBLAS dimension guard fires only
+    // Overflow-checked: the int32 cuBLAS dimension guard fires only
     // INSIDE cuda::gemm, after alloc_device has already been asked for out_bytes,
     // so an overflowing d.m*d.n*elem would reach the device allocator first.
     const int64_t out_bytes = fme::checked_bytes(d.m, d.n, elem);
@@ -525,8 +525,8 @@ Array* matmul_device(const Array& a, const Array& b) {
 
 // The cudaEvent-timed device matmul: (Array x, Array y, reps, warmups) -> warm
 // ms per rep. Both operands are device-resident, so the timed region is the GEMM
-// only -- no H2D/D2H. This is the firm GPU-08 timing primitive 04-06's bench
-// reads instead of a wall-clock approximation around an async launch. Same
+// only -- no H2D/D2H. This is the timing primitive the bench reads instead of a
+// wall-clock approximation around an async launch. Same
 // dtype + conformable-shape validation as matmul_device (a mismatch is a
 // shape_error -> ValueError, never a fake measurement). The GIL drops around the
 // whole warmup + timed run; time_matmul itself allocates the single output
@@ -565,8 +565,9 @@ float time_matmul_entry(const Array& x, const Array& y, int reps, int warmups) {
 // SAME compute stream, so there is NO transfer->compute cross-stream fence to add
 // (matmul_device fences because it allocs the output on the transfer stream; the
 // fused path stays single-stream by construction, which is exactly why v1 fused
-// is device-resident-only -- it removes the 04-07 race surface entirely). The
-// wrapper sends only all-fme.Array same-residency operands here; a dtype/shape
+// is device-resident-only -- it removes the transfer->compute race surface
+// entirely). The wrapper sends only all-fme.Array same-residency operands here; a
+// dtype/shape
 // mismatch raises shape_error -> ValueError rather than computing garbage. The
 // same-shape rule (no broadcast) is the wrapper's guarantee, so these validate
 // only dtype + exact rows/cols equality across operands.
@@ -577,7 +578,7 @@ float time_matmul_entry(const Array& x, const Array& y, int reps, int warmups) {
 // sync_transfer before the compute-stream kernel reads/writes it -- the one fence
 // the single-stream fused path needs is the alloc-before-kernel ordering, the same
 // transfer->compute boundary matmul_device fences. checked_bytes guards the int64
-// element-count -> byte-count product first (WR-02).
+// element-count -> byte-count product first.
 Array* fused_axpby_device_entry(const Array& x, const Array& y, double a,
                                 double b) {
     if (x.buf.dtype != y.buf.dtype) {
@@ -684,14 +685,14 @@ Array* fused_scaled_relu_device_entry(const Array& x, double scale) {
     return new Array(out);
 }
 
-// The cudaEvent-timed device fused CHAIN timer (the FUSE-05 primitive plan 05
-// consumes). Three device-resident operands x, y, z; the timed region is the 3-op
-// chain axpby->fma3->scaled_relu (three launches/iter) on compute-stream scratch
-// -- no transfer. Same dtype + same-shape validation as the fused device entries
-// (a mismatch is a shape_error -> ValueError, never a fake measurement). The GIL
+// The cudaEvent-timed device fused CHAIN timer (the primitive the bench consumes).
+// Three device-resident operands x, y, z; the timed region is the 3-op chain
+// axpby->fma3->scaled_relu (three launches/iter) on compute-stream scratch -- no
+// transfer. Same dtype + same-shape validation as the fused device entries (a
+// mismatch is a shape_error -> ValueError, never a fake measurement). The GIL
 // drops around the whole warmup + timed run; time_fused_chain itself allocates the
 // scratch buffers and creates/destroys the events. This is the exact 3-operand
-// signature plan 05's _cuda_time_fused(...) call binds to.
+// signature the bench's _cuda_time_fused(...) call binds to.
 float time_fused_chain_entry(const Array& x, const Array& y, const Array& z,
                              int reps, int warmups) {
     if (x.buf.dtype != y.buf.dtype || x.buf.dtype != z.buf.dtype) {
@@ -747,9 +748,9 @@ NB_MODULE(_core, m) {
     // Fused elementwise, double before float in every set: a float64 array must
     // never bind the float32 overload (a silent narrowing). The wrapper sends
     // only validated same-shape same-dtype host operands; these CPU overloads
-    // carry the host fused path. The device-resident Array overloads land in
-    // 06-04. No new exception translator: checked_bytes throws shape_error, which
-    // the existing translator maps to ValueError.
+    // carry the host fused path. The device-resident Array overloads are
+    // registered further below. No new exception translator: checked_bytes throws
+    // shape_error, which the existing translator maps to ValueError.
     m.def("axpby", &axpby_typed<double>, nb::arg("x"), nb::arg("y"), nb::arg("a"),
           nb::arg("b"));
     m.def("axpby", &axpby_typed<float>, nb::arg("x"), nb::arg("y"), nb::arg("a"),
@@ -795,12 +796,12 @@ NB_MODULE(_core, m) {
     });
 
     // The PRIVATE compile-time build signal. Underscore-private: the public
-    // predicate is the wrapper's has_cuda() (04-05), which composes this build
-    // flag AND a usable-device probe (_cuda_device_probe below) into the
-    // build-AND-usable-device meaning DESIGN_SYSTEM.md names. Renamed from the old
-    // public has_cuda_build: a build flag alone is not the useful predicate
-    // (dispatch must not route to a GPU that is absent), so the build-only answer
-    // stays private and the runtime chain is the public surface.
+    // predicate is the wrapper's has_cuda(), which composes this build flag AND a
+    // usable-device probe (_cuda_device_probe below) into a build-AND-usable-device
+    // answer. Renamed from the old public has_cuda_build: a build flag alone is not
+    // the useful predicate (dispatch must not route to a GPU that is absent), so
+    // the build-only answer stays private and the runtime chain is the public
+    // surface.
     m.def("_has_cuda_build", [] {
 #if defined(FME_HAS_CUDA)
         return true;
@@ -811,10 +812,10 @@ NB_MODULE(_core, m) {
 
 #if defined(FME_HAS_CUDA)
     // Underscore-private introspection that drives the context singleton to build
-    // (GPU-01) and reports the bound device. The wrapper's public has_cuda()
-    // (04-05) and the to_device path (04-04) will reach the context through their
-    // own entry points; this one exists so the context-init and clean-shutdown
-    // tests have a Python-visible trigger before those land. Defined only on the
+    // and reports the bound device. The wrapper's public has_cuda() and the
+    // to_device path reach the context through their own entry points; this one
+    // exists so the context-init and clean-shutdown tests have a Python-visible
+    // trigger. Defined only on the
     // CUDA build: on the OFF build there is no context to introspect and the
     // symbol is absent, matching _has_cuda_build() == False. The GIL is held: this
     // queries device props, it launches no kernel, so there is nothing to overlap.
@@ -853,7 +854,7 @@ NB_MODULE(_core, m) {
     // double before float, like every other overload set: a float64 array must
     // never bind the float32 overload (a silent narrowing). Private and
     // CUDA-only; the public device matmul is exposed via the Array overload of
-    // matmul below (04-04), wired into fme.matmul by 04-05.
+    // matmul below, wired into fme.matmul by the wrapper.
     m.def("_gemm_host", &gemm_host_typed<double>, nb::arg("a"), nb::arg("b"));
     m.def("_gemm_host", &gemm_host_typed<float>, nb::arg("a"), nb::arg("b"));
 
@@ -911,12 +912,12 @@ NB_MODULE(_core, m) {
     // The REQUIRED device-resident matmul: matmul(Array, Array) -> Array,
     // device-in/device-out, dtype-dispatched. Registered as a matmul overload
     // AFTER the host ndarray overloads, so a host pair still binds the CPU path
-    // and a device pair binds this one. 04-05's wrapper consumes this for the
-    // GPU-05 device-resident routing; Task 3 round-trips it against the CPU
-    // result through assert_matmul_close.
+    // and a device pair binds this one. The wrapper consumes this for the
+    // device-resident routing; a test round-trips it against the CPU result
+    // through assert_matmul_close.
     m.def("matmul", &matmul_device, nb::arg("a"), nb::arg("b"));
 
-    // The cudaEvent-timed device-matmul timer (GPU-08 primitive 04-06 consumes).
+    // The cudaEvent-timed device-matmul timer (the primitive the bench consumes).
     // Both operands are device-resident fme.Array, so the timed region is the
     // GEMM only -- no transfer. Returns warm elapsed ms per rep from a cudaEvent
     // pair recorded after a sync. Underscore-private: it is a measurement tool the
@@ -929,9 +930,9 @@ NB_MODULE(_core, m) {
     // ndarray overloads above (axpby/fma3/scaled_relu) so a host operand binds the
     // CPU path and an fme.Array operand binds these. device-in/device-out ->
     // fme.Array. The wrapper routes here only when every operand is an fme.Array
-    // (06-04's _fused_residency "device" branch); single-stream, no cross-stream
-    // fence (the v1 device-resident-only design). a, b, scale arrive as Python
-    // floats (double); the f32 path narrows them, like the CPU axpby/scaled_relu.
+    // (the device residency branch); single-stream, no cross-stream fence (the v1
+    // device-resident-only design). a, b, scale arrive as Python floats (double);
+    // the f32 path narrows them, like the CPU axpby/scaled_relu.
     m.def("axpby", &fused_axpby_device_entry, nb::arg("x"), nb::arg("y"),
           nb::arg("a"), nb::arg("b"));
     m.def("fma3", &fused_fma3_device_entry, nb::arg("x"), nb::arg("y"),
@@ -939,13 +940,13 @@ NB_MODULE(_core, m) {
     m.def("scaled_relu", &fused_scaled_relu_device_entry, nb::arg("x"),
           nb::arg("scale"));
 
-    // The cudaEvent-timed device fused CHAIN timer (FUSE-05 primitive plan 05
+    // The cudaEvent-timed device fused CHAIN timer (the primitive the bench
     // consumes). Three device-resident fme.Array operands, so the timed region is
     // the 3-op chain only -- no transfer. Returns warm elapsed ms per rep for the
     // whole axpby->fma3->scaled_relu chain. Underscore-private: a measurement tool
     // the bench reaches through _core, not public surface. Defined only on the CUDA
     // build, absent on OFF. This 3-operand (x, y, z, reps, warmups) signature is
-    // exactly what plan 05's _cuda_time_fused(...) call binds to.
+    // exactly what the bench's _cuda_time_fused(...) call binds to.
     m.def("_cuda_time_fused", &time_fused_chain_entry, nb::arg("x"), nb::arg("y"),
           nb::arg("z"), nb::arg("reps"), nb::arg("warmups"));
 #endif
@@ -956,17 +957,16 @@ NB_MODULE(_core, m) {
         } catch (const fme::shape_error& e) {
             PyErr_SetString(PyExc_ValueError, e.what());
         } catch (const fme::cuda_error& e) {
-            // The ONE new arm for the CUDA path (04-04). Every FME_CUDA_CHECK /
-            // FME_CUBLAS_CHECK failure and the alloc_device OOM pre-flight throw
-            // fme::cuda_error carrying the cuda error NAME (e.g.
-            // cudaErrorMemoryAllocation) plus file:line. Mapped to RuntimeError
-            // here; the distinct user-facing wording (the byte-math OOM message,
-            // the driver-too-old message) is composed in the wrapper (04-05),
-            // keyed off the name in e.what(). cuda_error lives in core/common.hpp
-            // and carries no CUDA type, so this arm compiles in every build; on
-            // the OFF build nothing throws it, so it is simply never reached. One
-            // translator, one new arm -- never a second register call
-            // (src/bindings/CLAUDE.md).
+            // The arm for the CUDA path. Every FME_CUDA_CHECK / FME_CUBLAS_CHECK
+            // failure and the alloc_device OOM pre-flight throw fme::cuda_error
+            // carrying the cuda error NAME (e.g. cudaErrorMemoryAllocation) plus
+            // file:line. Mapped to RuntimeError here; the distinct user-facing
+            // wording (the byte-math OOM message, the driver-too-old message) is
+            // composed in the wrapper, keyed off the name in e.what(). cuda_error
+            // lives in core/common.hpp and carries no CUDA type, so this arm
+            // compiles in every build; on the OFF build nothing throws it, so it is
+            // simply never reached. One translator, one arm -- never a second
+            // register call.
             PyErr_SetString(PyExc_RuntimeError, e.what());
         } catch (const std::bad_alloc& e) {
             // A GEMM whose pack buffers (MC*KC*NC, reachable via a pathological
