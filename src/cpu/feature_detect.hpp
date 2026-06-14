@@ -1,6 +1,6 @@
 #pragma once
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 struct features {
     bool avx2;
@@ -13,4 +13,4 @@ struct features {
 // crash, which is how the legacy .pyd failed.
 const features& detect();
 
-} // namespace fme::cpu
+} // namespace pg::cpu
