@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace fme::cuda {
+namespace pg::cuda {
 
 // The dtype a device buffer holds. The Array binding (module.cpp) maps this to
 // and from the NumPy dtype; the transfer/GEMM code only ever needs the element
@@ -20,7 +20,7 @@ inline int64_t dtype_size(DType dt) {
     return dt == DType::f64 ? 8 : 4;
 }
 
-// The device-buffer handle fme.Array wraps. It owns a device pointer allocated
+// The device-buffer handle pg.Array wraps. It owns a device pointer allocated
 // from the context mempool plus the 2-D shape and the element dtype, so it is
 // fully self-describing: from_device and the dlpack export read rows/cols/dtype
 // off the handle with no parallel state on the binding side. Carrying the shape
@@ -45,7 +45,7 @@ struct DeviceBuffer {
 // on a context stream, reused via the UINT64_MAX release threshold the context
 // sets on the pool).
 // Pre-flights cudaMemGetInfo against the CURRENT free VRAM and throws
-// fme::cuda_error carrying the cudaErrorMemoryAllocation NAME when the request
+// pg::cuda_error carrying the cudaErrorMemoryAllocation NAME when the request
 // would exceed free (with a small headroom margin) -- never discovering OOM by
 // failing the allocation, which on a display GPU can wedge the desktop. The
 // returned pointer is owned by the caller and freed with free_device.
@@ -94,4 +94,4 @@ void sync_compute();
 // overlap, so a pinned-buffer cache would be the way to make H2D/D2H genuinely
 // async at the full PCIe rate when a large-transfer path needs it.
 
-} // namespace fme::cuda
+} // namespace pg::cuda
