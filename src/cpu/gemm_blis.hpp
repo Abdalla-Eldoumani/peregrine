@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // Packed-panel BLIS-style GEMM: the AVX2+FMA fast path that dispatch routes to
 // when the CPU has the features, with the small-matrix branch living inside the
@@ -36,4 +36,4 @@ struct blocking {
 void store_blocking(blocking b) noexcept;
 blocking load_blocking() noexcept;
 
-} // namespace fme::cpu
+} // namespace pg::cpu
