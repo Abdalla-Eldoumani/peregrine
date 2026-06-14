@@ -22,7 +22,7 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-import fastmathext as fme
+import peregrine as pg
 from conftest import assert_reduce_close
 
 LEGACY_KILLER_SIZES = [1, 3, 7, 50, 250, 333, 750]
@@ -38,7 +38,7 @@ class TestTranspose:
     def test_square(self, n, dtype):
         rng = np.random.default_rng(0)
         a = rng.standard_normal((n, n)).astype(dtype)
-        np.testing.assert_array_equal(fme.transpose(a), a.T)
+        np.testing.assert_array_equal(pg.transpose(a), a.T)
 
     @pytest.mark.parametrize(
         "m,n",
@@ -48,12 +48,12 @@ class TestTranspose:
     def test_rectangular(self, m, n, dtype):
         rng = np.random.default_rng(1)
         a = rng.standard_normal((m, n)).astype(dtype)
-        np.testing.assert_array_equal(fme.transpose(a), a.T)
+        np.testing.assert_array_equal(pg.transpose(a), a.T)
 
     @pytest.mark.parametrize("shape", [(0, 5), (5, 0), (0, 0)])
     def test_zero_sized_matches_numpy(self, shape):
         a = np.zeros(shape)
-        got = fme.transpose(a)
+        got = pg.transpose(a)
         assert got.shape == a.T.shape
         np.testing.assert_array_equal(got, a.T)
 
@@ -62,14 +62,14 @@ class TestTranspose:
         # fresh buffer, so mutating it must not reach back into the input
         a = np.arange(12.0).reshape(3, 4)
         a_before = a.copy()
-        t = fme.transpose(a)
+        t = pg.transpose(a)
         assert t.ctypes.data != a.ctypes.data
         t[0, 0] = 999.0
         np.testing.assert_array_equal(a, a_before)
 
     def test_integer_promotes(self):
         a = np.arange(6, dtype=np.int64).reshape(2, 3)
-        got = fme.transpose(a)
+        got = pg.transpose(a)
         assert got.dtype == np.float64
         np.testing.assert_array_equal(got, a.T.astype(np.float64))
 
@@ -82,7 +82,7 @@ class TestReductions:
     def test_oracle_square(self, n, axis, dtype, kind):
         rng = np.random.default_rng(n + (axis or 0))
         a = rng.standard_normal((n, n)).astype(dtype)
-        op = fme.sum if kind == "sum" else fme.mean
+        op = pg.sum if kind == "sum" else pg.mean
         ref_op = np.sum if kind == "sum" else np.mean
         got = op(a, axis=axis)
         ref = ref_op(a, axis=axis)
@@ -97,7 +97,7 @@ class TestReductions:
     def test_oracle_rectangular(self, m, n, axis, dtype, kind):
         rng = np.random.default_rng(m * 31 + n)
         a = rng.standard_normal((m, n)).astype(dtype)
-        op = fme.sum if kind == "sum" else fme.mean
+        op = pg.sum if kind == "sum" else pg.mean
         ref_op = np.sum if kind == "sum" else np.mean
         got = op(a, axis=axis)
         ref = ref_op(a, axis=axis)
@@ -110,7 +110,7 @@ class TestReductions:
         # we are a float library, so the result is float64 and the value matches
         # the float64 reduction of the same data
         a = np.arange(24, dtype=np.int64).reshape(4, 6)
-        op = fme.sum if kind == "sum" else fme.mean
+        op = pg.sum if kind == "sum" else pg.mean
         ref_op = np.sum if kind == "sum" else np.mean
         got = op(a, axis=axis)
         ref = ref_op(a.astype(np.float64), axis=axis)
@@ -127,7 +127,7 @@ class TestReductions:
         a = np.array(
             [[1.0, np.nan, 3.0], [np.inf, 5.0, -np.inf], [7.0, 8.0, 9.0]], dtype=dtype
         )
-        got = fme.sum(a, axis=axis)
+        got = pg.sum(a, axis=axis)
         ref = np.sum(a, axis=axis)
         assert_reduce_close(np.asarray(got), np.asarray(ref), a, axis, kind="sum")
 
@@ -136,15 +136,15 @@ class TestReductions:
         # start at +0.0 to match it
         for dtype in DTYPES:
             a = np.full((4, 4), -0.0, dtype=dtype)
-            s = fme.sum(a)
+            s = pg.sum(a)
             assert float(s) == 0.0
             assert not np.signbit(s)
 
     @pytest.mark.parametrize("dtype", DTYPES)
     def test_axis_none_returns_scalar_of_result_dtype(self, dtype):
         a = np.ones((3, 5), dtype=dtype)
-        s = fme.sum(a)
-        m = fme.mean(a)
+        s = pg.sum(a)
+        m = pg.mean(a)
         assert s.dtype == np.dtype(dtype) and s.shape == ()
         assert m.dtype == np.dtype(dtype) and m.shape == ()
 
@@ -152,28 +152,28 @@ class TestReductions:
     def test_axis_reduces_to_correct_length(self, dtype):
         a = np.ones((4, 6), dtype=dtype)
         # axis 0 reduces over rows -> length n; axis 1 over columns -> length m
-        assert fme.sum(a, axis=0).shape == (6,)
-        assert fme.sum(a, axis=1).shape == (4,)
+        assert pg.sum(a, axis=0).shape == (6,)
+        assert pg.sum(a, axis=1).shape == (4,)
 
 
 class TestEmptyAndErrors:
     def test_sum_of_empty_axis_none_is_exactly_zero(self):
         for dtype in DTYPES:
-            s = fme.sum(np.zeros((0, 5), dtype=dtype))
+            s = pg.sum(np.zeros((0, 5), dtype=dtype))
             assert float(s) == 0.0
             assert s.dtype == np.dtype(dtype)
 
     def test_sum_of_empty_axis_shapes_match_numpy(self):
         a = np.zeros((0, 5))
-        np.testing.assert_array_equal(fme.sum(a, axis=0), np.sum(a, axis=0))
-        np.testing.assert_array_equal(fme.sum(a, axis=1), np.sum(a, axis=1))
+        np.testing.assert_array_equal(pg.sum(a, axis=0), np.sum(a, axis=0))
+        np.testing.assert_array_equal(pg.sum(a, axis=1), np.sum(a, axis=1))
 
     def test_mean_empty_axis_none_warns_twice(self):
         # Probe 6: nan scalar + "Mean of empty slice" then an invalid-divide
         # warning, matching NumPy exactly
         a = np.zeros((0, 5))
         with pytest.warns(RuntimeWarning) as record:
-            r = fme.mean(a)
+            r = pg.mean(a)
         assert np.isnan(r)
         messages = [str(w.message) for w in record]
         assert any("Mean of empty slice" in m for m in messages)
@@ -183,7 +183,7 @@ class TestEmptyAndErrors:
     def test_mean_empty_axis_zero_warns_twice(self):
         a = np.zeros((0, 5))
         with pytest.warns(RuntimeWarning) as record:
-            r = fme.mean(a, axis=0)
+            r = pg.mean(a, axis=0)
         assert r.shape == (5,) and np.all(np.isnan(r))
         messages = [str(w.message) for w in record]
         assert any("Mean of empty slice" in m for m in messages)
@@ -197,10 +197,10 @@ class TestEmptyAndErrors:
         a = np.zeros((0, 5))
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            r = fme.mean(a, axis=1)
+            r = pg.mean(a, axis=1)
         assert r.shape == (0,)
 
-    @pytest.mark.parametrize("op", [fme.sum, fme.mean, fme.transpose])
+    @pytest.mark.parametrize("op", [pg.sum, pg.mean, pg.transpose])
     @pytest.mark.parametrize(
         "name", ["bool", "float16", "complex64", "complex128", "object"]
     )
@@ -209,7 +209,7 @@ class TestEmptyAndErrors:
         with pytest.raises(TypeError, match=f"unsupported dtype {name}"):
             op(a)
 
-    @pytest.mark.parametrize("op", [fme.sum, fme.mean])
+    @pytest.mark.parametrize("op", [pg.sum, pg.mean])
     def test_axis_out_of_range_is_value_error(self, op):
         a = np.zeros((2, 2))
         with pytest.raises(ValueError, match="axis 2 is out of bounds"):
@@ -217,7 +217,7 @@ class TestEmptyAndErrors:
         with pytest.raises(ValueError, match="out of bounds"):
             op(a, axis=-1)
 
-    @pytest.mark.parametrize("op", [fme.sum, fme.mean])
+    @pytest.mark.parametrize("op", [pg.sum, pg.mean])
     def test_non_int_axis_is_type_error(self, op):
         a = np.zeros((2, 2))
         with pytest.raises(TypeError, match="axis must be None, 0, or 1"):
@@ -225,13 +225,13 @@ class TestEmptyAndErrors:
         with pytest.raises(TypeError, match="axis must be None, 0, or 1"):
             op(a, axis="0")
 
-    @pytest.mark.parametrize("op", [fme.sum, fme.mean])
+    @pytest.mark.parametrize("op", [pg.sum, pg.mean])
     def test_axis_is_keyword_only(self, op):
         a = np.zeros((2, 2))
         with pytest.raises(TypeError):
             op(a, 0)
 
-    @pytest.mark.parametrize("op", [fme.sum, fme.mean, fme.transpose])
+    @pytest.mark.parametrize("op", [pg.sum, pg.mean, pg.transpose])
     def test_one_dimensional_input_rejected(self, op):
         with pytest.raises(ValueError, match="2-dimensional"):
             op(np.zeros(3))
@@ -264,14 +264,14 @@ def _drawn_array(draw, dtype, elements):
 
 @given(a=_drawn_array(np.float64, _F64_ELEMENTS), axis=_AXIS)
 def test_sum_property_float64(a, axis):
-    got = fme.sum(a, axis=axis)
+    got = pg.sum(a, axis=axis)
     ref = np.sum(a, axis=axis)
     assert_reduce_close(np.asarray(got), np.asarray(ref), a, axis, kind="sum")
 
 
 @given(a=_drawn_array(np.float32, _F32_ELEMENTS), axis=_AXIS)
 def test_sum_property_float32(a, axis):
-    got = fme.sum(a, axis=axis)
+    got = pg.sum(a, axis=axis)
     ref = np.sum(a, axis=axis)
     assert_reduce_close(np.asarray(got), np.asarray(ref), a, axis, kind="sum")
 
@@ -289,7 +289,7 @@ def test_sum_shapes(m, n, seed, dtype):
     rng = np.random.default_rng(seed)
     a = rng.standard_normal((m, n)).astype(dtype)
     for axis in (None, 0, 1):
-        got = fme.sum(a, axis=axis)
+        got = pg.sum(a, axis=axis)
         ref = np.sum(a, axis=axis)
         assert_reduce_close(np.asarray(got), np.asarray(ref), a, axis, kind="sum")
 
