@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 template <typename T>
 void gemm_naive(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
@@ -40,4 +40,4 @@ void gemm_naive(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 template void gemm_naive<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 template void gemm_naive<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
