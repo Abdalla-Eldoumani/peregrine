@@ -15,10 +15,12 @@ below the 4x ideal), and CPU-06 (the small-matrix path losing to NumPy).
 
 The four result shapes the renderer branches on (the schema differs per file):
 - matmul / gpu matrix: top-level ``cases`` (CPU pairs, each with nested
-  ``fastmathext`` / ``numpy`` timing dicts) plus ``gpu_cases`` (device-resident,
-  each carrying ``ratio_vs_numpy_cpu_f32``) and optional ``with_transfer_cases``.
-  An analysis block (``cpu02_analysis``) carries the high-effort floor ratios
-  that live outside ``cases``.
+  ``fastmathext`` / ``numpy`` timing dicts, plus per-row ``speedup_floor`` and
+  ``speedup_vs_numpy`` derived from that per-rep timing) plus ``gpu_cases``
+  (device-resident, each carrying ``ratio_vs_numpy_cpu_f32``) and optional
+  ``with_transfer_cases``. The CPU-02 n=2048 parity headline is recomputed from
+  the per-rep ``cases`` of the fresh matmul f64 sweep, not from any hand-entered
+  summary scalar.
 - fused: top-level ``cpu_cases`` / ``gpu_cases`` with precomputed
   ``speedup_floor`` (CPU) and ``ratio_vs_numpy_cpu_f32`` (GPU).
 - scaling: top-level ``series`` plus a precomputed ``ratio_6_vs_1_floor``.
@@ -53,10 +55,10 @@ def _case_is_verified(case: dict) -> bool:
     #   2. The requirement-analysis shape (cpu02_f64_zpicy / cpu06_f32_zpicy)
     #      records each case as a paired ``fastmathext`` + ``numpy`` timing dict
     #      with NO per-case ``verified`` flag; the per-rep verification ran
-    #      against assert_matmul_close (the bench writes no unverified series:
-    #      benchmarks/CLAUDE.md "No result with verified false reaches a results
-    #      file"), and the analysis-block verdict documents it. A paired CPU case
-    #      is therefore verified by construction.
+    #      against assert_matmul_close (the bench writes no unverified series: no
+    #      result with verified false ever reaches a results file), and the
+    #      analysis-block verdict documents it. A paired CPU case is therefore
+    #      verified by construction.
     # An EXPLICIT verified=False is always a reject (rule 11), regardless of
     # shape: a series the bench marked unverified must never be rendered.
     if case.get("verified") is False:
@@ -102,12 +104,14 @@ def load_series(path: str) -> dict:
     ------
     AssertionError
         If the file carries no manifest, or any case in cases / cpu_cases /
-        gpu_cases / with_transfer_cases is not verified.
+        gpu_cases / with_transfer_cases / series is not verified. The scaling
+        file stores its rows under ``series``, so that key is gated too: a
+        verified-false scaling row must not feed the README scaling line.
     """
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
     assert "manifest" in data, f"rule 9: no manifest, no merge ({path})"
-    for key in ("cases", "cpu_cases", "gpu_cases", "with_transfer_cases"):
+    for key in ("cases", "cpu_cases", "gpu_cases", "with_transfer_cases", "series"):
         for case in data.get(key, []):
             assert _case_is_verified(
                 case
@@ -126,15 +130,20 @@ def _fmt(value: float, places: int = 2) -> str:
     return f"{value:.{places}f}"
 
 
-def render_matmul_f64_table(data: dict) -> str:
+def render_matmul_f64_table(data: dict, sweep: dict) -> str:
     """The f64 matmul floor table (CPU-02). A LOSS regime (rule 16).
 
     The per-size floor ratio is ``numpy.min_s / fastmathext.min_s`` from each
     ``cases`` entry (the floor, not the median: AV noise inflates the median).
-    The headline n=2048 row also cites the high-effort best-floor ratio the
-    analysis block records (``cpu02_analysis.high_effort_best_floor.n2048.ratio``),
-    the cleanest measured point, which still misses the target, so the framing is
-    parity-not-win.
+
+    The headline n=2048 parity figure comes from ``sweep`` -- the fresh 07-02
+    matmul f64 sweep (zpicy_matmul_f64.json), which carries full per-rep timing
+    behind every row (``fastmathext.min_s`` / ``numpy.min_s`` over 30 reps,
+    ``verified: true``). Both the floor ratio (``speedup_floor``, the noise-robust
+    headline) and the median ratio (``speedup_vs_numpy``) are recomputed from that
+    per-rep data, so the quoted number regenerates from saved measurement, not
+    from a hand-entered summary scalar. The honest story is unchanged: at f64
+    mid-size FastMathExt does not beat OpenBLAS.
     """
     cases = data["cases"]
     lines = [
@@ -154,12 +163,14 @@ def render_matmul_f64_table(data: dict) -> str:
             f"| {n} | {_fmt(fme_gflops, 1)} | {_fmt(np_gflops, 1)} "
             f"| {_fmt(ratio)} |"
         )
-    best = data["cpu02_analysis"]["high_effort_best_floor"]["n2048"]["ratio"]
+    n2048 = _case_by_n(sweep["cases"], 2048)
+    floor_ratio = n2048["speedup_floor"]
+    median_ratio = n2048["speedup_vs_numpy"]
     lines.append("")
     lines.append(
-        "At n=2048 the cleanest measured run reaches "
-        f"{_fmt(best)} of OpenBLAS (high-effort best floor). float64 mid-size "
-        "parity is the target; FastMathExt does not beat OpenBLAS here."
+        f"At n=2048 the fresh per-rep sweep measures {_fmt(floor_ratio)} of "
+        f"OpenBLAS on the floor and {_fmt(median_ratio)} on the median. float64 "
+        "mid-size parity is the target; FastMathExt does not beat OpenBLAS here."
     )
     return "\n".join(lines)
 
@@ -345,6 +356,7 @@ def render_report() -> str:
     number is emitted.
     """
     cpu02 = load_series(_results_path("cpu02_f64_zpicy.json"))
+    matmul_f64 = load_series(_results_path("zpicy_matmul_f64.json"))
     cpu06 = load_series(_results_path("cpu06_f32_zpicy.json"))
     scaling = load_series(_results_path("tuning", "scaling_zpicy.json"))
     gpu_matrix = load_series(_results_path("zpicy_gpu_matrix.json"))
@@ -354,7 +366,7 @@ def render_report() -> str:
 
     sections = [
         "## float64 matmul (CPU)",
-        render_matmul_f64_table(cpu02),
+        render_matmul_f64_table(cpu02, matmul_f64),
         "## Small-matrix float32 (CPU)",
         render_small_matrix_table(cpu06),
         "## Thread scaling (CPU)",
