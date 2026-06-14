@@ -130,10 +130,10 @@
       "speedup_vs_numpy": 0.12327586206896551
     }
   ],
-  "cpu06_analysis": {
-    "requirement": "CPU-06: fme small path >= 2x NumPy end-to-end at n in {8,16,32,64}, both dtypes",
+  "small_path_analysis": {
+    "goal": "fme small path >= 2x NumPy end-to-end at n in {8,16,32,64}, both dtypes",
     "verdict": "NOT met (measured well below 2x at every size; the shortfall is structural, not primarily AV noise \u2014 fme CVs are mostly 3-30%)",
-    "metric": "speedup_vs_numpy = numpy_median_s / fme_median_s, end-to-end Python time (the small-path metric per the gemm-optimization skill, not kernel GFLOP/s)",
+    "metric": "speedup_vs_numpy = numpy_median_s / fme_median_s, end-to-end Python time (the small-path metric, not kernel GFLOP/s)",
     "floor_and_median": {
       "n8": {
         "median_speedup": 0.543,
@@ -165,11 +165,11 @@
       }
     },
     "root_cause": [
-      "The wrapper fast path works: measured wrapper overhead at n=8 dropped to ~1.1us (from the ~1.8us slow-path helper cost RESEARCH measured), confirming _prepare/result_type/_normalize are skipped on the qualified path.",
+      "The wrapper fast path works: measured wrapper overhead at n=8 dropped to ~1.1us (from the ~1.8us slow-path helper cost), confirming _prepare/result_type/_normalize are skipped on the qualified path.",
       "NumPy is faster than this small path because np.matmul dispatches to OpenBLAS optimized small-GEMM; the in-tree gemm_small is a scalar triple loop (~2 GF/s) and the packed path carries pack/setup overhead that dominates at tiny n.",
-      "At n=8 the 2x target is physically unreachable: measured NumPy n=8 is ~1.8us (faster than the 3.5us RESEARCH anchor, so the budget tightened to ~0.90us), but the irreducible Python+nanobind round-trip is ~1.1us even with a zero-time kernel. No kernel change can fit a full call into 0.90us.",
-      "Lowering SMALL_MAX_DIM was measured (threshold=4 experiment): the packed path beats gemm_small only at n=64 (0.32x vs 0.13x) and is worse at n<=32 (pack overhead); neither reaches 2x. CONTEXT locks the small path at max(m,k,n)<=96, so the validated default 96 is kept."
+      "At n=8 the 2x target is physically unreachable: measured NumPy n=8 is ~1.8us, so the budget tightened to ~0.90us, but the irreducible Python+nanobind round-trip is ~1.1us even with a zero-time kernel. No kernel change can fit a full call into 0.90us.",
+      "Lowering SMALL_MAX_DIM was measured (threshold=4 experiment): the packed path beats gemm_small only at n=64 (0.32x vs 0.13x) and is worse at n<=32 (pack overhead); neither reaches 2x. The small path is locked at max(m,k,n)<=96, so the validated default 96 is kept."
     ],
-    "note": "This is the CPU-06 risk RESEARCH flagged (n=8 helpers ~1.8us vs a sub-2us budget; n=64 needs ~35 GF/s single-thread). Surfaced honestly per the checkpoint protocol; the requirement is a conversation, not a silent acceptance."
+    "note": "The small-path target is not reachable at the smallest sizes (n=8 helpers ~1.8us vs a sub-2us budget; n=64 needs ~35 GF/s single-thread). Surfaced honestly; the target is a conversation, not a silent acceptance."
   }
 }
