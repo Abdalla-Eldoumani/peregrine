@@ -130,10 +130,10 @@
       "speedup_vs_numpy": 0.6180398472406384
     }
   ],
-  "cpu02_analysis": {
-    "requirement": "CPU-02: fme f64 >= 85% of OpenBLAS at n in {256,512,1024,2048}",
+  "f64_parity_analysis": {
+    "goal": "fme f64 >= 85% of OpenBLAS at n in {256,512,1024,2048}",
     "verdict": "NOT met (measured below target at every size; AV-noise confound documented)",
-    "metric_note": "A persistent background antivirus (the user security tool, ~uncloseable) preempts the OpenMP barrier and inflates fme CV to 9-136% (worst at small n), far past the 5% protocol gate, while OpenBLAS pthreads stay at CV 1.7-14.6%. The floor (min_s) is the noise-robust comparison per the 03-04 finding; both median and floor ratios are recorded.",
+    "metric_note": "A persistent background antivirus (~uncloseable) preempts the OpenMP barrier and inflates fme CV to 9-136% (worst at small n), far past the 5% protocol gate, while OpenBLAS pthreads stay at CV 1.7-14.6%. The floor (min_s) is the noise-robust comparison; both median and floor ratios are recorded.",
     "floor_ratios_main_run": {
       "n256": {
         "fme_floor_gflops": 29.0,
@@ -176,6 +176,6 @@
         "ratio": 0.79
       }
     },
-    "interpretation": "Two components: (1) a real kernel/bandwidth ceiling (fme tops ~84-88 GF/s vs OpenBLAS ~110, consistent with the 03-04 scaling plateau at 4 threads), and (2) AV barrier-preemption noise that hits the 6-thread fme path far harder than OpenBLAS at small n. The ratio rises monotonically with n as CV falls (0.30 at n=256 CV136% -> 0.79 at n=2048 CV8.8%), so noise is a large part of the small-n gap, but the cleanest point still misses 0.85. Re-measure on a quiet machine before a final CPU-02 claim."
+    "interpretation": "Two components: (1) a real kernel/bandwidth ceiling (fme tops ~84-88 GF/s vs OpenBLAS ~110, consistent with the thread-scaling plateau at 4 threads), and (2) AV barrier-preemption noise that hits the 6-thread fme path far harder than OpenBLAS at small n. The ratio rises monotonically with n as CV falls (0.30 at n=256 CV136% -> 0.79 at n=2048 CV8.8%), so noise is a large part of the small-n gap, but the cleanest point still misses 0.85. Re-measure on a quiet machine before a final parity claim."
   }
 }
