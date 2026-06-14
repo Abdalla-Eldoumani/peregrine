@@ -8,7 +8,7 @@
 
 #include <atomic>
 
-namespace fme::cuda {
+namespace pg::cuda {
 
 // True once the atexit teardown() has begun destroying the context streams and
 // handles (defined in context.cu). free_device (transfer.cu) reads it so an
@@ -41,7 +41,7 @@ struct Context {
     cudaMemPool_t pool;       // the device default mempool, release threshold raised for reuse
     cublasHandle_t cublas;    // one v2 handle, bound to the compute stream
     cublasLtHandle_t cublaslt; // held for future use (batched/epilogue work); GEMM uses cublasSgemm/Dgemm
-    bool tf32_enabled;        // FME_ALLOW_TF32 folded ONCE here so every GEMM sees one math-mode answer
+    bool tf32_enabled;        // PEREGRINE_ALLOW_TF32 folded ONCE here so every GEMM sees one math-mode answer
 };
 
 // The memoized accessor: builds the Context on first call and returns the same
@@ -69,4 +69,4 @@ cuda_device_info device_probe();
 // build the context, so calling it on a driverless machine cannot throw.
 cuda_device_info context_device_info();
 
-} // namespace fme::cuda
+} // namespace pg::cuda
