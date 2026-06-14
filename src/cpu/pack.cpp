@@ -1,9 +1,5 @@
 #include "cpu/pack.hpp"
 
-#include <cstring>
-
-#include <immintrin.h>
-
 namespace fme::cpu {
 
 // MR and NR are the register-tile shape the microkernel computes (6 rows x 8
