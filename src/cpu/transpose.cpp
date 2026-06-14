@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 template <typename T>
 void transpose(const T* a, T* out, int64_t m, int64_t n) {
@@ -35,4 +35,4 @@ void transpose(const T* a, T* out, int64_t m, int64_t n) {
 template void transpose<float>(const float*, float*, int64_t, int64_t);
 template void transpose<double>(const double*, double*, int64_t, int64_t);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
