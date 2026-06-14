@@ -2,7 +2,7 @@
 
 #include <immintrin.h>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // The f64 register tile: MR=6 rows by NR=8 columns, held in 12 ymm accumulators
 // (each row is two __m256d of 4 doubles). Per k-step the kernel loads the 8 B
@@ -99,4 +99,4 @@ void microkernel_f64_6x8(const double* ap, const double* bp, double* c, int64_t 
     }
 }
 
-} // namespace fme::cpu
+} // namespace pg::cpu
