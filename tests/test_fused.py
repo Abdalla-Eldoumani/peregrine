@@ -31,7 +31,7 @@ import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-import fastmathext as fme
+import peregrine as pg
 from conftest import assert_fused_close, requires_cuda
 
 # The legacy-killer sizes never leave the grid: the archived kernel corrupted
@@ -56,7 +56,7 @@ _CUDA_OK, _CUDA_REASON = requires_cuda()
 gpu = pytest.mark.skipif(not _CUDA_OK, reason=_CUDA_REASON)
 
 
-# The three ops as (name, fme callable, unfused-NumPy oracle) triples. The oracle
+# The three ops as (name, pg callable, unfused-NumPy oracle) triples. The oracle
 # is the UNFUSED expression in the operands' own dtype: axpby a*x+b*y, fma3 x*y+z
 # (assert_fused_close allows the fused single rounding to be at least as accurate
 # as the unfused two-rounding NumPy expression), scaled_relu maximum(scale*x, 0).
@@ -84,15 +84,15 @@ def _scaled_relu_oracle(x, y, z):
 
 
 def _axpby_call(x, y, z):
-    return fme.axpby(x, y, a=2.0, b=3.0)
+    return pg.axpby(x, y, a=2.0, b=3.0)
 
 
 def _fma3_call(x, y, z):
-    return fme.fma3(x, y, z)
+    return pg.fma3(x, y, z)
 
 
 def _scaled_relu_call(x, y, z):
-    return fme.scaled_relu(x, scale=3.0)
+    return pg.scaled_relu(x, scale=3.0)
 
 
 # (id, call, oracle, n_operands): n_operands says how many arrays to build for
@@ -219,7 +219,7 @@ def test_cpu_axpby_bitwise_equals_unfused(dtype):
     rng = np.random.default_rng(11)
     x = (np.abs(rng.standard_normal((1, n))) + 0.5).astype(dtype)
     y = (np.abs(rng.standard_normal((1, n))) + 0.5).astype(dtype)
-    got = np.asarray(fme.axpby(x, y, a=2.0, b=3.0))
+    got = np.asarray(pg.axpby(x, y, a=2.0, b=3.0))
     ref = dtype(2.0) * x + dtype(3.0) * y
     if (got == ref).all():
         # Non-contracting build (MSVC /fp:precise): the two roundings survive, so
@@ -282,7 +282,7 @@ def test_relu_nan_propagates_at_every_lane(dtype, scale):
     for pos in range(n):
         x = base.copy()
         x[0, pos] = np.nan
-        got = np.asarray(fme.scaled_relu(x, scale=scale))
+        got = np.asarray(pg.scaled_relu(x, scale=scale))
         ref = np.maximum(dtype(scale) * x, dtype(0.0))
         assert_fused_close(got, ref)
 
@@ -293,7 +293,7 @@ def test_relu_negative_nan_propagates(dtype):
     # The sign bit of a NaN is not meaningful to np.maximum, but it must stay NaN.
     n = 11
     x = np.full((1, n), -np.nan, dtype=dtype)
-    got = np.asarray(fme.scaled_relu(x, scale=2.0))
+    got = np.asarray(pg.scaled_relu(x, scale=2.0))
     ref = np.maximum(dtype(2.0) * x, dtype(0.0))
     assert np.isnan(got).all()
     assert_fused_close(got, ref)
@@ -308,7 +308,7 @@ def test_relu_signed_inf_positions(dtype):
     x[0, 0] = np.inf
     x[0, n - 1] = -np.inf  # tail lane
     x[0, n // 2] = np.nan
-    got = np.asarray(fme.scaled_relu(x, scale=1.0))
+    got = np.asarray(pg.scaled_relu(x, scale=1.0))
     ref = np.maximum(dtype(1.0) * x, dtype(0.0))
     assert_fused_close(got, ref)
 
@@ -325,7 +325,7 @@ def test_fma3_inf_times_zero_is_nan(dtype):
     for pos in (0, n // 2, n - 1):
         x[0, pos] = np.inf
         y[0, pos] = 0.0
-    got = np.asarray(fme.fma3(x, y, z))
+    got = np.asarray(pg.fma3(x, y, z))
     # inf*0 in the unfused NumPy reference legitimately warns "invalid value
     # encountered in multiply" -- that IS the inf*0=NaN this test asserts the
     # kernel reproduces, so silence the expected warning at the oracle build.
@@ -347,7 +347,7 @@ def test_axpby_inf_operand_positions(dtype):
     x[0, 0] = np.inf
     x[0, n - 1] = -np.inf  # tail
     y[0, n // 2] = np.inf
-    got = np.asarray(fme.axpby(x, y, a=2.0, b=-3.0))
+    got = np.asarray(pg.axpby(x, y, a=2.0, b=-3.0))
     ref = dtype(2.0) * x + dtype(-3.0) * y
     assert_fused_close(got, ref)
 
@@ -378,9 +378,9 @@ def test_error_rejected_dtype_on_later_operand():
     a = np.zeros((2, 2), np.float64)
     bad = np.zeros((2, 2), np.float16)
     with pytest.raises(TypeError, match="unsupported dtype float16"):
-        fme.axpby(a, bad)
+        pg.axpby(a, bad)
     with pytest.raises(TypeError, match="unsupported dtype float16"):
-        fme.fma3(a, a, bad)
+        pg.fma3(a, a, bad)
 
 
 def test_error_post_promotion_unsupported_dtype():
@@ -390,16 +390,16 @@ def test_error_post_promotion_unsupported_dtype():
     # matmul error suite does.
     a = np.zeros((2, 2), dtype="datetime64[s]")
     with pytest.raises(TypeError, match="unsupported dtype datetime64"):
-        fme.scaled_relu(a)
+        pg.scaled_relu(a)
 
 
 def test_error_same_shape_mismatch_is_value_error():
     # The fused-specific validation, no matmul analog: v1 is same-shape, NO
     # broadcast, so a shape mismatch is a ValueError naming both shapes.
     with pytest.raises(ValueError, match="same shape"):
-        fme.axpby(np.ones((2, 2)), np.ones((2, 3)))
+        pg.axpby(np.ones((2, 2)), np.ones((2, 3)))
     with pytest.raises(ValueError, match="same shape"):
-        fme.fma3(np.ones((2, 2)), np.ones((2, 2)), np.ones((3, 2)))
+        pg.fma3(np.ones((2, 2)), np.ones((2, 2)), np.ones((3, 2)))
 
 
 @pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS, ids=OP_IDS)
@@ -436,13 +436,13 @@ import sys
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 
 rng = np.random.default_rng(42)
 x = rng.standard_normal((333, 257))
 y = rng.standard_normal((333, 257))
 z = rng.standard_normal((333, 257))
-np.save(sys.argv[1], fme.fma3(x, y, z))
+np.save(sys.argv[1], pg.fma3(x, y, z))
 """
 
 
@@ -533,7 +533,7 @@ def _drawn_fused(draw):
 @pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS, ids=OP_IDS)
 @given(operands=_drawn_fused())
 def test_property_matches_unfused_numpy(op_id, call, oracle, n_operands, operands):
-    # The space-sampling twin of the oracle unit tests. Compare the fme op to the
+    # The space-sampling twin of the oracle unit tests. Compare the pg op to the
     # unfused NumPy expression via assert_fused_close across drawn shapes and
     # elementwise-drawn values (denormals, signed zeros, boundary magnitudes).
     x, y, z = operands
@@ -573,43 +573,43 @@ test_property_matches_unfused_numpy = example(
 
 # ---------------------------------------------------------------------------
 # FUSE-03: the device path matches the same oracle. The device-resident kernels
-# (grid-stride/float4) compute on fme.Array operands; the result, brought back
+# (grid-stride/float4) compute on pg.Array operands; the result, brought back
 # with from_device, must match the SAME assert_fused_close oracle as the CPU
 # path. The marker resolves to a clean skip on CPU-only and WSL. -k "gpu"
 # ---------------------------------------------------------------------------
 
 
 # Device callables mirroring the host OPS table: to_device the operands the op
-# consumes, run the fused op (returns an fme.Array), from_device the result. The
+# consumes, run the fused op (returns a pg.Array), from_device the result. The
 # oracle is the SAME unfused-NumPy expression as the host path (the _*_oracle
 # functions above), so the GPU is held to the identical assert_fused_close bound.
 #
-# Every fme.Array (the operands and the device result) is bound to a local and
+# Every pg.Array (the operands and the device result) is bound to a local and
 # explicitly del'd once the result is on the host, so the device handles are
 # released deterministically rather than relying on expression-temporary GC. The
 # returned value is a host ndarray (no device handle), so nothing device-resident
 # survives the call -- without this, one Array could straggle to interpreter
 # shutdown (nanobind's leaked-instance warning).
 def _axpby_call_gpu(x, y, z):
-    dx, dy = fme.to_device(x), fme.to_device(y)
-    out = fme.axpby(dx, dy, a=2.0, b=3.0)
-    host = fme.from_device(out)
+    dx, dy = pg.to_device(x), pg.to_device(y)
+    out = pg.axpby(dx, dy, a=2.0, b=3.0)
+    host = pg.from_device(out)
     del dx, dy, out
     return host
 
 
 def _fma3_call_gpu(x, y, z):
-    dx, dy, dz = fme.to_device(x), fme.to_device(y), fme.to_device(z)
-    out = fme.fma3(dx, dy, dz)
-    host = fme.from_device(out)
+    dx, dy, dz = pg.to_device(x), pg.to_device(y), pg.to_device(z)
+    out = pg.fma3(dx, dy, dz)
+    host = pg.from_device(out)
     del dx, dy, dz, out
     return host
 
 
 def _scaled_relu_call_gpu(x, y, z):
-    dx = fme.to_device(x)
-    out = fme.scaled_relu(dx, scale=3.0)
-    host = fme.from_device(out)
+    dx = pg.to_device(x)
+    out = pg.scaled_relu(dx, scale=3.0)
+    host = pg.from_device(out)
     del dx, out
     return host
 
@@ -642,7 +642,7 @@ def test_gpu_matches_oracle_square(op_id, call, oracle, n_operands, dtype, size)
 @pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS_GPU, ids=OP_IDS)
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 def test_gpu_matches_oracle_zero_sized(op_id, call, oracle, n_operands, dtype):
-    # Size 0 in each dimension: the device op returns an empty fme.Array of the
+    # Size 0 in each dimension: the device op returns an empty pg.Array of the
     # right shape/dtype, the boundary the kernel's n==0 zero-dim guard handles
     # without a launch (and from_device round-trips an empty buffer).
     for shape in [(0, 0), (0, 5), (5, 0)]:
@@ -698,13 +698,13 @@ def test_gpu_mixed_residency_is_type_error():
     # residency contract, extended to the fused ops (every operand must be on the
     # same side).
     h = np.ones((4, 4), np.float32)
-    d = fme.to_device(h)
+    d = pg.to_device(h)
     with pytest.raises(TypeError, match="same device"):
-        fme.axpby(d, h)
+        pg.axpby(d, h)
     with pytest.raises(TypeError, match="same device"):
-        fme.fma3(d, h, h)
+        pg.fma3(d, h, h)
     with pytest.raises(TypeError, match="same device"):
-        fme.axpby(h, d)
+        pg.axpby(h, d)
     del d  # release the device handle deterministically
 
 
