@@ -29,7 +29,7 @@ import time
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 
 # The tolerance contract lives in one place, tests/conftest.py. Routing the
 # per-run verification through assert_matmul_close keeps the bench on the single
@@ -134,14 +134,14 @@ def _machine_manifest() -> dict:
         "processor": platform.processor(),
         "python": platform.python_version(),
         "numpy": np.__version__,
-        "fastmathext": fme.__version__,
-        "cpu_features": fme.cpu_features(),
+        "peregrine": pg.__version__,
+        "cpu_features": pg.cpu_features(),
         # The BUILD flag, not the runtime has_cuda(): the manifest records what
         # the binary was compiled with (whether the CUDA path exists at all), and
         # the gpu/driver fields below record the device that was actually present.
         # A run on a CUDA build with the GPU busy elsewhere should still read
         # cuda_build True.
-        "cuda_build": fme._has_cuda_build(),
+        "cuda_build": pg._has_cuda_build(),
         "gpu": gpu,
         "driver": driver,
         "blas": _blas_identity(),
@@ -227,7 +227,7 @@ def _bench(
 def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
     # The device-resident GPU f32 series (GPU-08). Gated on has_cuda() so a
     # CPU-only build or a machine without a usable device simply omits it and the
-    # CPU bench above still runs. Timing CONSUMES fme._core._cuda_time_matmul (the
+    # CPU bench above still runs. Timing CONSUMES pg._core._cuda_time_matmul (the
     # cudaEvent-timed warm GEMM created in 04-05): operands are device-resident,
     # the timed region is the GEMM only (no H2D/D2H), so this measures device work,
     # not a wall-clock around an async launch (which would report nonsense). The
@@ -236,7 +236,7 @@ def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
     # protocol warmups/reps result). verified=true is published only after the
     # single sanctioned toleranced path (assert_matmul_close) passes -- a bench
     # that loosens tolerance or times a transfer is a bench that lies.
-    if not fme.has_cuda():
+    if not pg.has_cuda():
         return []
     series = []
     for n in sizes:
@@ -244,14 +244,14 @@ def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
         a = rng.standard_normal((n, n)).astype(np.float32)
         b = rng.standard_normal((n, n)).astype(np.float32)
 
-        xa = fme.to_device(a)
-        xb = fme.to_device(b)
+        xa = pg.to_device(a)
+        xb = pg.to_device(b)
 
         # Verify ONCE before any timing, on the single sanctioned toleranced path:
         # from_device the device result and compare to the NumPy reference. f32 is
         # judged against the f64 ground truth assert_matmul_close recomputes,
         # exactly like the CPU suite -- no inline rtol.
-        got = fme.from_device(fme.matmul(xa, xb))
+        got = pg.from_device(pg.matmul(xa, xb))
         assert_matmul_close(got, a @ b, a, b)
 
         gflop = 2 * n**3 / 1e9
@@ -259,8 +259,8 @@ def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
         # launch after idle). Warm: the protocol warmups/reps event-timed mean.
         # Both numbers come from cudaEvent pairs inside _cuda_time_matmul, never
         # wall-clock; the timed region is transfer-free.
-        cold_ms = fme._core._cuda_time_matmul(xa, xb, 1, 0)
-        warm_ms = fme._core._cuda_time_matmul(xa, xb, reps, warmup)
+        cold_ms = pg._core._cuda_time_matmul(xa, xb, 1, 0)
+        warm_ms = pg._core._cuda_time_matmul(xa, xb, reps, warmup)
         warm_gflops = gflop / (warm_ms / 1e3)
         # NumPy CPU f32 at the same n, on the wall-clock path (a CPU GEMM is
         # synchronous, so perf_counter is the honest timer here). This is the
@@ -304,20 +304,20 @@ def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
         b = rng.standard_normal((n, n)).astype(dt)
 
         ref = a @ b
-        got = fme.matmul(a, b)
+        got = pg.matmul(a, b)
         # Verify on the single sanctioned toleranced path before any time is
         # recorded (bench-protocol rule 11: fast and wrong is just wrong).
         assert_matmul_close(got, ref, a, b)
 
         gflop = 2 * n**3 / 1e9
-        ours = _bench(lambda: fme.matmul(a, b), reps, warmup)
+        ours = _bench(lambda: pg.matmul(a, b), reps, warmup)
         numpy_t = _bench(lambda: a @ b, reps, warmup)
         case = {
             "n": n,
             "gflop": gflop,
-            "fastmathext": ours,
+            "peregrine": ours,
             "numpy": numpy_t,
-            "fme_gflops": gflop / ours["median_s"],
+            "pg_gflops": gflop / ours["median_s"],
             "numpy_gflops": gflop / numpy_t["median_s"],
             "speedup_vs_numpy": numpy_t["median_s"] / ours["median_s"],
             # The floor (min) ratio is the headline statistic on this AV-noisy
@@ -333,7 +333,7 @@ def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
         }
         results["cases"].append(case)
         print(
-            f"n={n:5d}  fme {ours['median_s']*1e3:9.2f} ms ({case['fme_gflops']:7.1f} GF/s)"
+            f"n={n:5d}  pg {ours['median_s']*1e3:9.2f} ms ({case['pg_gflops']:7.1f} GF/s)"
             f"  numpy {numpy_t['median_s']*1e3:9.2f} ms ({case['numpy_gflops']:7.1f} GF/s)"
             f"  speedup {case['speedup_vs_numpy']:.2f}x"
             f"  cv {ours['cv']*100:4.1f}%/{numpy_t['cv']*100:4.1f}%"
