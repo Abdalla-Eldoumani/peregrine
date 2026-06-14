@@ -1,25 +1,25 @@
 import numpy as np
 import pytest
 
-import fastmathext as fme
+import peregrine as pg
 
 
 def test_inner_dim_mismatch_is_value_error():
     a = np.zeros((3, 4))
     b = np.zeros((5, 2))
     with pytest.raises(ValueError, match="inner dimensions"):
-        fme.matmul(a, b)
+        pg.matmul(a, b)
 
 
 def test_1d_input_rejected():
     with pytest.raises(ValueError, match="2-dimensional"):
-        fme.matmul(np.zeros(3), np.zeros((3, 2)))
+        pg.matmul(np.zeros(3), np.zeros((3, 2)))
 
 
 def test_module_reports_capabilities():
-    feats = fme.cpu_features()
+    feats = pg.cpu_features()
     assert set(feats) == {"avx2", "fma", "avx512f"}
-    assert isinstance(fme.has_cuda(), bool)
+    assert isinstance(pg.has_cuda(), bool)
 
 
 @pytest.mark.parametrize("name", ["bool", "float16", "complex64", "complex128", "object"])
@@ -28,7 +28,7 @@ def test_rejected_dtype_is_type_error(name):
     b = np.zeros((2, 2))
     # the match includes the dtype name: the message must name its dtype
     with pytest.raises(TypeError, match=f"unsupported dtype {name}"):
-        fme.matmul(a, b)
+        pg.matmul(a, b)
 
 
 def test_rejected_dtype_on_b_operand_is_type_error():
@@ -36,7 +36,7 @@ def test_rejected_dtype_on_b_operand_is_type_error():
     a = np.zeros((2, 2))
     b = np.zeros((2, 2), dtype=np.float16)
     with pytest.raises(TypeError, match="unsupported dtype float16"):
-        fme.matmul(a, b)
+        pg.matmul(a, b)
 
 
 def test_promoted_unsupported_dtype_is_type_error():
@@ -45,14 +45,14 @@ def test_promoted_unsupported_dtype_is_type_error():
     # every platform, standing in for longdouble/clongdouble on Linux
     a = np.zeros((2, 2), dtype="datetime64[s]")
     with pytest.raises(TypeError, match="unsupported dtype datetime64"):
-        fme.matmul(a, a)
+        pg.matmul(a, a)
 
 
 def test_out_keyword_raises_not_implemented():
     a = np.zeros((2, 2))
     b = np.zeros((2, 2))
     with pytest.raises(NotImplementedError, match="out= is not implemented"):
-        fme.matmul(a, b, out=np.zeros((2, 2)))
+        pg.matmul(a, b, out=np.zeros((2, 2)))
 
 
 def test_out_none_matches_omission():
@@ -60,7 +60,7 @@ def test_out_none_matches_omission():
     a = rng.standard_normal((4, 3))
     b = rng.standard_normal((3, 5))
     # same inputs, deterministic kernel: bitwise equality is the correct bar
-    np.testing.assert_array_equal(fme.matmul(a, b, out=None), fme.matmul(a, b))
+    np.testing.assert_array_equal(pg.matmul(a, b, out=None), pg.matmul(a, b))
 
 
 def test_out_positional_rejected():
@@ -69,4 +69,4 @@ def test_out_positional_rejected():
     a = np.zeros((2, 2))
     b = np.zeros((2, 2))
     with pytest.raises(TypeError):
-        fme.matmul(a, b, np.zeros((2, 2)))
+        pg.matmul(a, b, np.zeros((2, 2)))
