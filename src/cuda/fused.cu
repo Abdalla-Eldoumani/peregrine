@@ -7,12 +7,12 @@
 #include <cstdint>
 #include <type_traits>
 
-namespace fme::cuda {
+namespace pg::cuda {
 namespace {
 
 // RAII owners for the chain timer's device scratch and cudaEvents. time_fused_chain
 // wraps every allocation, record, sync, and elapsed-time query in a throwing
-// FME_CUDA_CHECK; without an owner a throw unwinds past the trailing
+// PG_CUDA_CHECK; without an owner a throw unwinds past the trailing
 // cudaFreeAsync/cudaEventDestroy and leaks the scratch into the context mempool
 // (release threshold UINT64_MAX -- never returned to the OS) and leaks the events.
 // The destructors run on the unwind path, so they discard the return code the way
@@ -268,7 +268,7 @@ void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b) {
         fused_binary_kernel<double, AxpbyOpD>
             <<<blocks, threads, 0, context().compute>>>(x, y, out, n, nvec, op);
     }
-    FME_CUDA_CHECK(cudaGetLastError());
+    PG_CUDA_CHECK(cudaGetLastError());
 }
 
 template <typename T>
@@ -288,7 +288,7 @@ void fused_fma3(const T* x, const T* y, const T* z, T* out, int64_t n) {
         fused_ternary_kernel<double, Fma3OpD>
             <<<blocks, threads, 0, context().compute>>>(x, y, z, out, n, nvec, op);
     }
-    FME_CUDA_CHECK(cudaGetLastError());
+    PG_CUDA_CHECK(cudaGetLastError());
 }
 
 template <typename T>
@@ -308,7 +308,7 @@ void fused_scaled_relu(const T* x, T* out, int64_t n, T scale) {
         fused_unary_kernel<double, ScaledReluOpD>
             <<<blocks, threads, 0, context().compute>>>(x, out, n, nvec, op);
     }
-    FME_CUDA_CHECK(cudaGetLastError());
+    PG_CUDA_CHECK(cudaGetLastError());
 }
 
 template void fused_axpby<float>(const float*, const float*, float*, int64_t, float, float);
@@ -329,10 +329,10 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
     // transfer-free on the compute stream. Fixed a/b/scale so the timed chain
     // matches what the bench measures; correctness is the @gpu oracle test's job.
     if (reps <= 0) {
-        throw ::fme::cuda_error("cuda time_fused_chain: reps must be positive");
+        throw ::pg::cuda_error("cuda time_fused_chain: reps must be positive");
     }
     if (n == 0) {
-        throw ::fme::cuda_error(
+        throw ::pg::cuda_error(
             "cuda time_fused_chain: empty input has no work to time");
     }
 
@@ -342,17 +342,17 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
 
     void* t_raw = nullptr;
     void* out_raw = nullptr;
-    FME_CUDA_CHECK(cudaMallocAsync(&t_raw, bytes, stream));
+    PG_CUDA_CHECK(cudaMallocAsync(&t_raw, bytes, stream));
     device_buf t_buf{t_raw, stream};
-    FME_CUDA_CHECK(cudaMallocAsync(&out_raw, bytes, stream));
+    PG_CUDA_CHECK(cudaMallocAsync(&out_raw, bytes, stream));
     device_buf out_buf{out_raw, stream};
     T* t = static_cast<T*>(t_buf.ptr);
     T* out = static_cast<T*>(out_buf.ptr);
 
     cuda_event e0;
     cuda_event e1;
-    FME_CUDA_CHECK(cudaEventCreate(&e0.ev));
-    FME_CUDA_CHECK(cudaEventCreate(&e1.ev));
+    PG_CUDA_CHECK(cudaEventCreate(&e0.ev));
+    PG_CUDA_CHECK(cudaEventCreate(&e1.ev));
 
     const T a = static_cast<T>(2);
     const T b = static_cast<T>(3);
@@ -375,16 +375,16 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
         chain();
     }
 
-    FME_CUDA_CHECK(cudaStreamSynchronize(stream));
-    FME_CUDA_CHECK(cudaEventRecord(e0.ev, stream));
+    PG_CUDA_CHECK(cudaStreamSynchronize(stream));
+    PG_CUDA_CHECK(cudaEventRecord(e0.ev, stream));
     for (int i = 0; i < reps; ++i) {
         chain();
     }
-    FME_CUDA_CHECK(cudaEventRecord(e1.ev, stream));
-    FME_CUDA_CHECK(cudaEventSynchronize(e1.ev));
+    PG_CUDA_CHECK(cudaEventRecord(e1.ev, stream));
+    PG_CUDA_CHECK(cudaEventSynchronize(e1.ev));
 
     float ms = 0.0f;
-    FME_CUDA_CHECK(cudaEventElapsedTime(&ms, e0.ev, e1.ev));
+    PG_CUDA_CHECK(cudaEventElapsedTime(&ms, e0.ev, e1.ev));
 
     // t_buf, out_buf, e0, e1 are released by their owners on return; ms is read
     // into the return value before any destructor runs.
@@ -394,4 +394,4 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
 template float time_fused_chain<float>(const float*, const float*, const float*, int64_t, int, int);
 template float time_fused_chain<double>(const double*, const double*, const double*, int64_t, int, int);
 
-} // namespace fme::cuda
+} // namespace pg::cuda
