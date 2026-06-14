@@ -299,3 +299,116 @@ def test_crossover_reads_calibration_or_skips(tmp_path):
     # An absent calibration path is skipped (None), never fabricated.
     missing = str(tmp_path / "does_not_exist_calibration.json")
     assert plots.plot_crossover(str(tmp_path / "crossover2.png"), missing) is None
+
+
+# --- Task 3: the README rewrite (BNCH-03 hygiene + round-trip closure). ---
+
+
+def test_readme_hygiene_helper():
+    # The helper itself: it flags every agent-infra token in a blob and returns
+    # an empty list for clean text. Prove both directions so the README assertion
+    # below rests on a tested helper.
+    assert readme_hygiene("plain technical prose with no infra path") == []
+    assert ".planning" in readme_hygiene("see .planning/STATE.md for details")
+    assert "CLAUDE.md" in readme_hygiene("the rule is in CLAUDE.md")
+
+
+def test_readme_no_agent_infra_path():
+    # The hard hygiene rule: the published README references NO .agent /
+    # .planning / .claude / CLAUDE.md path. A tracked public artifact must leak no
+    # internal path; reasoning is restated inline instead.
+    text = _read_text(_README)
+    hits = readme_hygiene(text)
+    assert hits == [], f"README references agent-infra paths: {hits}"
+
+
+def test_readme_is_v3_not_the_old_doc():
+    # The README is the v3 rewrite: the discredited 2024 doc reused nothing. None
+    # of its markers (the old version tag, the factorial/Strassen story, the
+    # MathExt import, np.dot-on-lists) survive.
+    text = _read_text(_README)
+    # The old-doc markers: the v1.2 tag, the factorial/Strassen story, the old
+    # MathExt module (import and dotted call, NOT the FastMathExt project name),
+    # and np.dot-on-lists timing. None survive the rewrite.
+    for marker in (
+        "v1.2",
+        "factorial",
+        "Strassen",
+        "import MathExt",
+        "MathExt.",
+        "np.dot",
+    ):
+        assert marker not in text, f"old-doc marker {marker!r} survives in README"
+    assert "3.0.0" in text  # the current version is stated
+    assert "FastMathExt" in text
+
+
+def test_readme_round_trip_closure():
+    # rule 17 closure: every headline number in the README appears in a
+    # report.py-rendered string. The README pastes the renderer's tables, so a
+    # number that is in the README but NOT producible from JSON is an orphan. Pull
+    # the headline values from the committed JSON, assert each is in BOTH the
+    # rendered report and the README text.
+    report_text = report.render_report()
+    readme_text = _read_text(_README)
+
+    cpu02 = json.load(
+        open(os.path.join(report.RESULTS_DIR, "cpu02_f64_zpicy.json"))
+    )
+    scaling = json.load(
+        open(os.path.join(report.RESULTS_DIR, "tuning", "scaling_zpicy.json"))
+    )
+    cpu06 = json.load(
+        open(os.path.join(report.RESULTS_DIR, "cpu06_f32_zpicy.json"))
+    )
+    gpu = json.load(
+        open(os.path.join(report.RESULTS_DIR, "zpicy_gpu_matrix.json"))
+    )
+    fuse_cpu = json.load(
+        open(os.path.join(report.RESULTS_DIR, "fuse05_cpu_f32_zpicy.json"))
+    )
+    fuse_gpu = json.load(
+        open(os.path.join(report.RESULTS_DIR, "fuse05_gpu_f32_zpicy.json"))
+    )
+
+    headline = [
+        f"{cpu02['cpu02_analysis']['high_effort_best_floor']['n2048']['ratio']:.2f}",
+        f"{scaling['ratio_6_vs_1_floor']:.2f}",
+        f"{report._gpu08_ratio(gpu):.2f}",
+        f"{fuse_cpu['cpu_cases'][0]['speedup_floor']:.2f}",
+        f"{fuse_gpu['gpu_cases'][0]['ratio_vs_numpy_cpu_f32']:.2f}",
+    ]
+    headline += [f"{c['speedup_vs_numpy']:.2f}" for c in cpu06["cases"]]
+
+    for value in headline:
+        assert value in report_text, f"{value} not in rendered report"
+        assert value in readme_text, f"{value} not in README (orphan or missing)"
+
+
+def test_readme_has_required_sections():
+    # The README carries the required v3 sections: install for both builds, the
+    # quickstart surface, the loss rows (rule 16), the neutral methodology, and
+    # the hardware manifest.
+    text = _read_text(_README)
+    assert "FME_ENABLE_CUDA=ON" in text  # the CUDA build install
+    assert "pip install -e ." in text  # the CPU-only default install
+    assert "CUDA Toolkit 12.8" in text  # the CUDA version note
+    # The quickstart surface (every public op the plan names).
+    for op in (
+        "matmul",
+        "transpose",
+        "fme.sum",
+        "fme.mean",
+        "axpby",
+        "fma3",
+        "scaled_relu",
+        "to_device",
+        "from_device",
+        "calibrate",
+        "set_backend",
+    ):
+        assert op in text, f"quickstart missing {op}"
+    assert "loses to NumPy" in text  # a loss row is present (rule 16)
+    assert "Methodology" in text
+    assert "floor" in text  # the floor-statistic note
+    assert "Hardware" in text
