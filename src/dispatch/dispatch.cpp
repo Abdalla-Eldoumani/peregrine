@@ -9,15 +9,15 @@
 #if defined(FME_HAS_CUDA)
 namespace fme::cuda {
 // Forward-declared, not #included: gemm_cublas.cuh is itself CUDA-free, but the
-// forward-declare matches the binding discipline (04-03/04-04) and keeps this TU
-// from depending on any src/cuda header path. The explicit float/double
-// instantiations in gemm_cublas.cu satisfy these. gemm runs the PURE device GEMM
-// on the compute stream (no host staging, no sync).
+// forward-declare matches the binding discipline and keeps this TU from depending
+// on any src/cuda header path. The explicit float/double instantiations in
+// gemm_cublas.cu satisfy these. gemm runs the PURE device GEMM on the compute
+// stream (no host staging, no sync).
 template <typename T>
 void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 
-// The device-resident fused kernels (06-04), forward-declared CUDA-free the same
-// way: fused.cu's explicit float/double instantiations satisfy these, and this TU
+// The device-resident fused kernels, forward-declared CUDA-free the same way:
+// fused.cu's explicit float/double instantiations satisfy these, and this TU
 // pulls no src/cuda header so the deletable-src/cuda invariant holds. Pure
 // device-pointer compute on the compute stream.
 template <typename T>
@@ -58,12 +58,13 @@ void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n
     // sync (the binding owns the result's lifetime; from_device syncs when it
     // crosses back to host). f32 and f64 both forward to gemm<T>: f64 is the
     // FORCED device-resident path (both operands were explicitly to_device'd),
-    // which is allowed and correct, just slow. The f64-never-AUTO-routes
-    // exclusion (CLAUDE.md rule 2) is NOT enforced by rejecting f64 here -- a
-    // forced f64 must compute -- but UPSTREAM, by the wrapper/binding never
-    // selecting this device path for a host f64 array. Auto-routing a host f64
-    // to the GPU would be the rule-2 bug; routing an already-device-resident f64
-    // is the user's explicit choice. Pure: no warnings/logging/fallback.
+    // which is allowed and correct, just slow. The f64-never-AUTO-routes exclusion
+    // (float64 GEMM never auto-routes to this GPU because GA106 FP64 is 1/64 FP32)
+    // is NOT enforced by rejecting f64 here -- a forced f64 must compute -- but
+    // UPSTREAM, by the wrapper/binding never selecting this device path for a host
+    // f64 array. Auto-routing a host f64 to the GPU would be the bug; routing an
+    // already-device-resident f64 is the user's explicit choice. Pure: no
+    // warnings/logging/fallback.
     cuda::gemm<T>(a, b, c, m, k, n);
 }
 
