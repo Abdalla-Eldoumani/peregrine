@@ -3,7 +3,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace fme {
+namespace pg {
 
 // One exception type at the boundary. The binding layer translates it to
 // ValueError so Python callers see NumPy-style errors, not RuntimeError.
@@ -82,4 +82,4 @@ inline gemm_dims check_matmul_dims(int64_t am, int64_t ak, int64_t bk, int64_t b
     return gemm_dims{am, ak, bn};
 }
 
-} // namespace fme
+} // namespace pg
