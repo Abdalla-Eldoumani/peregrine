@@ -21,8 +21,8 @@ constexpr int64_t kOomMarginBytes = 64 * 1024 * 1024;
 } // namespace
 
 void* alloc_device(int64_t bytes) {
-    // Reject a negative byte count explicitly (WR-03): the pre-flight below is
-    // gated on `bytes > 0`, so a negative value would SKIP it and then reach
+    // Reject a negative byte count explicitly: the pre-flight below is gated on
+    // `bytes > 0`, so a negative value would SKIP it and then reach
     // cudaMallocAsync via static_cast<size_t>(bytes), which wraps to a near-
     // SIZE_MAX request (~16 EiB). checked_bytes upstream makes this unreachable
     // from the binding, but alloc_device is a public entry in transfer.cuh and
@@ -42,9 +42,9 @@ void* alloc_device(int64_t bytes) {
         // different moments), so a fixed target either fails to guard or wedges
         // the desktop. If the request plus the margin exceeds free, throw
         // fme::cuda_error carrying the cudaErrorMemoryAllocation NAME -- the same
-        // name a real allocation failure would carry -- so the wrapper (04-05)
-        // composes one byte-math message off the name for both the pre-flight
-        // refusal and a mid-flight OOM. (Pitfall 5 / EDGE_CASES VRAM exhaustion.)
+        // name a real allocation failure would carry -- so the wrapper composes
+        // one byte-math message off the name for both the pre-flight refusal and a
+        // mid-flight OOM (the VRAM-exhaustion path).
         std::size_t free_bytes = 0;
         std::size_t total_bytes = 0;
         FME_CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
@@ -71,7 +71,7 @@ void free_device(void* dptr) {
     }
     // ~Array calls this during Python GC, which includes interpreter
     // finalization AFTER the atexit teardown() has destroyed ctx.transfer. Two
-    // guards make that path safe (CR-01):
+    // guards make that path safe:
     //
     //   1. If teardown has run, ctx.transfer is a dangling handle the static
     //      Context still names. Skip the free entirely: the mempool buffer is
@@ -88,8 +88,8 @@ void free_device(void* dptr) {
     }
     Context& ctx = context();
     // cudaFreeAsync on the transfer stream returns the buffer to the mempool
-    // (release threshold UINT64_MAX, 04-02) rather than the OS, so the next
-    // same-size allocation reuses it. Stream-ordered: it completes behind any
+    // (release threshold UINT64_MAX) rather than the OS, so the next same-size
+    // allocation reuses it. Stream-ordered: it completes behind any
     // copy still queued on the transfer stream that touched this buffer.
     const cudaError_t e = cudaFreeAsync(dptr, ctx.transfer);
     if (e != cudaSuccess && e != cudaErrorCudartUnloading &&
@@ -120,8 +120,8 @@ void copy_d2h(void* dst_host, const void* src_dev, int64_t bytes) {
     if (bytes <= 0) {
         return;
     }
-    // D2H on the transfer stream. The HARD rule (check.cuh / EDGE_CASES async
-    // correctness): a D2H feeding a returned ndarray is async here but MUST be
+    // D2H on the transfer stream. The HARD async-correctness rule: a D2H feeding a
+    // returned ndarray is async here but MUST be
     // followed by sync_transfer() before the host buffer is read on the Python
     // side. This function only queues the copy; from_device owns the sync.
     Context& ctx = context();
