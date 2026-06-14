@@ -29,7 +29,7 @@ import argparse
 import json
 import time
 
-import fastmathext as fme
+import peregrine as pg
 
 # Reuse, do not re-derive: the manifest and the CV-gated timing core come from
 # bench_matmul (the bench_fused line-48 import pattern). The regime series
@@ -126,11 +126,11 @@ if __name__ == "__main__":
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 
-    if not fme.has_cuda():
+    if not pg.has_cuda():
         print(
             "has_cuda() is False (OFF build): the GPU regimes are omitted; only "
             "the CPU matmul and fused CPU chain run. Run the GPU regimes on an "
-            "FME_ENABLE_CUDA=ON build."
+            "PG_ENABLE_CUDA=ON build."
         )
 
     _start = time.perf_counter()
