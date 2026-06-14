@@ -32,7 +32,7 @@ never code execution.
 
 Deserialization invariant: the cache read is lazy (first dispatch decision,
 never at import) and the platformdirs import is deferred into ``_cache_path``, so
-importing fastmathext pays nothing for this module and the <50ms import budget
+importing peregrine pays nothing for this module and the <50ms import budget
 holds.
 """
 
@@ -48,7 +48,7 @@ SCHEMA = 1
 
 # The two manual-override backends route directly within rules 1-2 (correctness
 # and the hard exclusions) without consulting the table; "auto" runs the
-# measured policy. Exposed for the wrapper to validate FME_BACKEND / set_backend
+# measured policy. Exposed for the wrapper to validate PEREGRINE_BACKEND / set_backend
 # against this set.
 BACKENDS = ("auto", "cpu", "cuda")
 
@@ -56,26 +56,26 @@ BACKENDS = ("auto", "cpu", "cuda")
 def _cache_path() -> str:
     """Resolve the calibration cache file path.
 
-    ``FME_CACHE_DIR`` overrides the location (the test-isolation hook: tests
+    ``PEREGRINE_CACHE_DIR`` overrides the location (the test-isolation hook: tests
     point it at a tmp dir so the real per-user cache is never touched).
     Otherwise the platform user cache dir is used with ``appauthor=False`` for
-    the clean single-level ``.../fastmathext/calibration.json`` path -- the
+    the clean single-level ``.../peregrine/calibration.json`` path -- the
     default double-nests the app name as both author and name. platformdirs is
     imported here, not at module top, so the import cost is paid on first
-    dispatch, never at ``import fastmathext``.
+    dispatch, never at ``import peregrine``.
 
     Returns
     -------
     str
         Absolute path to ``calibration.json`` under the resolved cache dir.
     """
-    override = os.environ.get("FME_CACHE_DIR")
+    override = os.environ.get("PEREGRINE_CACHE_DIR")
     if override:
         base = override
     else:
         import platformdirs
 
-        base = platformdirs.user_cache_dir("fastmathext", appauthor=False)
+        base = platformdirs.user_cache_dir("peregrine", appauthor=False)
     return os.path.join(base, "calibration.json")
 
 
@@ -284,7 +284,7 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
     With no calibration the policy is conservative, and float64 never auto-routes
     to the GPU -- both decidable without a device:
 
-    >>> from fastmathext import policy
+    >>> from peregrine import policy
     >>> policy.choose_backend("float64", 4096, 4096, 4096,
     ...                       residency="host", calibration=None, backend="auto")
     'cpu'

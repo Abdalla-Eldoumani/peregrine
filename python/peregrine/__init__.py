@@ -1,4 +1,4 @@
-"""fastmathext: heterogeneous linear algebra with a NumPy-compatible surface.
+"""peregrine: heterogeneous linear algebra with a NumPy-compatible surface.
 
 The native core takes zero-copy views of C-contiguous float32 and float64
 arrays. This wrapper supplies the NumPy-style ergonomics on top: dtype
@@ -17,7 +17,7 @@ import numpy as np
 # Import-time CUDA DLL discovery (Windows). A CUDA-enabled _core links
 # cublas64_12.dll / cublasLt64_12.dll from the toolkit bin, and since Python 3.8
 # the secure DLL search for extension modules ignores PATH, so a bare
-# `import fastmathext` under the ON build would raise "DLL load failed". Register
+# `import peregrine` under the ON build would raise "DLL load failed". Register
 # the toolkit bin before importing _core so the package is self-sufficient at
 # import on a CUDA build -- including under a bare `python -c` child that never
 # loads the test conftest (test_threads.py / test_fallback.py spawn those).
@@ -44,10 +44,10 @@ from ._core import sum_all as _sum_all_native
 from ._core import sum_axis as _sum_axis_native
 from ._core import transpose as _transpose_native
 
-# calibrate() is re-exported as the public fme.calibrate. The binding is explicit
+# calibrate() is re-exported as the public pg.calibrate. The binding is explicit
 # (not left to attribute fallthrough) BECAUSE a submodule named calibrate exists:
 # `from .calibrate import calibrate` binds the FUNCTION into the package namespace,
-# shadowing the submodule so `fme.calibrate(...)` is the callable users get, not
+# shadowing the submodule so `pg.calibrate(...)` is the callable users get, not
 # the module. calibrate.py runs nothing at import (no measurement, no
 # device init -- it only defines functions and imports stdlib + this package), so
 # this costs a one-time module compile and nothing measurable on the hot path; the
@@ -65,18 +65,18 @@ if _has_cuda_build():
     from ._core import to_device as _to_device_native
 else:
     class Array:  # noqa: D401 - sentinel; the real device type is CUDA-build-only
-        """Placeholder for fme.Array on a CPU-only build.
+        """Placeholder for pg.Array on a CPU-only build.
 
-        The device array type exists only when fastmathext is built with
-        ``FME_ENABLE_CUDA=ON``. On a CPU-only build this sentinel exists so the
-        public name is importable and ``isinstance(x, fme.Array)`` is always
+        The device array type exists only when peregrine is built with
+        ``PG_ENABLE_CUDA=ON``. On a CPU-only build this sentinel exists so the
+        public name is importable and ``isinstance(x, pg.Array)`` is always
         False; constructing it raises, since there is no device to hold.
         """
 
         def __init__(self, *args, **kwargs):
             raise RuntimeError(
                 "cuda backend requested but no build "
-                "(fastmathext was built with FME_ENABLE_CUDA=OFF)"
+                "(peregrine was built with PG_ENABLE_CUDA=OFF)"
             )
 
     _cuda_device_probe = None
@@ -88,7 +88,7 @@ else:
 # installed); it matches the pyproject value so an uninstalled tree still reports
 # the release it belongs to.
 try:
-    __version__ = _version("fastmathext")
+    __version__ = _version("peregrine")
 except PackageNotFoundError:
     __version__ = "3.0.0"
 __all__ = [
@@ -251,17 +251,17 @@ _cuda_fallback_lock = threading.Lock()
 _cuda_fallback_warned = False
 
 # The active dispatch backend: "auto" runs the measured policy, "cpu"/"cuda"
-# force that side. Read ONCE here at import from FME_BACKEND (the env hook,
-# mirroring FME_CACHE_DIR) defaulting to "auto", and validated
+# force that side. Read ONCE here at import from PEREGRINE_BACKEND (the env hook,
+# mirroring PEREGRINE_CACHE_DIR) defaulting to "auto", and validated
 # against policy.BACKENDS so an out-of-set value can never reach choose_backend.
 # This is a plain os.environ.get plus a membership test: microseconds, NO device
 # probe and NO cache read, so the <50ms import budget holds (the probe runs only
 # inside set_backend at call time, the cache read only on first dispatch). An
-# invalid FME_BACKEND degrades to "auto" rather than raising at import: a bad env
+# invalid PEREGRINE_BACKEND degrades to "auto" rather than raising at import: a bad env
 # var must not make the package unimportable, and "auto" is the safe default. A
 # bad value passed to set_backend at runtime DOES raise (the caller asked for it
 # explicitly), so the strict-vs-lenient split is by who set it.
-_backend = os.environ.get("FME_BACKEND", "auto")
+_backend = os.environ.get("PEREGRINE_BACKEND", "auto")
 if _backend not in policy.BACKENDS:
     _backend = "auto"
 
@@ -269,7 +269,7 @@ if _backend not in policy.BACKENDS:
 def _cuda_error_name(exc: Exception) -> str:
     """Extract the cuda error name from a native cuda_error message.
 
-    The CHECK macros throw fme::cuda_error carrying "<cudaErrorName> at
+    The CHECK macros throw pg::cuda_error carrying "<cudaErrorName> at
     <file>:<line>" (or a plain sentence for the synthetic guards). The fallback
     warning names the error, so take the leading token up to " at " when present,
     otherwise the whole message. Keeps the public warning token
@@ -306,7 +306,7 @@ def _cuda_unavailable_reason() -> str:
 def has_cuda() -> bool:
     """Return whether a usable CUDA device is available.
 
-    True only when fastmathext was built with CUDA support AND a usable device
+    True only when peregrine was built with CUDA support AND a usable device
     is present: the driver loads, at least one device exists, and its compute
     capability is at least 7.0. False (never an exception) on a CPU-only build
     or a machine without a usable device, so auto-mode code can branch on it
@@ -319,13 +319,13 @@ def has_cuda() -> bool:
 
     Examples
     --------
-    >>> import fastmathext as fme
-    >>> isinstance(fme.has_cuda(), bool)
+    >>> import peregrine as pg
+    >>> isinstance(pg.has_cuda(), bool)
     True
     """
     # The probe runs lazily, on call, never at import: it queries the device
     # count and compute capability but does not build the context (no streams,
-    # handles, or mempool), so importing fastmathext pays nothing for it and the
+    # handles, or mempool), so importing peregrine pays nothing for it and the
     # <50ms import budget holds.
     return _cuda_unavailable_reason() == ""
 
@@ -334,7 +334,7 @@ def set_backend(name: str) -> None:
     """Set the dispatch backend for the rest of the session.
 
     Overrides how matmul routes a host array pair. ``"auto"`` (the default, and
-    the value at import unless FME_BACKEND says otherwise) runs the measured
+    the value at import unless PEREGRINE_BACKEND says otherwise) runs the measured
     per-machine policy: a host float32 product routes to the GPU only when the
     calibrated crossover says the device wins after the host<->device transfer is
     paid, and float64 never auto-routes to the GPU. ``"cpu"`` forces every product
@@ -368,10 +368,10 @@ def set_backend(name: str) -> None:
 
     Examples
     --------
-    >>> import fastmathext as fme
-    >>> fme.set_backend("cpu") is None
+    >>> import peregrine as pg
+    >>> pg.set_backend("cpu") is None
     True
-    >>> fme.set_backend("auto") is None
+    >>> pg.set_backend("auto") is None
     True
     """
     if name not in policy.BACKENDS:
@@ -393,9 +393,9 @@ def set_backend(name: str) -> None:
 
 
 def to_device(a) -> Array:
-    """Copy a host array to the CUDA device, returning an fme.Array.
+    """Copy a host array to the CUDA device, returning an pg.Array.
 
-    The returned fme.Array holds a device-resident copy of ``a``; pass it to
+    The returned pg.Array holds a device-resident copy of ``a``; pass it to
     matmul for the device path, or back through from_device to retrieve the
     values. Accepts both float32 and float64: it is a memory transfer, not a
     routing decision. A float64 array is stored on the device, but a float64
@@ -410,7 +410,7 @@ def to_device(a) -> Array:
 
     Returns
     -------
-    fme.Array
+    pg.Array
         A device-resident copy of ``a`` after promotion and contiguity
         normalization.
 
@@ -432,14 +432,14 @@ def to_device(a) -> Array:
 
 
 def from_device(x: Array) -> np.ndarray:
-    """Copy an fme.Array back to a host NumPy array.
+    """Copy an pg.Array back to a host NumPy array.
 
     Performs a device-to-host copy and synchronizes before returning, so the
     result is fully populated. The returned array owns a fresh host buffer.
 
     Parameters
     ----------
-    x : fme.Array
+    x : pg.Array
         A device-resident array produced by to_device or a device matmul.
 
     Returns
@@ -452,21 +452,21 @@ def from_device(x: Array) -> np.ndarray:
     RuntimeError
         If no usable CUDA device is available.
     TypeError
-        If ``x`` is not an fme.Array.
+        If ``x`` is not an pg.Array.
     """
     reason = _cuda_unavailable_reason()
     if reason:
         raise RuntimeError(f"cuda backend requested but {reason}")
     if not isinstance(x, Array):
         raise TypeError(
-            f"from_device: expected an fme.Array, got {type(x).__name__}"
+            f"from_device: expected an pg.Array, got {type(x).__name__}"
         )
     return _from_device_native(x)
 
 
 def _matmul_cpu_fallback(a, b):
     # Recompute on the CPU after an auto-mode device failure: the operands are
-    # device-resident fme.Arrays, so copy them back to host and run the host
+    # device-resident pg.Arrays, so copy them back to host and run the host
     # matmul. The result is a host ndarray -- "falling back to cpu" means the
     # computation (and its residency) is now host-side; we cannot return a device
     # array when the device is exactly what failed. This is the correct,
@@ -558,7 +558,7 @@ def matmul(a, b, *, out=None):
     zero-sized dimensions and NaN/Inf propagation.
 
     The return type follows operand residency: two host arrays give a host
-    ndarray, two device fme.Arrays give a device fme.Array (the float32 GPU
+    ndarray, two device pg.Arrays give a device pg.Array (the float32 GPU
     path), and a mix of one host and one device operand raises TypeError rather
     than transferring silently. A device float64 product computes on the GPU only
     when both operands were explicitly placed there with to_device; a host
@@ -568,9 +568,9 @@ def matmul(a, b, *, out=None):
 
     Parameters
     ----------
-    a : array_like or fme.Array
+    a : array_like or pg.Array
         Left operand; must be 2-D.
-    b : array_like or fme.Array
+    b : array_like or pg.Array
         Right operand; must be 2-D with as many rows as a has columns, and on
         the same side (host or device) as a.
     out : None, optional
@@ -579,7 +579,7 @@ def matmul(a, b, *, out=None):
 
     Returns
     -------
-    numpy.ndarray or fme.Array
+    numpy.ndarray or pg.Array
         The matrix product, on the host for host operands and on the device for
         device operands. The result dtype is np.result_type(a, b) when that
         lands on float32 or float64, so int8/int16/uint8/uint16 mixed with
@@ -592,7 +592,7 @@ def matmul(a, b, *, out=None):
     ValueError
         If an operand is not 2-D, or the inner dimensions do not match.
     TypeError
-        If exactly one operand is an fme.Array (mixed residency), or an operand
+        If exactly one operand is an pg.Array (mixed residency), or an operand
         dtype is bool, float16, complex64, complex128, or object, or if
         promotion lands on anything other than float32, float64, or an integer
         dtype (longdouble and clongdouble on platforms where they are distinct).
@@ -608,20 +608,20 @@ def matmul(a, b, *, out=None):
     Examples
     --------
     >>> import numpy as np
-    >>> import fastmathext as fme
-    >>> fme.matmul(np.array([[1.0, 2.0], [3.0, 4.0]]), np.eye(2))
+    >>> import peregrine as pg
+    >>> pg.matmul(np.array([[1.0, 2.0], [3.0, 4.0]]), np.eye(2))
     array([[1., 2.],
            [3., 4.]])
-    >>> fme.matmul(np.array([[1, 2], [3, 4]]), np.array([[1, 0], [0, 1]])).dtype
+    >>> pg.matmul(np.array([[1, 2], [3, 4]]), np.array([[1, 0], [0, 1]])).dtype
     dtype('float64')
     """
     if out is not None:
         raise NotImplementedError("matmul: out= is not implemented yet")
 
     # Residency check, BEFORE the host fast path. Return type follows residency:
-    # both operands on the device returns an fme.Array, both
+    # both operands on the device returns an pg.Array, both
     # on the host returns an ndarray, and a mix is an error -- never a silent
-    # transfer. fme.Array is the CUDA-build device type; on a CPU-only build it is
+    # transfer. pg.Array is the CUDA-build device type; on a CPU-only build it is
     # a sentinel nothing is an instance of, so both isinstance checks are False
     # and control falls straight through to the host path with zero overhead.
     a_is_dev = isinstance(a, Array)
@@ -634,12 +634,12 @@ def matmul(a, b, *, out=None):
         # Both device-resident: the f32 (and forced f64) device path. f64 reaches
         # here ONLY because the caller explicitly put both operands on the device
         # (to_device) -- a host f64 array never auto-routes to the GPU (it would
-        # not be an fme.Array), so the FP64 trap rule is upheld upstream. Auto mode
+        # not be an pg.Array), so the FP64 trap rule is upheld upstream. Auto mode
         # catches a CUDA runtime failure, warns ONCE, and falls back to the CPU.
         try:
             return _matmul_native(a, b)
         except RuntimeError as exc:
-            # The native cuda_error arm maps every FME_CUDA_CHECK / cuBLAS / OOM
+            # The native cuda_error arm maps every PG_CUDA_CHECK / cuBLAS / OOM
             # failure to RuntimeError carrying the cuda error NAME. This is
             # recoverable: warn once with the verbatim fallback token (the cuda op
             # and error name come from the message) and recompute on the CPU. The
@@ -768,13 +768,13 @@ def transpose(a) -> np.ndarray:
     Examples
     --------
     >>> import numpy as np
-    >>> import fastmathext as fme
-    >>> fme.transpose(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+    >>> import peregrine as pg
+    >>> pg.transpose(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
     array([[1., 4.],
            [2., 5.],
            [3., 6.]])
     >>> a = np.array([[1.0, 2.0], [3.0, 4.0]])
-    >>> t = fme.transpose(a)
+    >>> t = pg.transpose(a)
     >>> t[0, 0] = 99.0  # owned copy: the input is untouched
     >>> float(a[0, 0])
     1.0
@@ -820,12 +820,12 @@ def sum(a, *, axis=None):
     Examples
     --------
     >>> import numpy as np
-    >>> import fastmathext as fme
-    >>> float(fme.sum(np.array([[1.0, 2.0], [3.0, 4.0]])))
+    >>> import peregrine as pg
+    >>> float(pg.sum(np.array([[1.0, 2.0], [3.0, 4.0]])))
     10.0
-    >>> fme.sum(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0)
+    >>> pg.sum(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0)
     array([4., 6.])
-    >>> fme.sum(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=1)
+    >>> pg.sum(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=1)
     array([3., 7.])
     """
     _check_axis(axis, "sum")
@@ -881,12 +881,12 @@ def mean(a, *, axis=None):
     Examples
     --------
     >>> import numpy as np
-    >>> import fastmathext as fme
-    >>> float(fme.mean(np.array([[1.0, 2.0], [3.0, 4.0]])))
+    >>> import peregrine as pg
+    >>> float(pg.mean(np.array([[1.0, 2.0], [3.0, 4.0]])))
     2.5
-    >>> fme.mean(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0)
+    >>> pg.mean(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0)
     array([2., 3.])
-    >>> fme.mean(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=1)
+    >>> pg.mean(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=1)
     array([1.5, 3.5])
     """
     _check_axis(axis, "mean")
@@ -926,9 +926,9 @@ def _fused_residency(operands, op: str) -> str:
     # normalization (the isinstance check must see the original objects). The
     # return-type-follows-residency rule, extended from
     # matmul's two-operand check to N operands: every operand on the device routes
-    # the device path (returns an fme.Array); every operand on the host routes the
+    # the device path (returns an pg.Array); every operand on the host routes the
     # host CPU path (returns an ndarray); ANY mix is a TypeError, never a silent
-    # host<->device transfer. On a CPU-only build fme.Array is a sentinel nothing
+    # host<->device transfer. On a CPU-only build pg.Array is a sentinel nothing
     # is an instance of, so this is always "host" and the device branch is dead.
     dev = [isinstance(x, Array) for x in operands]
     if all(dev):
@@ -952,7 +952,7 @@ def axpby(x, y, *, a=1.0, b=1.0):
 
     Parameters
     ----------
-    x, y : array_like or fme.Array
+    x, y : array_like or pg.Array
         Operands; must be 2-D and the same shape, and on the same side (both
         host or both device).
     a, b : float, optional
@@ -977,17 +977,17 @@ def axpby(x, y, *, a=1.0, b=1.0):
     Examples
     --------
     >>> import numpy as np
-    >>> import fastmathext as fme
+    >>> import peregrine as pg
     >>> x = np.array([[1.0, 2.0], [3.0, 4.0]])
     >>> y = np.array([[10.0, 20.0], [30.0, 40.0]])
-    >>> fme.axpby(x, y, a=2.0, b=-1.0)
+    >>> pg.axpby(x, y, a=2.0, b=-1.0)
     array([[ -8., -16.],
            [-24., -32.]])
     """
     if _fused_residency((x, y), "axpby") == "device":
-        # Device-resident path (06-04): both operands are fme.Array, so the native
+        # Device-resident path (06-04): both operands are pg.Array, so the native
         # axpby Array overload runs the grid-stride kernel device-in/device-out and
-        # returns an fme.Array. nanobind dispatches on the operand type (Array vs
+        # returns an pg.Array. nanobind dispatches on the operand type (Array vs
         # ndarray), so the same _axpby_native binds the device overload here and the
         # host overload below. Scalars cross as Python floats; no host->GPU staging
         # (v1 is device-resident only). dtype/shape validation lives in the binding
@@ -1018,7 +1018,7 @@ def fma3(x, y, z):
 
     Parameters
     ----------
-    x, y, z : array_like or fme.Array
+    x, y, z : array_like or pg.Array
         Operands; must be 2-D and the same shape, and on the same side (all host
         or all device).
 
@@ -1041,18 +1041,18 @@ def fma3(x, y, z):
     Examples
     --------
     >>> import numpy as np
-    >>> import fastmathext as fme
+    >>> import peregrine as pg
     >>> x = np.array([[1.0, 2.0], [3.0, 4.0]])
     >>> y = np.array([[5.0, 6.0], [7.0, 8.0]])
     >>> z = np.array([[1.0, 1.0], [1.0, 1.0]])
-    >>> fme.fma3(x, y, z)
+    >>> pg.fma3(x, y, z)
     array([[ 6., 13.],
            [22., 33.]])
     """
     if _fused_residency((x, y, z), "fma3") == "device":
-        # Device-resident path (06-04): all three operands are fme.Array, so the
+        # Device-resident path (06-04): all three operands are pg.Array, so the
         # native fma3 Array overload runs the device kernel and returns an
-        # fme.Array (same nanobind type-dispatch as axpby). No host->GPU staging.
+        # pg.Array (same nanobind type-dispatch as axpby). No host->GPU staging.
         return _fma3_native(x, y, z)
     xa = _prepare(x, "x", "fma3")
     ya = _prepare(y, "y", "fma3")
@@ -1076,7 +1076,7 @@ def scaled_relu(x, *, scale=1.0):
 
     Parameters
     ----------
-    x : array_like or fme.Array
+    x : array_like or pg.Array
         Input; must be 2-D.
     scale : float, optional
         Scalar multiplier applied before the rectifier, keyword-only. Default
@@ -1099,16 +1099,16 @@ def scaled_relu(x, *, scale=1.0):
     Examples
     --------
     >>> import numpy as np
-    >>> import fastmathext as fme
+    >>> import peregrine as pg
     >>> x = np.array([[-1.0, 2.0], [3.0, -4.0]])
-    >>> fme.scaled_relu(x, scale=3.0)
+    >>> pg.scaled_relu(x, scale=3.0)
     array([[0., 6.],
            [9., 0.]])
     """
     if _fused_residency((x,), "scaled_relu") == "device":
-        # Device-resident path (06-04): the operand is an fme.Array, so the native
+        # Device-resident path (06-04): the operand is an pg.Array, so the native
         # scaled_relu Array overload runs the device kernel (NaN-propagating, like
-        # the CPU path) and returns an fme.Array. No host->GPU staging.
+        # the CPU path) and returns an pg.Array. No host->GPU staging.
         return _scaled_relu_native(x, float(scale))
     xa = _prepare(x, "x", "scaled_relu")
     common = _resolve_dtype_multi((xa,), "scaled_relu")
