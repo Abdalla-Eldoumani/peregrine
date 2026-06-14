@@ -219,18 +219,18 @@ def run(sizes: list[int], reps: int, warmup: int) -> dict:
         "methodology": {
             "cupy_available": _CUPY_AVAILABLE,
             "cupy_absent_note": (
-                "CuPy is not installed on this machine; per bench-protocol rule "
-                "15 the GPU comparison baseline is NumPy CPU f32, not CuPy."
+                "CuPy is not installed on this machine; the GPU comparison "
+                "baseline is NumPy CPU f32, not CuPy."
             ),
             "without_transfer_timer": (
                 "event-timed via _cuda_time_matmul (cudaEvent pair after a sync, "
-                "transfer outside the timed region); rule 12, never a wall-clock "
-                "around an async launch."
+                "transfer outside the timed region); never a wall-clock around an "
+                "async launch."
             ),
             "with_transfer_timer": (
                 "wall-clocked via the CV-gated _bench; the to_device + matmul + "
                 "from_device round-trip is synchronous (from_device owns the D2H "
-                "sync), the one sanctioned wall-clock GPU exception (rule 12)."
+                "sync), the one sanctioned wall-clock GPU exception."
             ),
             "statistic": "floor(min) for the with-transfer ratio; CV is a readout/gate, not the claim.",
         },
