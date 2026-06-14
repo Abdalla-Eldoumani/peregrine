@@ -1,0 +1,56 @@
+[build-system]
+requires = ["scikit-build-core==0.12.2", "nanobind==2.12.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "peregrine"
+version = "3.0.0"
+description = "Heterogeneous linear algebra for Python: packed AVX2 CPU kernels and a CUDA backend behind one zero-copy, NumPy-compatible API"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "Abdalla ElDoumani" }]
+keywords = [
+    "linear-algebra",
+    "matrix-multiplication",
+    "gemm",
+    "avx2",
+    "simd",
+    "cuda",
+    "cublas",
+    "numpy",
+    "nanobind",
+    "high-performance-computing",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = ["numpy>=2.0,<3", "platformdirs>=4.3"]
+
+[project.urls]
+Homepage = "https://github.com/Abdalla-Eldoumani/peregrine"
+Repository = "https://github.com/Abdalla-Eldoumani/peregrine"
+Issues = "https://github.com/Abdalla-Eldoumani/peregrine/issues"
+
+[project.optional-dependencies]
+test = ["pytest==9.0.3", "hypothesis==6.155.2"]
+bench = ["threadpoolctl==3.6.0", "matplotlib==3.9.1"]
+
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.26"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["python/peregrine"]
+wheel.py-api = "cp312"
+
+[tool.scikit-build.cmake.define]
+PG_ENABLE_CUDA = { env = "PG_ENABLE_CUDA", default = "OFF" }

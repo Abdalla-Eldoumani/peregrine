@@ -1,0 +1,175 @@
+{
+  "manifest": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 165 Stepping 2, GenuineIntel",
+    "python": "3.12.4",
+    "numpy": "2.4.6",
+    "peregrine": "3.0.0.dev0",
+    "cpu_features": {
+      "avx2": true,
+      "fma": true,
+      "avx512f": false
+    },
+    "cuda_build": false,
+    "blas": "openblas 0.3.31.188.0",
+    "power_profile": "Power Scheme GUID: 0f443208-af27-43c1-8255-8606ca7d5000  (Ultimate Performance)",
+    "timestamp": "2026-06-13T02:26:00.394178",
+    "threadpools": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "libscipy_openblas64_-63c857e738469261263c764a36be9436.dll",
+        "version": "0.3.31.188.0",
+        "threading_layer": "pthreads",
+        "architecture": "Haswell"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libomp",
+        "filepath": "libomp140.x86_64.dll",
+        "version": null
+      }
+    ]
+  },
+  "dtype": "float64",
+  "cases": [
+    {
+      "n": 8,
+      "gflop": 1.024e-06,
+      "peregrine": {
+        "median_s": 3.5e-06,
+        "p25_s": 3.4250000000000002e-06,
+        "p75_s": 3.6e-06,
+        "min_s": 3.4e-06,
+        "cv": 0.2957080036847557,
+        "reps": 40
+      },
+      "numpy": {
+        "median_s": 1.9e-06,
+        "p25_s": 1.9e-06,
+        "p75_s": 1.9e-06,
+        "min_s": 1.9e-06,
+        "cv": 0.024426077941697717,
+        "reps": 40
+      },
+      "pg_gflops": 0.2925714285714286,
+      "numpy_gflops": 0.5389473684210526,
+      "speedup_vs_numpy": 0.5428571428571428
+    },
+    {
+      "n": 16,
+      "gflop": 8.192e-06,
+      "peregrine": {
+        "median_s": 6e-06,
+        "p25_s": 6e-06,
+        "p75_s": 6.1e-06,
+        "min_s": 5.9e-06,
+        "cv": 0.1891797973529302,
+        "reps": 40
+      },
+      "numpy": {
+        "median_s": 2.3e-06,
+        "p25_s": 2.3e-06,
+        "p75_s": 2.4e-06,
+        "min_s": 2.2e-06,
+        "cv": 0.0347930586309024,
+        "reps": 40
+      },
+      "pg_gflops": 1.3653333333333333,
+      "numpy_gflops": 3.5617391304347827,
+      "speedup_vs_numpy": 0.3833333333333333
+    },
+    {
+      "n": 32,
+      "gflop": 6.5536e-05,
+      "peregrine": {
+        "median_s": 2.76e-05,
+        "p25_s": 2.74e-05,
+        "p75_s": 2.795e-05,
+        "min_s": 2.73e-05,
+        "cv": 0.08546090077966755,
+        "reps": 40
+      },
+      "numpy": {
+        "median_s": 5.1e-06,
+        "p25_s": 5.1e-06,
+        "p75_s": 5.2e-06,
+        "min_s": 5e-06,
+        "cv": 0.018779643411264355,
+        "reps": 40
+      },
+      "pg_gflops": 2.3744927536231883,
+      "numpy_gflops": 12.850196078431372,
+      "speedup_vs_numpy": 0.1847826086956522
+    },
+    {
+      "n": 64,
+      "gflop": 0.000524288,
+      "peregrine": {
+        "median_s": 0.000232,
+        "p25_s": 0.000163925,
+        "p75_s": 0.00027377500000000003,
+        "min_s": 0.0001632,
+        "cv": 0.23611193673413367,
+        "reps": 40
+      },
+      "numpy": {
+        "median_s": 2.86e-05,
+        "p25_s": 2.84e-05,
+        "p75_s": 2.8875e-05,
+        "min_s": 2.76e-05,
+        "cv": 0.01697095367922792,
+        "reps": 40
+      },
+      "pg_gflops": 2.2598620689655173,
+      "numpy_gflops": 18.33174825174825,
+      "speedup_vs_numpy": 0.12327586206896551
+    }
+  ],
+  "small_path_analysis": {
+    "goal": "pg small path >= 2x NumPy end-to-end at n in {8,16,32,64}, both dtypes",
+    "verdict": "NOT met (measured well below 2x at every size; the shortfall is structural, not primarily AV noise \u2014 pg CVs are mostly 3-30%)",
+    "metric": "speedup_vs_numpy = numpy_median_s / pg_median_s, end-to-end Python time (the small-path metric, not kernel GFLOP/s)",
+    "floor_and_median": {
+      "n8": {
+        "median_speedup": 0.543,
+        "floor_speedup": 0.559,
+        "pg_median_us": 3.5,
+        "numpy_median_us": 1.9,
+        "pg_cv": 0.296
+      },
+      "n16": {
+        "median_speedup": 0.383,
+        "floor_speedup": 0.373,
+        "pg_median_us": 6.0,
+        "numpy_median_us": 2.3,
+        "pg_cv": 0.189
+      },
+      "n32": {
+        "median_speedup": 0.185,
+        "floor_speedup": 0.183,
+        "pg_median_us": 27.6,
+        "numpy_median_us": 5.1,
+        "pg_cv": 0.085
+      },
+      "n64": {
+        "median_speedup": 0.123,
+        "floor_speedup": 0.169,
+        "pg_median_us": 232.0,
+        "numpy_median_us": 28.6,
+        "pg_cv": 0.236
+      }
+    },
+    "root_cause": [
+      "The wrapper fast path works: measured wrapper overhead at n=8 dropped to ~1.1us (from the ~1.8us slow-path helper cost), confirming _prepare/result_type/_normalize are skipped on the qualified path.",
+      "NumPy is faster than this small path because np.matmul dispatches to OpenBLAS optimized small-GEMM; the in-tree gemm_small is a scalar triple loop (~2 GF/s) and the packed path carries pack/setup overhead that dominates at tiny n.",
+      "At n=8 the 2x target is physically unreachable: measured NumPy n=8 is ~1.8us, so the budget tightened to ~0.90us, but the irreducible Python+nanobind round-trip is ~1.1us even with a zero-time kernel. No kernel change can fit a full call into 0.90us.",
+      "Lowering SMALL_MAX_DIM was measured (threshold=4 experiment): the packed path beats gemm_small only at n=64 (0.32x vs 0.13x) and is worse at n<=32 (pack overhead); neither reaches 2x. The small path is locked at max(m,k,n)<=96, so the validated default 96 is kept."
+    ],
+    "note": "The small-path target is not reachable at the smallest sizes (n=8 helpers ~1.8us vs a sub-2us budget; n=64 needs ~35 GF/s single-thread). Surfaced honestly; the target is a conversation, not a silent acceptance."
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "decision": "f32 microkernel shape: 8x16 vs 6x16, decided at n=512",
+  "winner": "8x16",
+  "loser": "6x16",
+  "metric": "best-min floor GFLOP/s over repeated cooldown-separated single-thread runs (noise-robust; a persistent background antivirus held CV above the 5% protocol gate, so the spike-resistant floor decides, not the median)",
+  "measurement_mode": "single-thread (OMP_NUM_THREADS=1) at n=512 f32; the shape decision is a per-core register/port comparison, and the single-thread floor has CV ~10-26% vs the 55-155% the 6-thread region shows under the same AV load, so the per-core signal is the trustworthy one for this relative choice",
+  "n": 512,
+  "dtype": "float32",
+  "gflop": 0.268435456,
+  "reps_per_run": 50,
+  "warmup_per_run": 5,
+  "rationale": "The register-budget argument predicted 6x16 would win (8x16 needs 16 ymm accumulators, the whole file, forcing B reloads each k-step; 6x16 mirrors the f64 6x8 12-accumulator budget with 2 ymm free for B and 1 for the broadcast). Measurement overruled it: 8x16's higher arithmetic density (16 FMAs per k-step) amortizes the B reloads and won by ~8% on this Comet Lake core's port layout in two independent rounds. This is the case where f32 shape must be decided by measuring, not by counting registers.",
+  "results": {
+    "8x16": {
+      "round1_best_min_floor_gflops": 55.1,
+      "round2_best_min_floor_gflops": 57.5,
+      "round2_top3_mean_floor_gflops": 57.0,
+      "round2_floors_sorted_gflops": [57.5, 57.1, 56.5, 54.5, 52.6, 51.2, 45.6, 39.7]
+    },
+    "6x16": {
+      "round1_best_min_floor_gflops": 53.6,
+      "round2_best_min_floor_gflops": 53.2,
+      "round2_top3_mean_floor_gflops": 52.9,
+      "round2_floors_sorted_gflops": [53.2, 53.1, 52.3, 52.2, 49.2, 48.9, 48.1, 35.1]
+    }
+  },
+  "caveats": [
+    "Sub-protocol for absolute throughput: the 5% CV gate is not met on this machine because of an uncloseable background antivirus (the user's security tool). The numbers are quotable only as a relative shape comparison, not as an absolute f32 GFLOP/s claim.",
+    "Re-measure on a quiet machine before treating any single number here as protocol-grade.",
+    "Multi-threaded f32 at these blocking constants ({96,320,2048}, tuned for f64) anti-scales badly under the AV barrier preemption (6-thread floor ~14 GF/s vs single-thread ~55 GF/s at n=512); that is a threading/noise interaction, not a kernel-shape signal, which is why the decision used the single-thread floor."
+  ],
+  "manifest": {
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 165 Stepping 2, GenuineIntel (i7-10750H, Comet Lake, 6C/12T, AVX2+FMA)",
+    "python": "3.12.4",
+    "numpy": "2.4.6",
+    "peregrine": "3.0.0.dev0",
+    "cpu_features": {"avx2": true, "fma": true, "avx512f": false},
+    "blas": "openblas 0.3.31.188.0",
+    "power_profile": "Ultimate Performance (GUID 0f443208-af27-43c1-8255-8606ca7d5000)",
+    "omp": {"OMP_NUM_THREADS": 1, "OMP_WAIT_POLICY": "ACTIVE", "OMP_PROC_BIND": "close", "OMP_PLACES": "cores"},
+    "timestamp": "2026-06-13T02:08:25Z"
+  }
+}
