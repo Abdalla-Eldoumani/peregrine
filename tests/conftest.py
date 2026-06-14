@@ -76,7 +76,7 @@ if os.name == "nt":
         except OSError:
             pass
 
-import fastmathext as fme
+import peregrine as pg
 
 try:
     from threadpoolctl import threadpool_info
@@ -108,14 +108,14 @@ def requires_cuda():
     present, so the CUDA suite runs on the GPU build and skips with a stated
     reason on a CPU-only build or a machine without a device. Every CUDA test
     consumes this through the module-level skip below so CPU-only and the WSL/GCC
-    clone stay green. As of 04-05 this defers to the public fme.has_cuda()
+    clone stay green. As of 04-05 this defers to the public pg.has_cuda()
     runtime chain (build flag, driver load, device count, compute capability
     >= 7.0) -- the same predicate, now owned by the package instead of composed
     by hand here; the build-flag arm keeps a distinct reason for a CPU-only build.
     """
-    if not fme._has_cuda_build():
-        return False, "built without cuda (FME_ENABLE_CUDA=OFF)"
-    if not fme.has_cuda():
+    if not pg._has_cuda_build():
+        return False, "built without cuda (PG_ENABLE_CUDA=OFF)"
+    if not pg.has_cuda():
         return False, "no usable cuda device present"
     return True, ""
 
@@ -134,7 +134,7 @@ def _gpu_manifest():
     (_has_cuda_build), not has_cuda(): the provenance line should read "none" on a
     CPU-only build regardless of whether a GPU happens to be in the machine.
     """
-    if not fme._has_cuda_build():
+    if not pg._has_cuda_build():
         return "none", "n/a"
     smi = shutil.which("nvidia-smi")
     if smi is None:
@@ -166,8 +166,8 @@ def pytest_report_header(config):
     gpu, driver = _gpu_manifest()
     return [
         f"machine: {platform.platform()} | python {platform.python_version()}",
-        f"numpy {np.__version__} | fme {fme.__version__} "
-        f"| cpu_features {fme.cpu_features()}",
+        f"numpy {np.__version__} | pg {pg.__version__} "
+        f"| cpu_features {pg.cpu_features()}",
         f"threadpools: {pools}",
         f"gpu: {gpu} | driver: {driver}",
     ]
