@@ -1,11 +1,11 @@
 """CUDA suite skeleton. The whole file skips cleanly with a stated reason on a
 CPU-only build or a machine without a usable device, so it stays green on the
 WSL/GCC clone and on the default CPU-only Windows build, and only exercises the
-device paths on the FME_ENABLE_CUDA=ON build (GPU tests skip cleanly, never fail
+device paths on the PG_ENABLE_CUDA=ON build (GPU tests skip cleanly, never fail
 for absent hardware).
 
 requires_cuda() (conftest) is the one gate: build flag plus a usable-device
-probe. It migrates to fme.has_cuda() in 04-05 when that public runtime predicate
+probe. It migrates to pg.has_cuda() in 04-05 when that public runtime predicate
 lands; the gate's meaning (built AND device present) does not change.
 
 The -k area names (context, gemm, tolerance, roundtrip, residency, transfer,
@@ -26,7 +26,7 @@ import sys
 import numpy as np
 import pytest
 
-import fastmathext as fme
+import peregrine as pg
 from conftest import assert_matmul_close, requires_cuda
 
 _CUDA_OK, _CUDA_REASON = requires_cuda()
@@ -42,7 +42,7 @@ def test_has_cuda_runtime():
     # API-04 surface. has_cuda() composes the build flag AND a usable-device probe
     # (driver, count>0, cc>=7.0); on a CPU-only build it is simply False, never an
     # exception, so auto-mode code can branch on it without a try/except.
-    assert isinstance(fme.has_cuda(), bool)
+    assert isinstance(pg.has_cuda(), bool)
 
 
 @gpu
@@ -50,8 +50,8 @@ def test_has_cuda_true_on_cuda_build_with_device():
     # Under the gate, the build flag and a usable device are both present, so the
     # public runtime predicate must be True. The private build flag is also True
     # here, but the public surface is has_cuda(); has_cuda_build is gone (API-04).
-    assert fme.has_cuda() is True
-    assert not hasattr(fme, "has_cuda_build")
+    assert pg.has_cuda() is True
+    assert not hasattr(pg, "has_cuda_build")
 
 
 # A CUDA-built _core links cublas64_12.dll / cublasLt64_12.dll from the toolkit
@@ -73,12 +73,12 @@ _CHILD_DLL_SETUP = (
 # intermittently nonzero-exit or print a CUDA shutdown error here. Asserting the
 # device is present first guarantees the context actually built before exit.
 _CLEAN_SHUTDOWN_SCRIPT = _CHILD_DLL_SETUP + (
-    "import fastmathext as fme\n"
-    "info = fme._core._cuda_device_info()\n"
+    "import peregrine as pg\n"
+    "info = pg._core._cuda_device_info()\n"
     "assert info['present'] is True, info\n"
 )
 
-# CR-01 regression: an fme.Array bound to a MODULE GLOBAL is still alive when the
+# CR-01 regression: a pg.Array bound to a MODULE GLOBAL is still alive when the
 # interpreter finalizes, so its ~Array runs AFTER the atexit teardown destroyed
 # the context's transfer stream. Before the teardown-tolerant free_device, that
 # ~Array called cudaFreeAsync on the destroyed stream (a use-after-teardown the
@@ -87,10 +87,10 @@ _CLEAN_SHUTDOWN_SCRIPT = _CHILD_DLL_SETUP + (
 # and exits: a clean teardown returns 0 with no CUDA shutdown error and no abort.
 _GLOBAL_ARRAY_SHUTDOWN_SCRIPT = _CHILD_DLL_SETUP + (
     "import numpy as np\n"
-    "import fastmathext as fme\n"
+    "import peregrine as pg\n"
     # Module-global device array: deliberately never freed before exit so ~Array
     # runs at finalization, the dangerous post-teardown ordering.
-    "g = fme.to_device(np.ones((8, 8), dtype=np.float32))\n"
+    "g = pg.to_device(np.ones((8, 8), dtype=np.float32))\n"
     "assert g.shape == (8, 8), g.shape\n"
 )
 
@@ -103,7 +103,7 @@ def test_context_inits():
     # present, so the props must be populated; the dev box is sm_86 (cc 8.6) and
     # the contract floor is cc >= 7.0, so assert both the floor (the real
     # requirement) and the expected exact capability on this machine.
-    info = fme._core._cuda_device_info()
+    info = pg._core._cuda_device_info()
     assert info["present"] is True, info
     assert (info["cc_major"], info["cc_minor"]) >= (7, 0), info
     assert (info["cc_major"], info["cc_minor"]) == (8, 6), info
@@ -136,7 +136,7 @@ def test_context_clean_shutdown():
 
 @gpu
 def test_module_global_array_clean_shutdown():
-    # CR-01 regression fence: an fme.Array held in a module global is alive at
+    # CR-01 regression fence: a pg.Array held in a module global is alive at
     # interpreter finalization, so ~Array runs AFTER the atexit teardown
     # destroyed the transfer stream. The teardown-tolerant free_device must make
     # that a no-op (g_torn_down skips the free; the live path never throws), so
@@ -176,7 +176,7 @@ def test_gemm_f32_matches_numpy(n):
     k = n + 5
     a = rng.standard_normal((n, k)).astype(np.float32)
     b = rng.standard_normal((k, n)).astype(np.float32)
-    got = fme._core._gemm_host(a, b)
+    got = pg._core._gemm_host(a, b)
     assert got.dtype == np.float32
     assert_matmul_close(got, a @ b, a, b)
 
@@ -192,7 +192,7 @@ def test_gemm_f64_matches_numpy(n):
     k = n + 5
     a = rng.standard_normal((n, k))
     b = rng.standard_normal((k, n))
-    got = fme._core._gemm_host(a, b)
+    got = pg._core._gemm_host(a, b)
     assert got.dtype == np.float64
     assert_matmul_close(got, a @ b, a, b)
 
@@ -207,19 +207,19 @@ def test_gemm_zero_dims():
     for dtype in (np.float32, np.float64):
         a = np.zeros((4, 0), dtype=dtype)
         b = np.zeros((0, 3), dtype=dtype)
-        got = fme._core._gemm_host(a, b)
+        got = pg._core._gemm_host(a, b)
         assert got.shape == (4, 3)
         assert got.dtype == dtype
         np.testing.assert_array_equal(got, np.zeros((4, 3), dtype=dtype))
 
         a0 = np.zeros((0, 5), dtype=dtype)
         b0 = (np.arange(15, dtype=dtype)).reshape(5, 3)
-        got0 = fme._core._gemm_host(a0, b0)
+        got0 = pg._core._gemm_host(a0, b0)
         assert got0.shape == (0, 3)
         assert got0.dtype == dtype
 
 
-# TF32 is opt-in (FME_ALLOW_TF32=1) and read ONCE at context init, so it must be
+# TF32 is opt-in (PEREGRINE_ALLOW_TF32=1) and read ONCE at context init, so it must be
 # set in the environment before import -- the subprocess + full-env-copy idiom
 # from test_fallback/test_threads. The child reproduces the same seeded inputs,
 # runs the f32 device GEMM under TF32, and writes both its result and the f64
@@ -229,12 +229,12 @@ def test_gemm_zero_dims():
 _TF32_SCRIPT = _CHILD_DLL_SETUP + (
     "import sys\n"
     "import numpy as np\n"
-    "import fastmathext as fme\n"
+    "import peregrine as pg\n"
     "rng = np.random.default_rng(515)\n"
     "k = 517\n"
     "a = rng.standard_normal((512, k)).astype(np.float32)\n"
     "b = rng.standard_normal((k, 512)).astype(np.float32)\n"
-    "got = fme._core._gemm_host(a, b)\n"
+    "got = pg._core._gemm_host(a, b)\n"
     "np.save(sys.argv[1], got)\n"
 )
 
@@ -242,9 +242,9 @@ _TF32_SCRIPT = _CHILD_DLL_SETUP + (
 @gpu
 def test_tf32_off_by_default_matches_contract(tmp_path):
     # GPU-02 math-mode policy. Two halves:
-    #   1. The default path (no FME_ALLOW_TF32) is DEFAULT_MATH and passes the
+    #   1. The default path (no PEREGRINE_ALLOW_TF32) is DEFAULT_MATH and passes the
     #      standard f32 tolerance contract.
-    #   2. A subprocess with FME_ALLOW_TF32=1 takes the TF32 path. TF32's 10-bit
+    #   2. A subprocess with PEREGRINE_ALLOW_TF32=1 takes the TF32 path. TF32's 10-bit
     #      mantissa is ~830x looser (measured), so its raw abs error against the
     #      f64 truth must MATERIALLY exceed the DEFAULT_MATH error. That proves
     #      TF32 is actually engaged and is why it is off by default. The TF32
@@ -257,12 +257,12 @@ def test_tf32_off_by_default_matches_contract(tmp_path):
     b = rng.standard_normal((k, 512)).astype(np.float32)
 
     # Half 1: the in-process default build is DEFAULT_MATH; passes the contract.
-    got_default = fme._core._gemm_host(a, b)
+    got_default = pg._core._gemm_host(a, b)
     assert_matmul_close(got_default, a @ b, a, b)
 
     # Half 2: the TF32 child reruns the identical seeded GEMM with the flag set.
     out_path = tmp_path / "got_tf32.npy"
-    env = dict(os.environ, FME_ALLOW_TF32="1")
+    env = dict(os.environ, PEREGRINE_ALLOW_TF32="1")
     p = subprocess.run(
         [sys.executable, "-c", _TF32_SCRIPT, str(out_path)],
         env=env,
@@ -281,14 +281,14 @@ def test_tf32_off_by_default_matches_contract(tmp_path):
     # pinning the exact ratio (which drifts with clocks and data).
     assert err_tf32 > 10.0 * err_default, (
         f"tf32 error {err_tf32:.3e} not materially looser than default "
-        f"{err_default:.3e}; the FME_ALLOW_TF32 path may not be engaged"
+        f"{err_default:.3e}; the PEREGRINE_ALLOW_TF32 path may not be engaged"
     )
 
 
 @gpu
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_to_from_device_roundtrip(dtype):
-    # GPU-03 / GPU-04: to_device copies a host array up to an fme.Array, from_device
+    # GPU-03 / GPU-04: to_device copies a host array up to a pg.Array, from_device
     # copies it back (D2H on the transfer stream, synced before the return). A pure
     # copy must round-trip byte-IDENTICAL: this is a transfer, not a computation, so
     # exact equality is the right assertion (assert_matmul_close is for the kernel
@@ -296,27 +296,27 @@ def test_to_from_device_roundtrip(dtype):
     # memory; the f64-never-auto-routes rule is a dispatch concern, 04-05). Rectangular
     # so a row/col swap in the shape plumbing would surface.
     a = np.random.default_rng(20260613).standard_normal((7, 5)).astype(dtype)
-    x = fme._core.to_device(a)
+    x = pg._core.to_device(a)
     assert x.shape == a.shape
     assert x.dtype == np.dtype(dtype)
-    b = fme._core.from_device(x)
+    b = pg._core.from_device(x)
     assert np.array_equal(a, b), "round-trip must preserve bytes exactly"
 
 
 @gpu
 def test_from_device_returns_ndarray():
-    # GPU-03: from_device returns a numpy.ndarray, not an fme.Array -- the
+    # GPU-03: from_device returns a numpy.ndarray, not a pg.Array -- the
     # residency-out type (ndarray in -> ndarray out). The device handle does not
     # leak back out of from_device.
     a = np.ones((3, 4), dtype=np.float32)
-    b = fme._core.from_device(fme._core.to_device(a))
+    b = pg._core.from_device(pg._core.to_device(a))
     assert isinstance(b, np.ndarray)
-    assert not isinstance(b, type(fme._core.to_device(a)))
+    assert not isinstance(b, type(pg._core.to_device(a)))
 
 
 @gpu
 def test_dlpack_device_is_cuda():
-    # GPU-03: the fme.Array dlpack export reports a CUDA device. __dlpack_device__
+    # GPU-03: the pg.Array dlpack export reports a CUDA device. __dlpack_device__
     # returns (device_type, device_id); the DLPack enum for CUDA is kDLCUDA == 2.
     # __dlpack__ produces a dlpack-protocol object whose capsule is a "dltensor" on
     # that CUDA device. We assert the device tag and the capsule, NOT a
@@ -324,7 +324,7 @@ def test_dlpack_device_is_cuda():
     # dltensor (RESEARCH line 271), and a device-aware consumer (cupy/torch) is not
     # required to be installed.
     a = np.ones((4, 4), dtype=np.float32)
-    x = fme._core.to_device(a)
+    x = pg._core.to_device(a)
 
     dev_type, dev_id = x.__dlpack_device__()
     assert dev_type == 2, f"expected kDLCUDA (2), got {dev_type}"
@@ -343,7 +343,7 @@ def test_dlpack_device_is_cuda():
 def test_device_matmul_roundtrip():
     # GPU-03 (the REQUIRED device-resident entry): matmul(Array, Array) -> Array,
     # device-in/device-out. to_device both f32 operands, run the device GEMM on the
-    # device buffers (no host staging), assert the result is an fme.Array, then
+    # device buffers (no host staging), assert the result is a pg.Array, then
     # from_device it and compare to NumPy through assert_matmul_close (the single
     # toleranced path; f32 is judged against the f64 ground truth exactly like the
     # CPU suite). This proves gemm (04-03) + transfers + the device matmul entry
@@ -354,13 +354,13 @@ def test_device_matmul_roundtrip():
     a = rng.standard_normal((33, 17)).astype(np.float32)
     b = rng.standard_normal((17, 29)).astype(np.float32)
 
-    xa = fme._core.to_device(a)
-    xb = fme._core.to_device(b)
-    xc = fme._core.matmul(xa, xb)
-    assert type(xc) is type(xa), "device matmul must return an fme.Array"
+    xa = pg._core.to_device(a)
+    xb = pg._core.to_device(b)
+    xc = pg._core.matmul(xa, xb)
+    assert type(xc) is type(xa), "device matmul must return a pg.Array"
     assert xc.shape == (33, 29)
 
-    got = fme._core.from_device(xc)
+    got = pg._core.from_device(xc)
     assert isinstance(got, np.ndarray)
     assert_matmul_close(got, a @ b, a, b)
 
@@ -386,9 +386,9 @@ def test_device_matmul_transfer_ordering(n):
     a = rng.standard_normal((n, k)).astype(np.float32)
     b = rng.standard_normal((k, n)).astype(np.float32)
 
-    xc = fme._core.matmul(fme._core.to_device(a), fme._core.to_device(b))
+    xc = pg._core.matmul(pg._core.to_device(a), pg._core.to_device(b))
     assert xc.shape == (n, n)
-    assert_matmul_close(fme._core.from_device(xc), a @ b, a, b)
+    assert_matmul_close(pg._core.from_device(xc), a @ b, a, b)
 
 
 @gpu
@@ -400,27 +400,27 @@ def test_mixed_residency_raises():
     rng = np.random.default_rng(7)
     a = rng.standard_normal((6, 4)).astype(np.float32)
     b = rng.standard_normal((4, 5)).astype(np.float32)
-    xa = fme.to_device(a)
+    xa = pg.to_device(a)
     with pytest.raises(TypeError, match="one input is on cuda and one on cpu"):
-        fme.matmul(xa, b)
+        pg.matmul(xa, b)
     with pytest.raises(TypeError, match="one input is on cuda and one on cpu"):
-        fme.matmul(a, fme.to_device(b))
+        pg.matmul(a, pg.to_device(b))
 
 
 @gpu
 def test_f32_device_routes_to_gpu():
     # GPU-05: two f32 device-resident operands route to the GPU. The return type
-    # is the proof the device path was taken (residency-out: fme.Array in ->
-    # fme.Array out). from_device of the result then matches NumPy through the
+    # is the proof the device path was taken (residency-out: pg.Array in ->
+    # pg.Array out). from_device of the result then matches NumPy through the
     # single toleranced path. Rectangular k so a wrong leading dimension surfaces.
     rng = np.random.default_rng(20260615)
     k = 37
     a = rng.standard_normal((29, k)).astype(np.float32)
     b = rng.standard_normal((k, 41)).astype(np.float32)
-    xc = fme.matmul(fme.to_device(a), fme.to_device(b))
-    assert isinstance(xc, fme.Array), "f32 device-resident matmul must return an fme.Array"
+    xc = pg.matmul(pg.to_device(a), pg.to_device(b))
+    assert isinstance(xc, pg.Array), "f32 device-resident matmul must return a pg.Array"
     assert xc.shape == (29, 41)
-    assert_matmul_close(fme.from_device(xc), a @ b, a, b)
+    assert_matmul_close(pg.from_device(xc), a @ b, a, b)
 
 
 @gpu
@@ -437,19 +437,19 @@ def test_f64_never_auto_routes():
     assert a.dtype == np.float64 and b.dtype == np.float64
 
     # Host f64: ndarray out, CPU path. The return TYPE is the assertion that no
-    # auto-route to the GPU happened -- a host f64 never becomes an fme.Array.
-    got = fme.matmul(a, b)
+    # auto-route to the GPU happened -- a host f64 never becomes a pg.Array.
+    got = pg.matmul(a, b)
     assert isinstance(got, np.ndarray)
-    assert not isinstance(got, fme.Array)
+    assert not isinstance(got, pg.Array)
     assert got.dtype == np.float64
     assert_matmul_close(got, a @ b, a, b)
 
     # Forced device-resident f64: allowed, computes correctly (slowly). Returns an
-    # fme.Array, proving forced f64 reaches the device path; the exclusion is only
+    # pg.Array, proving forced f64 reaches the device path; the exclusion is only
     # on AUTO-routing a host f64, not on a user's explicit device placement.
-    xc = fme.matmul(fme.to_device(a), fme.to_device(b))
-    assert isinstance(xc, fme.Array)
-    assert_matmul_close(fme.from_device(xc), a @ b, a, b)
+    xc = pg.matmul(pg.to_device(a), pg.to_device(b))
+    assert isinstance(xc, pg.Array)
+    assert_matmul_close(pg.from_device(xc), a @ b, a, b)
 
 
 # Forced-OOM runs in a subprocess so the once-only warn sentinel and the large
@@ -492,7 +492,7 @@ def test_f64_never_auto_routes():
 _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     "import subprocess, sys, warnings\n"
     "import numpy as np\n"
-    "import fastmathext as fme\n"
+    "import peregrine as pg\n"
     # SQUARE output (N, N) sized to gap+256MB = ~1GB: far past the 64MB pre-flight
     # margin once the reserve below leaves the residual free under this size, so the
     # OUTPUT alloc reliably throws cudaErrorMemoryAllocation, while N ~ 16384 keeps
@@ -510,8 +510,8 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     "rng = np.random.default_rng(909)\n"
     "a = rng.standard_normal((N, 1)).astype(np.float32)\n"
     "b = rng.standard_normal((1, N)).astype(np.float32)\n"
-    "xa = fme.to_device(a)\n"
-    "xb = fme.to_device(b)\n"
+    "xa = pg.to_device(a)\n"
+    "xb = pg.to_device(b)\n"
     # Adaptive reserve: do NOT trust a single nvidia-smi free read. The mempool is
     # created with ReleaseThreshold=UINT64_MAX (context.cu), so after prior GPU
     # tests cudaFreeAsync returns freed buffers to the POOL, not the OS, and
@@ -535,7 +535,7 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     "reserve = []\n"
     "seed_bytes = max(0, (free_mib - gap_mib)) * 1024 * 1024\n"
     "sside = int((seed_bytes // 4) ** 0.5)\n"
-    "reserve.append(fme.to_device(np.empty((sside, sside), dtype=np.float32)))\n"
+    "reserve.append(pg.to_device(np.empty((sside, sside), dtype=np.float32)))\n"
     # Probe at the output byte size. Each successful probe is retained as reserve
     # (occupying the residual free), so the loop monotonically drives the residual
     # free below the output request. Bounded iterations so a child can never wedge
@@ -543,7 +543,7 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     # times over, and on this hardware the first probe after the seed already fails.
     "for _ in range(64):\n"
     "    try:\n"
-    "        probe = fme.to_device(np.empty((N, N), dtype=np.float32))\n"
+    "        probe = pg.to_device(np.empty((N, N), dtype=np.float32))\n"
     "    except RuntimeError:\n"
     # A probe alloc threw: residual free is now below the output request, so the
     # output alloc below will OOM. Stop growing the reserve.
@@ -551,10 +551,10 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     "    reserve.append(probe)\n"
     "with warnings.catch_warnings(record=True) as caught:\n"
     "    warnings.simplefilter('always')\n"
-    "    got = fme.matmul(xa, xb)\n"
-    # The fallback ran on the CPU: the result is a host ndarray, not an fme.Array.
+    "    got = pg.matmul(xa, xb)\n"
+    # The fallback ran on the CPU: the result is a host ndarray, not a pg.Array.
     "assert isinstance(got, np.ndarray), type(got)\n"
-    "assert not isinstance(got, fme.Array)\n"
+    "assert not isinstance(got, pg.Array)\n"
     # Exactly one warning, carrying the verbatim fallback token with the cuda
     # error name (cudaErrorMemoryAllocation) inside the parentheses.
     "msgs = [str(w.message) for w in caught]\n"
