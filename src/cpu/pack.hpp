@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // Packing copies the live MC x KC block of A and the KC x NC block of B into
 // contiguous 64-byte-aligned panels so the microkernel reads both with stride 1
@@ -22,4 +22,4 @@ extern template void pack_a<double>(double*, const double*, int64_t, int64_t, in
 extern template void pack_b<float>(float*, const float*, int64_t, int64_t, int64_t, int64_t, int64_t);
 extern template void pack_b<double>(double*, const double*, int64_t, int64_t, int64_t, int64_t, int64_t);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
