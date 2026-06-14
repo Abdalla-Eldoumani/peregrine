@@ -5,11 +5,11 @@
 
 #include <cstdint>
 
-namespace fme::cuda {
+namespace pg::cuda {
 namespace {
 
 // RAII owners for the device scratch and cudaEvents these timing/staging
-// entries allocate. The bodies are wrapped in FME_*_CHECK calls that throw on
+// entries allocate. The bodies are wrapped in PG_*_CHECK calls that throw on
 // failure (an OOM mid-allocation, an async launch error surfaced by a sync), and
 // without an owner a throw unwinds past the trailing cudaFreeAsync/cudaEventDestroy
 // and leaks the buffer into the context mempool (release threshold UINT64_MAX, so
@@ -83,7 +83,7 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
         return;
     }
     if (k == 0) {
-        FME_CUDA_CHECK(cudaMemsetAsync(
+        PG_CUDA_CHECK(cudaMemsetAsync(
             c, 0, static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T),
             context().compute));
         return;
@@ -91,7 +91,7 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 
     // Borrow the singleton's handle and stream: no per-call cublasCreate. The
     // handle is already bound to the compute stream and
-    // already carries the math mode decided once at init from FME_ALLOW_TF32
+    // already carries the math mode decided once at init from PEREGRINE_ALLOW_TF32
     // (DEFAULT_MATH off by default). We do NOT call cublasSetMathMode per GEMM:
     // the mode is fixed for the session so it cannot drift into a result that
     // violates the tolerance contract. TF32's 10-bit mantissa measured ~830x
@@ -107,7 +107,7 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // dimension ever exceeds int range it is a tiling bug, not a silent
     // out-of-bounds device access.
     if (m > INT32_MAX || k > INT32_MAX || n > INT32_MAX) {
-        throw ::fme::cuda_error(
+        throw ::pg::cuda_error(
             "cuda gemm: a dimension exceeds the int32 cuBLAS limit; "
             "huge-GEMM tiling is not implemented");
     }
@@ -126,7 +126,7 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // stride = K, and C is (m x n) so ldc = N.
     const T alpha = static_cast<T>(1);
     const T beta = static_cast<T>(0);
-    FME_CUBLAS_CHECK(cublas_gemm_nn(ctx.cublas, ni, mi, ki, &alpha,
+    PG_CUBLAS_CHECK(cublas_gemm_nn(ctx.cublas, ni, mi, ki, &alpha,
                                     /*A=*/b, /*lda=*/ni,
                                     /*B=*/a, /*ldb=*/ki, &beta,
                                     /*C=*/c, /*ldc=*/ni));
@@ -163,21 +163,21 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     void* da_raw = nullptr;
     void* db_raw = nullptr;
     void* dc_raw = nullptr;
-    FME_CUDA_CHECK(cudaMallocAsync(&da_raw, a_bytes, stream));
+    PG_CUDA_CHECK(cudaMallocAsync(&da_raw, a_bytes, stream));
     device_buf da{da_raw, stream};
-    FME_CUDA_CHECK(cudaMallocAsync(&db_raw, b_bytes, stream));
+    PG_CUDA_CHECK(cudaMallocAsync(&db_raw, b_bytes, stream));
     device_buf db{db_raw, stream};
-    FME_CUDA_CHECK(cudaMallocAsync(&dc_raw, c_bytes, stream));
+    PG_CUDA_CHECK(cudaMallocAsync(&dc_raw, c_bytes, stream));
     device_buf dc{dc_raw, stream};
     T* da_p = static_cast<T*>(da.ptr);
     T* db_p = static_cast<T*>(db.ptr);
     T* dc_p = static_cast<T*>(dc.ptr);
 
     if (a_bytes > 0) {
-        FME_CUDA_CHECK(cudaMemcpyAsync(da_p, a, a_bytes, cudaMemcpyHostToDevice, stream));
+        PG_CUDA_CHECK(cudaMemcpyAsync(da_p, a, a_bytes, cudaMemcpyHostToDevice, stream));
     }
     if (b_bytes > 0) {
-        FME_CUDA_CHECK(cudaMemcpyAsync(db_p, b, b_bytes, cudaMemcpyHostToDevice, stream));
+        PG_CUDA_CHECK(cudaMemcpyAsync(db_p, b, b_bytes, cudaMemcpyHostToDevice, stream));
     }
 
     gemm<T>(da_p, db_p, dc_p, m, k, n);
@@ -189,7 +189,7 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // host buffer would be needed to make D2H genuinely async, which this
     // correctness entry does not bother with -- the simple pageable copy is the
     // right tradeoff here.
-    FME_CUDA_CHECK(cudaMemcpyAsync(c, dc_p, c_bytes, cudaMemcpyDeviceToHost, stream));
+    PG_CUDA_CHECK(cudaMemcpyAsync(c, dc_p, c_bytes, cudaMemcpyDeviceToHost, stream));
 
     // The D2H copy feeds the caller's host buffer, so sync before returning: the
     // "every D2H feeding a host-visible return syncs first" rule. The device_buf
@@ -206,7 +206,7 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // (sync_transfer before the GEMM, sync_compute after) -- otherwise it silently
     // becomes a use-before-ready race. Do not move the staging to another stream
     // without adding those fences.
-    FME_CUDA_CHECK(cudaStreamSynchronize(stream));
+    PG_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 template void gemm_host<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
@@ -221,10 +221,10 @@ float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
     // has no work to time and would make the per-rep cost ill-defined; reject it
     // rather than return a fake zero.
     if (reps <= 0) {
-        throw ::fme::cuda_error("cuda time_matmul: reps must be positive");
+        throw ::pg::cuda_error("cuda time_matmul: reps must be positive");
     }
     if (m == 0 || n == 0) {
-        throw ::fme::cuda_error(
+        throw ::pg::cuda_error(
             "cuda time_matmul: empty output has no work to time");
     }
 
@@ -241,14 +241,14 @@ float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
     // unwind path: a throw from the GEMM, a record, a sync, or the elapsed-time
     // query would otherwise leak the buffer into the mempool and leak the events.
     void* dc_raw = nullptr;
-    FME_CUDA_CHECK(cudaMallocAsync(&dc_raw, c_bytes, stream));
+    PG_CUDA_CHECK(cudaMallocAsync(&dc_raw, c_bytes, stream));
     device_buf dc{dc_raw, stream};
     T* dc_p = static_cast<T*>(dc.ptr);
 
     cuda_event e0;
     cuda_event e1;
-    FME_CUDA_CHECK(cudaEventCreate(&e0.ev));
-    FME_CUDA_CHECK(cudaEventCreate(&e1.ev));
+    PG_CUDA_CHECK(cudaEventCreate(&e0.ev));
+    PG_CUDA_CHECK(cudaEventCreate(&e1.ev));
 
     // Warm the clocks: the first GEMM on a cold GPU pays clock ramp and any lazy
     // cuBLAS init, so timing it would overstate the cost (warm before timing,
@@ -262,16 +262,16 @@ float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
     // quiet stream; then the timed region is exactly `reps` GEMMs between the two
     // events on the same stream. cudaEventElapsedTime measures device time between
     // them, the only correct way to time an async launch.
-    FME_CUDA_CHECK(cudaStreamSynchronize(stream));
-    FME_CUDA_CHECK(cudaEventRecord(e0.ev, stream));
+    PG_CUDA_CHECK(cudaStreamSynchronize(stream));
+    PG_CUDA_CHECK(cudaEventRecord(e0.ev, stream));
     for (int i = 0; i < reps; ++i) {
         gemm<T>(a, b, dc_p, m, k, n);
     }
-    FME_CUDA_CHECK(cudaEventRecord(e1.ev, stream));
-    FME_CUDA_CHECK(cudaEventSynchronize(e1.ev));
+    PG_CUDA_CHECK(cudaEventRecord(e1.ev, stream));
+    PG_CUDA_CHECK(cudaEventSynchronize(e1.ev));
 
     float ms = 0.0f;
-    FME_CUDA_CHECK(cudaEventElapsedTime(&ms, e0.ev, e1.ev));
+    PG_CUDA_CHECK(cudaEventElapsedTime(&ms, e0.ev, e1.ev));
 
     // dc, e0, e1 are released by their owners on return. ms is read into the
     // return value before any destructor runs.
@@ -281,4 +281,4 @@ float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
 template float time_matmul<float>(const float*, const float*, int64_t, int64_t, int64_t, int, int);
 template float time_matmul<double>(const double*, const double*, int64_t, int64_t, int64_t, int, int);
 
-} // namespace fme::cuda
+} // namespace pg::cuda
