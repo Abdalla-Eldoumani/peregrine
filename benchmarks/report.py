@@ -38,9 +38,9 @@ import os
 
 # The committed results directory. results/local/ is gitignored scratch and is
 # never read here: every file this module opens must survive a fresh clone, or
-# the README number it feeds would be an orphan (rule 17). The GPU-08 row in
-# particular reads results/zpicy_gpu_matrix.json (the committed 07-02 output),
-# NOT results/local/zpicy_gpu08.json (absent on a clone).
+# the README number it feeds would be an orphan. The device-resident GPU row in
+# particular reads results/refbox_gpu_matrix.json (the committed output), NOT
+# results/local/gpu08.json (absent on a clone).
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 
 
@@ -52,7 +52,7 @@ def _case_is_verified(case: dict) -> bool:
     # rule 11 acceptance, accommodating the two committed CPU-case shapes:
     #   1. The bench_matmul / gpu / fused / scaling shape carries an explicit
     #      per-case ``verified`` boolean (True to publish).
-    #   2. The requirement-analysis shape (cpu02_f64_zpicy / cpu06_f32_zpicy)
+    #   2. The paired-timing shape (cpu02_f64_refbox / cpu06_f32_refbox)
     #      records each case as a paired ``fastmathext`` + ``numpy`` timing dict
     #      with NO per-case ``verified`` flag; the per-rep verification ran
     #      against assert_matmul_close (the bench writes no unverified series: no
@@ -80,8 +80,8 @@ def load_series(path: str) -> dict:
 
     Two committed CPU-case shapes exist (see ``_case_is_verified``): the
     bench_matmul / gpu / fused / scaling shape with an explicit per-case
-    ``verified`` boolean, and the requirement-analysis shape
-    (cpu02_f64_zpicy / cpu06_f32_zpicy) whose paired ``fastmathext`` + ``numpy``
+    ``verified`` boolean, and the paired-timing shape
+    (cpu02_f64_refbox / cpu06_f32_refbox) whose paired ``fastmathext`` + ``numpy``
     timing case is verified-per-rep by construction with no per-case flag. Both
     are accepted; an EXPLICIT ``verified: False`` is rejected in either shape.
 
@@ -137,7 +137,7 @@ def render_matmul_f64_table(data: dict, sweep: dict) -> str:
     ``cases`` entry (the floor, not the median: AV noise inflates the median).
 
     The headline n=2048 parity figure comes from ``sweep`` -- the fresh 07-02
-    matmul f64 sweep (zpicy_matmul_f64.json), which carries full per-rep timing
+    matmul f64 sweep (refbox_matmul_f64.json), which carries full per-rep timing
     behind every row (``fastmathext.min_s`` / ``numpy.min_s`` over 30 reps,
     ``verified: true``). Both the floor ratio (``speedup_floor``, the noise-robust
     headline) and the median ratio (``speedup_vs_numpy``) are recomputed from that
@@ -217,8 +217,8 @@ def _gpu08_ratio(data: dict) -> float:
 
     Reads ``gpu_cases[i].ratio_vs_numpy_cpu_f32`` for the largest warm
     without-transfer case (n=2048, the GPU-08 measurement size), from the
-    COMMITTED results/zpicy_gpu_matrix.json (07-02 output). Not a literal, and
-    not results/local/zpicy_gpu08.json (gitignored, absent on a fresh clone):
+    COMMITTED results/refbox_gpu_matrix.json. Not a literal, and not
+    results/local/gpu08.json (gitignored, absent on a fresh clone):
     reading the local file would orphan this number on a clone.
     """
     warm = [
@@ -355,14 +355,14 @@ def render_report() -> str:
     load_series, so a verified-false or manifest-less file fails here before any
     number is emitted.
     """
-    cpu02 = load_series(_results_path("cpu02_f64_zpicy.json"))
-    matmul_f64 = load_series(_results_path("zpicy_matmul_f64.json"))
-    cpu06 = load_series(_results_path("cpu06_f32_zpicy.json"))
-    scaling = load_series(_results_path("tuning", "scaling_zpicy.json"))
-    gpu_matrix = load_series(_results_path("zpicy_gpu_matrix.json"))
-    fuse_cpu = load_series(_results_path("fuse05_cpu_f32_zpicy.json"))
-    fuse_gpu = load_series(_results_path("fuse05_gpu_f32_zpicy.json"))
-    sweep = load_series(_results_path("tuning", "sweep_zpicy.json"))
+    cpu02 = load_series(_results_path("cpu02_f64_refbox.json"))
+    matmul_f64 = load_series(_results_path("refbox_matmul_f64.json"))
+    cpu06 = load_series(_results_path("cpu06_f32_refbox.json"))
+    scaling = load_series(_results_path("tuning", "scaling_refbox.json"))
+    gpu_matrix = load_series(_results_path("refbox_gpu_matrix.json"))
+    fuse_cpu = load_series(_results_path("fuse05_cpu_f32_refbox.json"))
+    fuse_gpu = load_series(_results_path("fuse05_gpu_f32_refbox.json"))
+    sweep = load_series(_results_path("tuning", "sweep_refbox.json"))
 
     sections = [
         "## float64 matmul (CPU)",
