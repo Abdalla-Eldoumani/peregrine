@@ -98,14 +98,19 @@ def test_report_render_round_trip():
     # from it, so a number that drifted from its source fails.
     report_text = report.render_report()
 
-    # CPU-02 floor 0.79 from cpu02_analysis.high_effort_best_floor.n2048.ratio
-    # (the high-effort best floor, NOT the lower cases floor 0.678).
-    cpu02 = json.load(
-        open(os.path.join(report.RESULTS_DIR, "cpu02_f64_zpicy.json"))
+    # CPU-02 n=2048 parity from the FRESH per-rep matmul f64 sweep
+    # (zpicy_matmul_f64.json), which carries full per-rep timing behind every
+    # row. Both the floor (speedup_floor, the noise-robust headline) and the
+    # median (speedup_vs_numpy) are regenerated from that per-rep data, not from
+    # the hand-entered cpu02_analysis summary scalar.
+    matmul_f64 = json.load(
+        open(os.path.join(report.RESULTS_DIR, "zpicy_matmul_f64.json"))
     )
-    best = cpu02["cpu02_analysis"]["high_effort_best_floor"]["n2048"]["ratio"]
-    assert f"{best:.2f}" in report_text
-    assert best == 0.79  # the documented CPU-02 high-effort best floor
+    n2048 = next(c for c in matmul_f64["cases"] if c["n"] == 2048)
+    assert f"{n2048['speedup_floor']:.2f}" in report_text
+    assert f"{n2048['speedup_vs_numpy']:.2f}" in report_text
+    # The honest story holds: the floor is below 0.85 (does not beat OpenBLAS).
+    assert n2048["speedup_floor"] < 0.85
 
     # CPU-05 2.87x from tuning/scaling_zpicy.json ratio_6_vs_1_floor.
     scaling = json.load(
@@ -192,7 +197,13 @@ def test_report_no_literal_headline_numbers():
     # be a hand-copied number that can drift. Scan the source for the exact
     # headline tokens.
     source = _read_text(os.path.join(_BENCH_DIR, "report.py"))
-    forbidden = ["0.79", "2.87", "3.236", "3.24", "71.37", "71.4", "22.83", "23.54"]
+    # The CPU-02 parity tokens (0.58 floor, 0.74 median) come from the fresh
+    # per-rep sweep, never a literal; the retired hand-entered 0.79 must not
+    # reappear either.
+    forbidden = [
+        "0.58", "0.74", "0.79", "2.87", "3.236", "3.24", "71.37", "71.4",
+        "22.83", "23.54",
+    ]
     for token in forbidden:
         assert token not in source, f"headline literal {token} in report.py"
 
@@ -374,8 +385,8 @@ def test_readme_round_trip_closure():
     report_text = report.render_report()
     readme_text = _read_text(_README)
 
-    cpu02 = json.load(
-        open(os.path.join(report.RESULTS_DIR, "cpu02_f64_zpicy.json"))
+    matmul_f64 = json.load(
+        open(os.path.join(report.RESULTS_DIR, "zpicy_matmul_f64.json"))
     )
     scaling = json.load(
         open(os.path.join(report.RESULTS_DIR, "tuning", "scaling_zpicy.json"))
@@ -393,8 +404,10 @@ def test_readme_round_trip_closure():
         open(os.path.join(report.RESULTS_DIR, "fuse05_gpu_f32_zpicy.json"))
     )
 
+    n2048 = next(c for c in matmul_f64["cases"] if c["n"] == 2048)
     headline = [
-        f"{cpu02['cpu02_analysis']['high_effort_best_floor']['n2048']['ratio']:.2f}",
+        f"{n2048['speedup_floor']:.2f}",
+        f"{n2048['speedup_vs_numpy']:.2f}",
         f"{scaling['ratio_6_vs_1_floor']:.2f}",
         f"{report._gpu08_ratio(gpu):.2f}",
         f"{fuse_cpu['cpu_cases'][0]['speedup_floor']:.2f}",
