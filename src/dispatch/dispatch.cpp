@@ -6,8 +6,8 @@
 #include "cpu/reduce.hpp"
 #include "cpu/transpose.hpp"
 
-#if defined(FME_HAS_CUDA)
-namespace fme::cuda {
+#if defined(PG_HAS_CUDA)
+namespace pg::cuda {
 // Forward-declared, not #included: gemm_cublas.cuh is itself CUDA-free, but the
 // forward-declare matches the binding discipline and keeps this TU from depending
 // on any src/cuda header path. The explicit float/double instantiations in
@@ -26,14 +26,14 @@ template <typename T>
 void fused_fma3(const T* x, const T* y, const T* z, T* out, int64_t n);
 template <typename T>
 void fused_scaled_relu(const T* x, T* out, int64_t n, T scale);
-} // namespace fme::cuda
+} // namespace pg::cuda
 #endif
 
-namespace fme::dispatch {
+namespace pg::dispatch {
 
 template <typename T>
 void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
-    // The features are memoized at import and already fold in FME_DISABLE_AVX2,
+    // The features are memoized at import and already fold in PEREGRINE_DISABLE_AVX2,
     // so a forced fallback routes here exactly as a CPU without AVX2 would. The
     // packed kernel owns its own small-matrix branch, so this stays a pure
     // features-in/path-out decision with no side effects. gemm_blis and
@@ -50,7 +50,7 @@ void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 template void matmul<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 template void matmul<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 
-#if defined(FME_HAS_CUDA)
+#if defined(PG_HAS_CUDA)
 template <typename T>
 void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // Device-in/device-out: a, b, c are device pointers, so this is a pure
@@ -73,7 +73,7 @@ template void matmul_device<double>(const double*, const double*, double*, int64
 #endif
 
 // Fused elementwise host entries. Same branch as matmul (the features are
-// memoized at import and fold in FME_DISABLE_AVX2, so a forced fallback routes
+// memoized at import and fold in PEREGRINE_DISABLE_AVX2, so a forced fallback routes
 // here exactly as a CPU without AVX2 would): the AVX2 body when the CPU has
 // avx2+fma, the scalar fallback otherwise. The AVX2 and naive bodies share each
 // op's signature, so the call crosses the TU boundary with no adapter and no
@@ -117,14 +117,14 @@ template void fused_fma3<double>(const double*, const double*, const double*, do
 template void fused_scaled_relu<float>(const float*, float*, int64_t, float);
 template void fused_scaled_relu<double>(const double*, double*, int64_t, double);
 
-#if defined(FME_HAS_CUDA)
+#if defined(PG_HAS_CUDA)
 // Device-resident fused entries: x, y, z, out are device pointers, so each is a
 // pure forward to the hand-written grid-stride kernel on the compute stream -- no
 // host staging, no sync (the binding owns the output buffer's lifetime; the
 // output alloc and the kernel are both on the compute stream, so the single-stream
 // ordering needs no cross-stream fence, unlike matmul_device's transfer/compute
 // split). Both f32 and f64 forward through: the fused device path is reached only
-// when operands are already an fme.Array (the user's explicit to_device), so there
+// when operands are already a pg.Array (the user's explicit to_device), so there
 // is no f64-never-AUTO-routes exclusion to enforce here -- that is a GEMM-only rule
 // and fused never auto-stages a host array. Pure: no warnings/logging/fallback.
 template <typename T>
@@ -177,4 +177,4 @@ template double sum_all<double>(const double*, int64_t, int64_t);
 template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
 template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
 
-} // namespace fme::dispatch
+} // namespace pg::dispatch
