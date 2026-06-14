@@ -3,10 +3,10 @@
 #include <cmath>
 #include <immintrin.h>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // AVX2+FMA bodies for the three fused ops. This is the ONLY fused TU that may
-// include <immintrin.h>: it joins FME_AVX2_SOURCES in CMakeLists, so the arch
+// include <immintrin.h>: it joins PG_AVX2_SOURCES in CMakeLists, so the arch
 // flag (/arch:AVX2 on MSVC, -mavx2 -mfma on GCC) is applied here and nowhere a
 // fallback-linked TU can reach (the legacy import-crash isolation rule).
 //
@@ -211,4 +211,4 @@ template void fused_fma3<double>(const double*, const double*, const double*, do
 template void fused_scaled_relu<float>(const float*, float*, int64_t, float);
 template void fused_scaled_relu<double>(const double*, double*, int64_t, double);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
