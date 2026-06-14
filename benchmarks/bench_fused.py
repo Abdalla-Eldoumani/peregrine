@@ -155,7 +155,8 @@ def _cpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
                 "verdict). CV exceeds 5% by design and is a readout, not a gate."
             ),
             # True only because assert_fused_close passed above; the bench never
-            # publishes a verified-false series (benchmarks/CLAUDE.md).
+            # publishes a verified-false series (no result with verified false
+            # ever reaches a results file).
             "verified": True,
         }
         series.append(case)
