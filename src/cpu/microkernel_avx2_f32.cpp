@@ -6,12 +6,13 @@ namespace fme::cpu {
 
 // Two f32 register-tile shapes, measured at n=512 to pick the winner instead of
 // arguing from register counts (port pressure differs between MSVC and GCC
-// codegen, so the count is only a guess). CPU-03 decided 8x16: it beat 6x16 by
-// ~8% on the noise-robust best-min floor at n=512 on zpicy, overruling the
-// register-budget prediction that 8x16's full-file accumulator set would lose to
-// reload traffic. gemm_blis.cpp's MR_F32 constant carries the measured numbers
-// and selects 8x16 by default; 6x16 is kept here, reachable via FME_F32_SHAPE_6x16,
-// so the decision stays reproducible without resurrecting a deleted kernel.
+// codegen, so the count is only a guess). The measurement chose 8x16: it beat
+// 6x16 by ~8% on the noise-robust best-min floor at n=512 on the reference
+// machine, overruling the register-budget prediction that 8x16's full-file
+// accumulator set would lose to reload traffic. gemm_blis.cpp's MR_F32 constant
+// carries the measured numbers and selects 8x16 by default; 6x16 is kept here,
+// reachable via FME_F32_SHAPE_6x16, so the decision stays reproducible without
+// resurrecting a deleted kernel.
 // Both compute NR=16 columns as two __m256 of 8 floats each; they differ in MR.
 //
 // microkernel_f32_8x16 (MR=8): 8 rows x 2 column vectors = 16 ymm accumulators,
