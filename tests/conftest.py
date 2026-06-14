@@ -128,9 +128,9 @@ def _gpu_manifest():
     """(gpu, driver) for the manifest header, best-effort, never raises.
 
     Returns ("none", "n/a") when there is no build, no device, or no nvidia-smi,
-    so the header reads identically on CPU-only and WSL. The DESIGN_SYSTEM
-    manifest keys are gpu and driver; this is the test-run provenance line, not a
-    capability gate (requires_cuda is the gate). Gated on the build flag
+    so the header reads identically on CPU-only and WSL. The manifest keys are
+    gpu and driver; this is the test-run provenance line, not a capability gate
+    (requires_cuda is the gate). Gated on the build flag
     (_has_cuda_build), not has_cuda(): the provenance line should read "none" on a
     CPU-only build regardless of whether a GPU happens to be in the machine.
     """
