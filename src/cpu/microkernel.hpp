@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // One concrete microkernel per dtype and register-tile shape, not a template:
 // each definition lives in its own arch-flagged translation unit
@@ -21,4 +21,4 @@ void microkernel_f32_8x16(const float* ap, const float* bp, float* c, int64_t kc
 
 void microkernel_f32_6x16(const float* ap, const float* bp, float* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
