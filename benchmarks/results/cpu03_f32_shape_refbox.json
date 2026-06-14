@@ -34,7 +34,7 @@
     "processor": "Intel64 Family 6 Model 165 Stepping 2, GenuineIntel (i7-10750H, Comet Lake, 6C/12T, AVX2+FMA)",
     "python": "3.12.4",
     "numpy": "2.4.6",
-    "fastmathext": "3.0.0.dev0",
+    "peregrine": "3.0.0.dev0",
     "cpu_features": {"avx2": true, "fma": true, "avx512f": false},
     "blas": "openblas 0.3.31.188.0",
     "power_profile": "Ultimate Performance (GUID 0f443208-af27-43c1-8255-8606ca7d5000)",
