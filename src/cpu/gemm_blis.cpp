@@ -18,20 +18,19 @@ namespace fme::cpu {
 
 namespace {
 
-// Sweep winner on zpicy (i7-10750H, 6 threads pinned, Ultimate Performance):
+// Sweep winner on the reference machine (i7-10750H, 6 threads pinned):
 // MC=96 KC=320 NC=2048. Ap = 96x320x8 = 240KB fits the 256K L2; Bp panel =
 // 320x8x8 = 20KB sits in the 32K L1d; NC=2048 is a single jc block at every
 // bench size. Chosen on the noise-robust median-of-min GFLOP/s across a
-// randomized-order, cooldown-separated f64 n=1024 run (a background antivirus
-// on this machine inflated CV above the protocol gate, so the spike-resistant
+// randomized-order, cooldown-separated f64 n=1024 run (background CPU contention
+// on the machine inflated the coefficient of variation, so the spike-resistant
 // floor decided, not the raw median). Measured f64 n=1024 floors, GF/s:
 //   mc96 kc320 nc2048 = 55.4 (median floor) / 83.9 (best min) -- winner
 //   mc72 kc256 nc2048 = 52.3 / 80.0
 //   mc48 kc256 nc2048 = 47.9 / 92.5   mc48 kc192 nc2048 = 41.2 / 78.0
 //   mc72 kc256 nc4080 = 39.2 (the prior {72,256,4080} default) / 64.6
-// Full 24-point MC{48,72,96,144} x KC{192,256,320} x NC{2048,4080} grid is in
-// benchmarks/results/tuning/sweep_zpicy.json. Runtime-settable so the sweep
-// walks the grid in one process; re-sweep when the machine or toolchain moves.
+// Runtime-settable so a sweep walks the MC{48,72,96,144} x KC{192,256,320} x
+// NC{2048,4080} grid in one process; re-sweep when the machine or toolchain moves.
 //
 // std::atomic so the sweep hook can publish a new triple while a kernel reads
 // it: blocking is trivially copyable (three int64_t), so the whole struct moves
@@ -76,25 +75,24 @@ struct aligned_buf {
 constexpr int64_t MR = 6;
 constexpr int64_t NR = 8;
 
-// The f32 register-tile shape, chosen by measurement at n=512 (CPU-03): 8x16
-// beat 6x16, so the f32 path runs microkernel_f32_8x16 with MR_F32=8, NR_F32=16.
-// Both shapes were built and benched single-threaded at n=512 on zpicy
-// (i7-10750H, Ultimate Performance, OMP_WAIT_POLICY=ACTIVE). A persistent
-// background antivirus held CV above the 5% protocol gate, so the spike-resistant
-// best-min floor over repeated cooldown-separated runs decides, not the raw
-// median (the same noise-handling 03-04 established for the f64 sweep). Measured
-// f32 n=512 best-min floor / top-3-mean floor, GF/s, two independent rounds:
+// The f32 register-tile shape, chosen by measurement at n=512: 8x16 beat 6x16,
+// so the f32 path runs microkernel_f32_8x16 with MR_F32=8, NR_F32=16. Both shapes
+// were built and benched single-threaded at n=512 on the reference machine
+// (i7-10750H, OMP_WAIT_POLICY=ACTIVE). Background CPU contention held the
+// coefficient of variation above the 5% gate, so the spike-resistant best-min
+// floor over repeated cooldown-separated runs decides, not the raw median (the
+// same noise-handling used for the f64 sweep). Measured f32 n=512 best-min floor
+// / top-3-mean floor, GF/s, two independent rounds:
 //   8x16 = 57.5 / 57.0 (round 2), 55.1 (round 1 best-min) -- winner
 //   6x16 = 53.2 / 52.9 (round 2), 53.6 (round 1 best-min) -- loser
 // The register-budget argument predicted the opposite (8x16 needs 16 ymm
 // accumulators, the whole file, so B is reloaded each k-step instead of held in
 // a register the way 6x16's 12-accumulator budget allows). Measurement overruled
 // it: 8x16's higher arithmetic density (16 FMAs per k-step) amortizes the B
-// reloads and wins by ~8% on this core's port layout, which is exactly why the
-// skill says decide f32 shape by measuring, not by counting registers. To
-// reproduce the loser, define FME_F32_SHAPE_6x16 and rebuild. The decision run is
-// in benchmarks/results/cpu03_f32_shape_zpicy.json. Re-measure on a quiet machine
-// before treating either number as protocol-grade absolute throughput.
+// reloads and wins by ~8% on this core's port layout -- decide f32 shape by
+// measuring, not by counting registers. To reproduce the loser, define
+// FME_F32_SHAPE_6x16 and rebuild. Re-measure on a quiet machine before treating
+// either number as absolute throughput.
 #if defined(FME_F32_SHAPE_6x16)
 constexpr int64_t MR_F32 = 6;
 #else
@@ -148,17 +146,16 @@ inline void microkernel_f32(const float* ap, const float* bp, float* c, int64_t 
 #endif
 }
 
-// Below this max dimension the pack buffers and (in 03-04) the thread spawn cost
-// more than they save, so a direct register-blocked pass with no heap and no
-// threading wins. 96 is a measurement-validated default (the small-path bench in
-// 03-05 may move it); it is a default, not a calibrated threshold, which is a
-// Phase 5 concern. The branch lives inside the blis entry by design so dispatch
-// stays a pure features-in/path-out decision.
+// Below this max dimension the pack buffers and the thread spawn cost more than
+// they save, so a direct register-blocked pass with no heap and no threading
+// wins. 96 is a measurement-validated default; it is a default, not a calibrated
+// threshold. The branch lives inside the blis entry by design so dispatch stays a
+// pure features-in/path-out decision.
 constexpr int64_t SMALL_MAX_DIM = 96;
 
-// f64 only has a packed microkernel this plan (the f32 shape is decided by
-// measurement in 03-05), so the five-loop path is instantiated for double and
-// the small direct path carries float until then. Both paths accumulate over k
+// Both dtypes have a packed microkernel, so the five-loop path is instantiated
+// for double and float; the small direct path carries either below
+// SMALL_MAX_DIM. Both paths accumulate over k
 // strictly sequentially per output element, which keeps each element's rounding
 // order independent of how the ic loop is later split across threads: that is
 // what preserves the bitwise thread-count invariance the suite asserts.
@@ -194,7 +191,7 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     }
 
     // Both dtypes now have a packed five-loop path: f64 runs the 6x8 microkernel,
-    // f32 runs the shape CPU-03 chose at n=512 (MR_F32 x 16). The two paths share
+    // f32 runs the measured winning shape at n=512 (MR_F32 x 16). The two paths share
     // the loop structure, the runtime blocking, and the OpenMP region; only the
     // pack layout and the microkernel callee differ by dtype, dispatched here at
     // compile time so neither path carries a runtime dtype branch in its hot loop.
@@ -303,8 +300,8 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
             ap_pool.emplace_back(ap_cap);
         }
 
-        // jc has a single block at n <= NC (every bench size), so all of CPU-05's
-        // scaling has to come from the ic loop: a jc-only parallel region would
+        // jc has a single block at n <= NC (every bench size), so all of the
+        // thread scaling has to come from the ic loop: a jc-only parallel region would
         // measure 1.0x because there is one jc iteration. The pc loop is the serial
         // k-block reduction and is NEVER parallelized, so each output element
         // accumulates its k-blocks in a fixed order independent of the thread that
