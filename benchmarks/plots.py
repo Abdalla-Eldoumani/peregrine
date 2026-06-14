@@ -8,10 +8,9 @@ obeys) and writing PNGs back to benchmarks/results/.
 
 The Agg backend is selected BEFORE importing pyplot so the figures render with no
 display (verified headless: savefig writes a non-empty PNG with no DISPLAY). The
-four series colors are the exact DESIGN_SYSTEM tokens, consistent across every
-chart; the cupy color stays defined for consistency even though cupy is absent on
-this machine (the GPU baseline is NumPy CPU per rule 15, so no cupy series is
-plotted).
+four series colors are the fixed palette, consistent across every chart; the cupy
+color stays defined for consistency even though cupy is absent on this machine
+(the GPU baseline is NumPy CPU, so no cupy series is plotted).
 
 json.load only (Security V5): every source file is first-party data read with
 json, never eval or pickle. The matmul / gpu / fused / scaling files go through
@@ -33,9 +32,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 import report  # noqa: E402
 
-# The exact DESIGN_SYSTEM series colors (lines 262-263). Consistent across every
-# chart. cupy stays defined for consistency though no cupy series is plotted
-# (cupy is absent; the GPU baseline is NumPy CPU per rule 15).
+# The fixed series colors. Consistent across every chart. cupy stays defined for
+# consistency though no cupy series is plotted (cupy is absent; the GPU baseline
+# is NumPy CPU).
 SERIES_COLORS = {
     "cpu": "#1f77b4",
     "cuda": "#2ca02c",
@@ -56,11 +55,19 @@ def plot_gflops_vs_n(out_path: str) -> str:
     CPU floor GFLOP/s comes from the cpu02 f64 cases (gflop / fastmathext.min_s),
     NumPy floor from the same cases (gflop / numpy.min_s), and the GPU
     device-resident warm GFLOP/s from the committed gpu matrix without-transfer
-    warm series. Every value is read from JSON (rule 17); the colors are the
-    fixed series tokens.
+    warm series. Every value is read from JSON; the colors are the fixed series
+    palette.
+
+    Returns the out_path on success, or None when either input is absent (the
+    chart is skipped with a clear reason rather than crashing a partial-results
+    run, mirroring the crossover chart's os.path.exists skip).
     """
-    cpu = report.load_series(_results_path("cpu02_f64_zpicy.json"))
-    gpu = report.load_series(_results_path("zpicy_gpu_matrix.json"))
+    cpu_path = _results_path("cpu02_f64_refbox.json")
+    gpu_path = _results_path("refbox_gpu_matrix.json")
+    if not (os.path.exists(cpu_path) and os.path.exists(gpu_path)):
+        return None
+    cpu = report.load_series(cpu_path)
+    gpu = report.load_series(gpu_path)
 
     cpu_n = [c["n"] for c in cpu["cases"]]
     cpu_gflops = [c["gflop"] / c["fastmathext"]["min_s"] for c in cpu["cases"]]
@@ -105,17 +112,29 @@ def plot_gflops_vs_n(out_path: str) -> str:
 def plot_speedup_bars(out_path: str) -> str:
     """Speedup bars per regime, wins and losses side by side.
 
-    Each bar is a regime's headline speedup read from JSON: CPU-02 f64 floor at
-    n=2048 (a loss, below 1.0), CPU-06 small at n=64 (a loss), the GPU
+    Each bar is a regime's headline speedup read from JSON: the f64 floor at
+    n=2048 (a loss, below 1.0), the small-matrix loss at n=64, the GPU
     device-resident win, the GPU with-transfer small loss, and the fused CPU and
-    GPU wins. The 1.0 parity line marks win vs loss; loss bars are not hidden
-    (rule 16).
+    GPU wins. The 1.0 parity line marks win vs loss; loss bars are not hidden.
+
+    Returns the out_path on success, or None when any input is absent (the chart
+    is skipped with a clear reason rather than crashing a partial-results run,
+    mirroring the crossover chart's os.path.exists skip).
     """
-    cpu02 = report.load_series(_results_path("cpu02_f64_zpicy.json"))
-    cpu06 = report.load_series(_results_path("cpu06_f32_zpicy.json"))
-    gpu = report.load_series(_results_path("zpicy_gpu_matrix.json"))
-    fuse_cpu = report.load_series(_results_path("fuse05_cpu_f32_zpicy.json"))
-    fuse_gpu = report.load_series(_results_path("fuse05_gpu_f32_zpicy.json"))
+    paths = {
+        "cpu02": _results_path("cpu02_f64_refbox.json"),
+        "cpu06": _results_path("cpu06_f32_refbox.json"),
+        "gpu": _results_path("refbox_gpu_matrix.json"),
+        "fuse_cpu": _results_path("fuse05_cpu_f32_refbox.json"),
+        "fuse_gpu": _results_path("fuse05_gpu_f32_refbox.json"),
+    }
+    if not all(os.path.exists(p) for p in paths.values()):
+        return None
+    cpu02 = report.load_series(paths["cpu02"])
+    cpu06 = report.load_series(paths["cpu06"])
+    gpu = report.load_series(paths["gpu"])
+    fuse_cpu = report.load_series(paths["fuse_cpu"])
+    fuse_gpu = report.load_series(paths["fuse_gpu"])
 
     cpu02_2048 = report._case_by_n(cpu02["cases"], 2048)
     cpu02_floor = (
@@ -198,7 +217,7 @@ def plot_crossover(out_path: str, calibration_path: str | None = None):
     (the chart is skipped with a clear reason rather than fabricating data).
     """
     if calibration_path is None:
-        calibration_path = _results_path("zpicy_calibration.json")
+        calibration_path = _results_path("refbox_calibration.json")
     if not os.path.exists(calibration_path):
         # No calibration cache committed: skip rather than invent a curve. The
         # caller logs the skip; a fabricated crossover would be an orphan number.
@@ -249,24 +268,26 @@ def plot_crossover(out_path: str, calibration_path: str | None = None):
 
 
 def generate_all(out_dir: str | None = None) -> list:
-    """Write the three charts to out_dir (default benchmarks/results/).
+    """Write the available charts to out_dir (default benchmarks/results/).
 
-    Returns the list of PNG paths actually written. The crossover is omitted from
-    the list (with a printed reason) when the calibration cache is absent.
+    Returns the list of PNG paths actually written. Any chart whose input result
+    files are absent is omitted from the list with a printed reason rather than
+    crashing the run, so a fresh clone or a partial-results run still produces the
+    charts it can.
     """
     if out_dir is None:
         out_dir = RESULTS_DIR
     written = []
-    written.append(plot_gflops_vs_n(os.path.join(out_dir, "gflops_vs_n.png")))
-    written.append(plot_speedup_bars(os.path.join(out_dir, "speedup_bars.png")))
-    crossover = plot_crossover(os.path.join(out_dir, "crossover.png"))
-    if crossover is None:
-        print(
-            "crossover chart skipped: no calibration cache at "
-            f"{_results_path('zpicy_calibration.json')}"
-        )
-    else:
-        written.append(crossover)
+    charts = [
+        (plot_gflops_vs_n(os.path.join(out_dir, "gflops_vs_n.png")), "gflops_vs_n"),
+        (plot_speedup_bars(os.path.join(out_dir, "speedup_bars.png")), "speedup_bars"),
+        (plot_crossover(os.path.join(out_dir, "crossover.png")), "crossover"),
+    ]
+    for path, name in charts:
+        if path is None:
+            print(f"{name} chart skipped: required result files not found in results/")
+        else:
+            written.append(path)
     return written
 
 
