@@ -10,6 +10,41 @@
 namespace fme::cuda {
 namespace {
 
+// RAII owners for the chain timer's device scratch and cudaEvents. time_fused_chain
+// wraps every allocation, record, sync, and elapsed-time query in a throwing
+// FME_CUDA_CHECK; without an owner a throw unwinds past the trailing
+// cudaFreeAsync/cudaEventDestroy and leaks the scratch into the context mempool
+// (release threshold UINT64_MAX -- never returned to the OS) and leaks the events.
+// The destructors run on the unwind path, so they discard the return code the way
+// free_device does and clear the sticky error rather than using the throwing CHECK.
+struct device_buf {
+    void* ptr = nullptr;
+    cudaStream_t stream = nullptr;
+    device_buf() = default;
+    device_buf(void* p, cudaStream_t s) : ptr(p), stream(s) {}
+    ~device_buf() {
+        if (ptr != nullptr) {
+            cudaFreeAsync(ptr, stream);
+            cudaGetLastError();
+        }
+    }
+    device_buf(const device_buf&) = delete;
+    device_buf& operator=(const device_buf&) = delete;
+};
+
+struct cuda_event {
+    cudaEvent_t ev = nullptr;
+    ~cuda_event() {
+        if (ev != nullptr) {
+            cudaEventDestroy(ev);
+            cudaGetLastError();
+        }
+    }
+    cuda_event() = default;
+    cuda_event(const cuda_event&) = delete;
+    cuda_event& operator=(const cuda_event&) = delete;
+};
+
 // One templated grid-stride kernel + one functor per op (the shared-skeleton
 // recommendation, RESEARCH Alternatives). Each functor is the per-element
 // arithmetic; the kernel owns the float4-prefix / scalar-tail traversal so the
@@ -305,15 +340,19 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
     const cudaStream_t stream = ctx.compute;
     const size_t bytes = static_cast<size_t>(n) * sizeof(T);
 
-    T* t = nullptr;
-    T* out = nullptr;
-    FME_CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&t), bytes, stream));
-    FME_CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&out), bytes, stream));
+    void* t_raw = nullptr;
+    void* out_raw = nullptr;
+    FME_CUDA_CHECK(cudaMallocAsync(&t_raw, bytes, stream));
+    device_buf t_buf{t_raw, stream};
+    FME_CUDA_CHECK(cudaMallocAsync(&out_raw, bytes, stream));
+    device_buf out_buf{out_raw, stream};
+    T* t = static_cast<T*>(t_buf.ptr);
+    T* out = static_cast<T*>(out_buf.ptr);
 
-    cudaEvent_t e0 = nullptr;
-    cudaEvent_t e1 = nullptr;
-    FME_CUDA_CHECK(cudaEventCreate(&e0));
-    FME_CUDA_CHECK(cudaEventCreate(&e1));
+    cuda_event e0;
+    cuda_event e1;
+    FME_CUDA_CHECK(cudaEventCreate(&e0.ev));
+    FME_CUDA_CHECK(cudaEventCreate(&e1.ev));
 
     const T a = static_cast<T>(2);
     const T b = static_cast<T>(3);
@@ -337,21 +376,18 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
     }
 
     FME_CUDA_CHECK(cudaStreamSynchronize(stream));
-    FME_CUDA_CHECK(cudaEventRecord(e0, stream));
+    FME_CUDA_CHECK(cudaEventRecord(e0.ev, stream));
     for (int i = 0; i < reps; ++i) {
         chain();
     }
-    FME_CUDA_CHECK(cudaEventRecord(e1, stream));
-    FME_CUDA_CHECK(cudaEventSynchronize(e1));
+    FME_CUDA_CHECK(cudaEventRecord(e1.ev, stream));
+    FME_CUDA_CHECK(cudaEventSynchronize(e1.ev));
 
     float ms = 0.0f;
-    FME_CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
+    FME_CUDA_CHECK(cudaEventElapsedTime(&ms, e0.ev, e1.ev));
 
-    FME_CUDA_CHECK(cudaEventDestroy(e0));
-    FME_CUDA_CHECK(cudaEventDestroy(e1));
-    FME_CUDA_CHECK(cudaFreeAsync(t, stream));
-    FME_CUDA_CHECK(cudaFreeAsync(out, stream));
-
+    // t_buf, out_buf, e0, e1 are released by their owners on return; ms is read
+    // into the return value before any destructor runs.
     return ms / static_cast<float>(reps);
 }
 
