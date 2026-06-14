@@ -2,7 +2,7 @@
 
 #include <immintrin.h>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // Two f32 register-tile shapes, measured at n=512 to pick the winner instead of
 // arguing from register counts (port pressure differs between MSVC and GCC
@@ -11,7 +11,7 @@ namespace fme::cpu {
 // machine, overruling the register-budget prediction that 8x16's full-file
 // accumulator set would lose to reload traffic. gemm_blis.cpp's MR_F32 constant
 // carries the measured numbers and selects 8x16 by default; 6x16 is kept here,
-// reachable via FME_F32_SHAPE_6x16, so the decision stays reproducible without
+// reachable via PG_F32_SHAPE_6x16, so the decision stays reproducible without
 // resurrecting a deleted kernel.
 // Both compute NR=16 columns as two __m256 of 8 floats each; they differ in MR.
 //
@@ -183,4 +183,4 @@ void microkernel_f32_6x16(const float* ap, const float* bp, float* c, int64_t kc
     }
 }
 
-} // namespace fme::cpu
+} // namespace pg::cpu
