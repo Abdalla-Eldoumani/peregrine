@@ -31,9 +31,8 @@ struct cuda_error : std::runtime_error {
 // cudaDeviceProp and a cudaGetDeviceCount/compute-capability probe and hands
 // back this plain struct. present is the device-usable verdict (driver loads,
 // device count > 0, compute capability >= 7.0); reason names the failure when
-// present is false (mapping to the EDGE_CASES device chain: "no device",
-// "driver too old", "compute capability too low"). cc_major/minor and name are
-// only meaningful when present.
+// present is false ("no device", "driver too old", "compute capability too
+// low"). cc_major/minor and name are only meaningful when present.
 struct cuda_device_info {
     bool present;
     int device_id;
@@ -54,8 +53,8 @@ struct gemm_dims {
 // before a size_t cast feeds new T[] or alloc_device. Without it, an int64
 // rows*cols*elem product that overflows wraps to a small or negative value while
 // the copy is told the full size -- a truncated buffer with a full-size copy is a
-// heap overflow (WR-02), and a negative product cast to size_t becomes ~SIZE_MAX
-// (WR-03). CUDA-free (only int64 + shape_error) so it lives in core and both the
+// heap overflow, and a negative product cast to size_t becomes ~SIZE_MAX.
+// CUDA-free (only int64 + shape_error) so it lives in core and both the
 // binding and any future caller share one checked path. MSVC has no
 // __builtin_mul_overflow, so the check is division-based: a*b overflows iff
 // a != 0 and the product divided back by a does not equal b.
