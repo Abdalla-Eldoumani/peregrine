@@ -14,8 +14,8 @@ namespace {
 // workspace, so we refuse an allocation that would leave less than this margin
 // rather than allocating right up to the reported free and tripping a mid-flight
 // failure (or wedging the display). 64MB is comfortably above the cuBLAS v2
-// workspace for this phase's sizes and small against the ~4.7GB free measured on
-// the dev box.
+// workspace for the supported sizes and small against the ~4.7GB free measured on
+// the reference machine.
 constexpr int64_t kOomMarginBytes = 64 * 1024 * 1024;
 
 } // namespace
@@ -38,8 +38,8 @@ void* alloc_device(int64_t bytes) {
 
     if (bytes > 0) {
         // Pre-flight against CURRENT free VRAM, never a hardcoded 6144: free
-        // fluctuates with the display (measured 4709-5130 MiB on this box at
-        // different moments), so a fixed target either fails to guard or wedges
+        // fluctuates with the display (measured 4709-5130 MiB on the reference
+        // machine at different moments), so a fixed target either fails to guard or wedges
         // the desktop. If the request plus the margin exceeds free, throw
         // fme::cuda_error carrying the cudaErrorMemoryAllocation NAME -- the same
         // name a real allocation failure would carry -- so the wrapper composes
