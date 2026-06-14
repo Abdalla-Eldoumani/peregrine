@@ -22,7 +22,7 @@
         "internal_api": "openblas",
         "num_threads": 12,
         "prefix": "libscipy_openblas",
-        "filepath": "C:\\Users\\96654\\AppData\\Roaming\\Python\\Python312\\site-packages\\numpy.libs\\libscipy_openblas64_-63c857e738469261263c764a36be9436.dll",
+        "filepath": "libscipy_openblas64_-63c857e738469261263c764a36be9436.dll",
         "version": "0.3.31.188.0",
         "threading_layer": "pthreads",
         "architecture": "Haswell"
@@ -32,7 +32,7 @@
         "internal_api": "openmp",
         "num_threads": 12,
         "prefix": "libomp",
-        "filepath": "C:\\Windows\\System32\\libomp140.x86_64.dll",
+        "filepath": "libomp140.x86_64.dll",
         "version": null
       }
     ]
