@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // Summation reductions over a 2-D row-major array. Plain (non-AVX2)
 // translation unit: NumPy's own reductions are single-threaded and
@@ -28,4 +28,4 @@ extern template double sum_all<double>(const double*, int64_t, int64_t);
 extern template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
 extern template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
