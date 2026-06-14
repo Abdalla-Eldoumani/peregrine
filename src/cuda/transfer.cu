@@ -3,17 +3,11 @@
 #include "cuda/check.cuh"
 #include "cuda/context.cuh"
 
+#include <cstddef>
 #include <cstdint>
-#include <mutex>
-#include <vector>
 
 namespace fme::cuda {
 namespace {
-
-// The pinned-staging cap (CONTEXT line 43, the cuda-sm86 skill). 256MB total
-// across every cached pinned buffer. Unbounded cudaHostAlloc fragments Windows
-// and degrades the whole OS, so this is a hard ceiling, not a hint.
-constexpr int64_t kPinnedCapBytes = 256 * 1024 * 1024;
 
 // OOM pre-flight headroom. cudaMemGetInfo reports free VRAM that fluctuates with
 // the display compositor and other processes, and cuBLAS keeps an internal
@@ -23,37 +17,6 @@ constexpr int64_t kPinnedCapBytes = 256 * 1024 * 1024;
 // workspace for this phase's sizes and small against the ~4.7GB free measured on
 // the dev box.
 constexpr int64_t kOomMarginBytes = 64 * 1024 * 1024;
-
-// A cached pinned buffer: the host pointer, its capacity, and whether it is
-// currently lent out. Reuse is by capacity (a request reuses the smallest free
-// buffer that fits); eviction frees the largest free buffers first when a new
-// allocation would breach the cap, since a few large buffers dominate the total.
-struct PinnedSlot {
-    void* ptr;
-    int64_t capacity;
-    bool in_use;
-};
-
-// The cache plus its running total, guarded by a mutex: acquire/release run
-// after the GIL is dropped (the binding releases it around the CUDA work), so
-// two host threads transferring at once would otherwise race the vector and the
-// byte counter. A plain std::mutex is ample -- transfers are not a hot inner
-// loop, the GEMM is.
-std::mutex g_pinned_mtx;
-std::vector<PinnedSlot> g_pinned_slots;
-int64_t g_pinned_total = 0;
-
-// Free a pinned slot's memory and drop it from the running total. Uses
-// FME_CUDA_CHECK because this runs on the live allocation path (acquire's
-// eviction), never at teardown -- the cache is process-lifetime and is not torn
-// down by atexit (the buffers are returned to the OS at process exit anyway, and
-// touching CUDA during static deinit is the destruction-order trap check.cuh
-// warns about).
-void evict_slot_locked(std::size_t idx) {
-    FME_CUDA_CHECK(cudaFreeHost(g_pinned_slots[idx].ptr));
-    g_pinned_total -= g_pinned_slots[idx].capacity;
-    g_pinned_slots.erase(g_pinned_slots.begin() + static_cast<std::ptrdiff_t>(idx));
-}
 
 } // namespace
 
@@ -188,82 +151,6 @@ void sync_compute() {
     // to the compute stream. CHECK-wrapped and never used at teardown.
     Context& ctx = context();
     FME_CUDA_CHECK(cudaStreamSynchronize(ctx.compute));
-}
-
-void* pinned_acquire(int64_t bytes) {
-    if (bytes <= 0) {
-        return nullptr;
-    }
-    std::lock_guard<std::mutex> lock(g_pinned_mtx);
-
-    // Reuse the smallest free cached buffer that fits the request: a tight fit
-    // wastes the least pinned memory and keeps a single large buffer available
-    // for a later large transfer. Mark it lent and return it.
-    std::size_t best = g_pinned_slots.size();
-    for (std::size_t i = 0; i < g_pinned_slots.size(); ++i) {
-        if (!g_pinned_slots[i].in_use && g_pinned_slots[i].capacity >= bytes) {
-            if (best == g_pinned_slots.size() ||
-                g_pinned_slots[i].capacity < g_pinned_slots[best].capacity) {
-                best = i;
-            }
-        }
-    }
-    if (best != g_pinned_slots.size()) {
-        g_pinned_slots[best].in_use = true;
-        return g_pinned_slots[best].ptr;
-    }
-
-    // No reusable buffer. A request larger than the whole cap can never be
-    // satisfied from pinned staging: report nullptr so the caller takes the
-    // unpinned fallback rather than over-committing pinned memory.
-    if (bytes > kPinnedCapBytes) {
-        return nullptr;
-    }
-
-    // Make room under the cap by freeing the LARGEST free buffers first (a few
-    // big buffers dominate the 256MB total, so freeing them frees the most room
-    // per eviction). If even after evicting every free buffer the new allocation
-    // would breach the cap, the cache is saturated by in-use buffers: report
-    // nullptr and let the caller fall back, never exceed the cap.
-    while (g_pinned_total + bytes > kPinnedCapBytes) {
-        std::size_t largest = g_pinned_slots.size();
-        for (std::size_t i = 0; i < g_pinned_slots.size(); ++i) {
-            if (!g_pinned_slots[i].in_use &&
-                (largest == g_pinned_slots.size() ||
-                 g_pinned_slots[i].capacity > g_pinned_slots[largest].capacity)) {
-                largest = i;
-            }
-        }
-        if (largest == g_pinned_slots.size()) {
-            return nullptr;  // nothing free to evict; cap would be breached
-        }
-        evict_slot_locked(largest);
-    }
-
-    void* host_ptr = nullptr;
-    FME_CUDA_CHECK(
-        cudaHostAlloc(&host_ptr, static_cast<std::size_t>(bytes),
-                      cudaHostAllocDefault));
-    g_pinned_slots.push_back(PinnedSlot{host_ptr, bytes, true});
-    g_pinned_total += bytes;
-    return host_ptr;
-}
-
-void pinned_release(void* host_ptr) {
-    if (host_ptr == nullptr) {
-        return;
-    }
-    // Return the buffer to the cache (mark it free for reuse); do NOT free it.
-    // The 256MB cap and the eviction policy in acquire bound the total, so a
-    // released buffer staying resident is the point -- the next transfer reuses
-    // it instead of paying another cudaHostAlloc.
-    std::lock_guard<std::mutex> lock(g_pinned_mtx);
-    for (PinnedSlot& slot : g_pinned_slots) {
-        if (slot.ptr == host_ptr) {
-            slot.in_use = false;
-            return;
-        }
-    }
 }
 
 } // namespace fme::cuda
