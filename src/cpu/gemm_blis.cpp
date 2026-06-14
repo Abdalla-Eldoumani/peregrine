@@ -14,7 +14,7 @@
 #include <omp.h>
 #endif
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 namespace {
 
@@ -91,9 +91,9 @@ constexpr int64_t NR = 8;
 // it: 8x16's higher arithmetic density (16 FMAs per k-step) amortizes the B
 // reloads and wins by ~8% on this core's port layout -- decide f32 shape by
 // measuring, not by counting registers. To reproduce the loser, define
-// FME_F32_SHAPE_6x16 and rebuild. Re-measure on a quiet machine before treating
+// PG_F32_SHAPE_6x16 and rebuild. Re-measure on a quiet machine before treating
 // either number as absolute throughput.
-#if defined(FME_F32_SHAPE_6x16)
+#if defined(PG_F32_SHAPE_6x16)
 constexpr int64_t MR_F32 = 6;
 #else
 constexpr int64_t MR_F32 = 8;
@@ -139,7 +139,7 @@ void pack_b_f32(float* bp, const float* b, int64_t pc, int64_t jc, int64_t kc, i
 }
 
 inline void microkernel_f32(const float* ap, const float* bp, float* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr) {
-#if defined(FME_F32_SHAPE_6x16)
+#if defined(PG_F32_SHAPE_6x16)
     microkernel_f32_6x16(ap, bp, c, kc, ldc, mr, nr);
 #else
     microkernel_f32_8x16(ap, bp, c, kc, ldc, mr, nr);
@@ -357,4 +357,4 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 template void gemm_blis<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 template void gemm_blis<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
