@@ -20,7 +20,8 @@ namespace fme::cpu {
 //
 // The scalar tail and the scalar bodies inside the parallel loop must MIRROR the
 // vector arithmetic exactly so the tail elements match the blocked ones: axpby
-// uses a*x + b*y (the same two roundings as fmadd(b*y, mul(a,x))), fma3 uses
+// uses a*x + b*y (the same two roundings as add(mul(a,x), mul(b,y)) -- NOT a
+// fused fmadd of b*y + a*x, which would round once and diverge), fma3 uses
 // std::fma (the same single rounding as _mm256_fmadd), and scaled_relu uses the
 // NaN-checked scalar form that mirrors the blendv idiom.
 
@@ -80,9 +81,11 @@ void fused_axpby<float>(const float* x, const float* y, float* out, int64_t n, f
     for (int64_t i = 0; i < blocked; i += 8) {
         const __m256 vx = _mm256_loadu_ps(x + i);
         const __m256 vy = _mm256_loadu_ps(y + i);
-        // a*x + b*y as two FMAs (mul then fmadd): two roundings, matching the
-        // unfused NumPy expression. Not contracted into a single rounding.
-        const __m256 r = _mm256_fmadd_ps(vb, vy, _mm256_mul_ps(va, vx));
+        // a*x and b*y each rounded, then summed (rounded again): two roundings,
+        // matching the unfused NumPy expression. NOT contracted -- an fmadd of
+        // b*y + (a*x) would fuse b*y into the add and round once, diverging from
+        // the scalar tail and the naive kernel bit-for-bit (~16% of f32 cases).
+        const __m256 r = _mm256_add_ps(_mm256_mul_ps(va, vx), _mm256_mul_ps(vb, vy));
         _mm256_storeu_ps(out + i, r);
     }
     for (int64_t i = blocked; i < n; ++i) {
@@ -101,7 +104,9 @@ void fused_axpby<double>(const double* x, const double* y, double* out, int64_t 
     for (int64_t i = 0; i < blocked; i += 4) {
         const __m256d vx = _mm256_loadu_pd(x + i);
         const __m256d vy = _mm256_loadu_pd(y + i);
-        const __m256d r = _mm256_fmadd_pd(vb, vy, _mm256_mul_pd(va, vx));
+        // Two roundings (a*x and b*y rounded, then summed), not a fused
+        // contraction -- same arithmetic as the f32 body and the scalar tail.
+        const __m256d r = _mm256_add_pd(_mm256_mul_pd(va, vx), _mm256_mul_pd(vb, vy));
         _mm256_storeu_pd(out + i, r);
     }
     for (int64_t i = blocked; i < n; ++i) {
