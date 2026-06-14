@@ -1,33 +1,33 @@
 """Calibration and dispatch suite, covering DISP-01..05. This file is a Wave 0
 scaffold: it establishes the shared infrastructure (the requires_cuda skip gate
-and the FME_CACHE_DIR cache isolation idiom) so the later Phase 5 waves fill in
+and the PEREGRINE_CACHE_DIR cache isolation idiom) so the later Phase 5 waves fill in
 each reserved test under its own name without re-establishing setup. It asserts
 nothing about calibrate/policy behavior yet -- those modules do not exist until
 Waves 2-3 -- beyond proving the file collects and that the introspection smoke
 passes on every build.
 
 requires_cuda() (conftest) is the one GPU gate, identical to test_cuda.py: build
-flag plus a usable-device probe, deferring to fme.has_cuda(). CPU-only and the
+flag plus a usable-device probe, deferring to pg.has_cuda(). CPU-only and the
 WSL/GCC clone stay green; only the GPU-measurement tests (the live crossover and
 the real-device calibrate path) carry @gpu. The bulk of DISP-05 is NOT gated: a
 backend decision is a PURE function fed a synthetic calibration dict, so it runs
 everywhere and asserts a backend ENUM ("cpu" / "cuda"), needing no tolerance.
 
-Cache isolation -- the design names FME_CACHE_DIR (DISP-03). Every in-process
+Cache isolation -- the design names PEREGRINE_CACHE_DIR (DISP-03). Every in-process
 test that touches the calibration cache redirects it to a pytest tmp_path so the
 real per-user cache is never read or written:
 
     def test_writes_cache(tmp_path, monkeypatch):
-        monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+        monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
         ...  # calibrate()/policy now read and write under tmp_path only
 
-For an FME_BACKEND override the variable must be in the environment BEFORE the
-process starts (the dispatch policy reads it once, exactly like FME_DISABLE_AVX2
+For an PEREGRINE_BACKEND override the variable must be in the environment BEFORE the
+process starts (the dispatch policy reads it once, exactly like PEREGRINE_DISABLE_AVX2
 in test_fallback.py), so that test spawns a child with a full env copy and the
 override merged in -- the test_fallback.py:52-67 subprocess shape -- rather than
 monkeypatching in-process:
 
-    env = dict(os.environ, FME_BACKEND="cpu")   # full copy: Windows DLL search
+    env = dict(os.environ, PEREGRINE_BACKEND="cpu")   # full copy: Windows DLL search
     p = subprocess.run([sys.executable, "-c", SCRIPT, str(out_path)],
                        env=env, capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stderr          # child error surfaces as itself
@@ -59,7 +59,7 @@ not change.
         schema_mismatch           an unknown schema version -> recalibrate         [Wave 2: policy._load_cache]
         signature_mismatch        a signature mismatch -> recalibrate              [Wave 2: policy._load_cache]
         atomic_write              the cache write is atomic, never half-written    [Wave 3: calibrate.py]
-        cache_dir_override        FME_CACHE_DIR redirects the cache location       [Wave 2: policy._cache_path]
+        cache_dir_override        PEREGRINE_CACHE_DIR redirects the cache location       [Wave 2: policy._cache_path]
     DISP-04 (conservative static fallback; transfer cost in crossover):
         static_fallback           no cache -> a conservative CPU-preferring choice [Wave 2: policy.choose_backend]
         transfer_cost             the crossover accounts for host<->device transfer[Wave 2: policy.choose_backend]
@@ -69,7 +69,7 @@ not change.
         f32_4096_host_gpu         host f32 n=4096 routes to the GPU                [Wave 2: policy.choose_backend]
         f32_device_gpu            f32 device-resident routes to the GPU            [Wave 2: policy.choose_backend]
         set_backend               an explicit backend choice is honored           [Wave 2: policy.choose_backend]
-        env_backend               FME_BACKEND (subprocess, env-before-import)      [Wave 4: __init__.py]
+        env_backend               PEREGRINE_BACKEND (subprocess, env-before-import)      [Wave 4: __init__.py]
         live_crossover            real RTX 3060 calibration reproduces DISP-05 (@gpu) [Wave 4: integration]
 """
 
@@ -83,18 +83,18 @@ import time
 import numpy as np
 import pytest
 
-import fastmathext as fme
-from fastmathext import policy
+import peregrine as pg
+from peregrine import policy
 
 # The SUBMODULE, fetched via import_module. As of Phase 5 the package re-exports
-# the calibrate FUNCTION as fme.calibrate (the public API),
-# which shadows the submodule attribute: `from fastmathext import calibrate` and
-# `import fastmathext.calibrate as calibrate` both now bind the FUNCTION. These
+# the calibrate FUNCTION as pg.calibrate (the public API),
+# which shadows the submodule attribute: `from peregrine import calibrate` and
+# `import peregrine.calibrate as calibrate` both now bind the FUNCTION. These
 # tests need the MODULE -- they call calibrate.calibrate(), _machine_signature(),
 # _cpu_brand() -- so import_module (which returns the module object from
 # sys.modules regardless of the namespace shadowing) is the reliable handle. The
-# public function is exercised as fme.calibrate elsewhere.
-calibrate = importlib.import_module("fastmathext.calibrate")
+# public function is exercised as pg.calibrate elsewhere.
+calibrate = importlib.import_module("peregrine.calibrate")
 from conftest import assert_matmul_close, requires_cuda
 
 _CUDA_OK, _CUDA_REASON = requires_cuda()
@@ -112,7 +112,7 @@ def test_calibration_module_scaffold():
     # returns a bool on every build (False on a CPU-only build, never an
     # exception), so the scaffold can assert its type as the everywhere-smoke,
     # mirroring test_cuda.py's test_has_cuda_runtime.
-    assert isinstance(fme.has_cuda(), bool)
+    assert isinstance(pg.has_cuda(), bool)
 
 
 # --- synthetic calibration table -------------------------------------------
@@ -267,7 +267,7 @@ def test_transfer_cost():
     assert device == "cuda"
 
 
-# --- DISP-05: explicit backend override (set_backend / FME_BACKEND) ----------
+# --- DISP-05: explicit backend override (set_backend / PEREGRINE_BACKEND) ----------
 
 
 def test_set_backend_forces_cpu():
@@ -304,62 +304,62 @@ def test_set_backend():
     # is restored to "auto" in a finally so this test cannot leak a forced backend
     # into any later test in the same process (the global is process-wide state).
     try:
-        assert fme.set_backend("cpu") is None
-        assert fme._backend == "cpu"
-        assert fme.set_backend("auto") is None
-        assert fme._backend == "auto"
+        assert pg.set_backend("cpu") is None
+        assert pg._backend == "cpu"
+        assert pg.set_backend("auto") is None
+        assert pg._backend == "auto"
 
         with pytest.raises(ValueError) as ei:
-            fme.set_backend("gpu")
+            pg.set_backend("gpu")
         # the message names the allowed vocabulary so a typo is self-correcting
         assert "auto" in str(ei.value) and "cpu" in str(ei.value)
 
-        if not fme.has_cuda():
+        if not pg.has_cuda():
             with pytest.raises(RuntimeError) as ri:
-                fme.set_backend("cuda")
+                pg.set_backend("cuda")
             assert str(ri.value).startswith("cuda backend requested but "), str(ri.value)
         else:
             # on an ON build with a usable device the forced choice is accepted
-            assert fme.set_backend("cuda") is None
-            assert fme._backend == "cuda"
+            assert pg.set_backend("cuda") is None
+            assert pg._backend == "cuda"
     finally:
-        fme.set_backend("auto")
+        pg.set_backend("auto")
 
 
-# Child for the FME_BACKEND env-before-import test. It asserts the override
+# Child for the PEREGRINE_BACKEND env-before-import test. It asserts the override
 # reached the module BEFORE trusting any behavior (the test_fallback.py shape:
 # the child verifies the env actually took effect, so a missed override fails
-# loudly rather than passing vacuously). FME_BACKEND is read once at import into
-# fme._backend, so the child checks that global AND that a host f32 dispatch stays
-# on the CPU under FME_BACKEND=cpu (it returns an ndarray, not an fme.Array).
+# loudly rather than passing vacuously). PEREGRINE_BACKEND is read once at import into
+# pg._backend, so the child checks that global AND that a host f32 dispatch stays
+# on the CPU under PEREGRINE_BACKEND=cpu (it returns an ndarray, not a pg.Array).
 _ENV_BACKEND_SCRIPT = """\
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 
 # the override must have reached the module global at import
-assert fme._backend == "cpu", repr(fme._backend)
+assert pg._backend == "cpu", repr(pg._backend)
 
 # and a host f32 product stays on the CPU: a host ndarray result, never an Array
 a = np.ones((64, 64), dtype=np.float32)
 b = np.ones((64, 64), dtype=np.float32)
-out = fme.matmul(a, b)
+out = pg.matmul(a, b)
 assert isinstance(out, np.ndarray), type(out)
 assert out.shape == (64, 64) and out.dtype == np.float32
 """
 
 
 def test_env_backend(tmp_path):
-    # DISP-05: FME_BACKEND maps to the backend at import. The variable MUST be in
+    # DISP-05: PEREGRINE_BACKEND maps to the backend at import. The variable MUST be in
     # the environment before the process starts (the dispatch policy reads it once
-    # at import, exactly like FME_DISABLE_AVX2 in test_fallback.py), so this spawns
+    # at import, exactly like PEREGRINE_DISABLE_AVX2 in test_fallback.py), so this spawns
     # a child with a FULL env copy plus the override merged in -- a stripped env
     # breaks Windows DLL resolution -- rather than monkeypatching in-process. The
-    # child asserts the override reached fme._backend before trusting the result;
+    # child asserts the override reached pg._backend before trusting the result;
     # its stderr surfaces in the assertion message so a child failure reads as
-    # itself. FME_CACHE_DIR is redirected to a tmp dir so the child never touches
+    # itself. PEREGRINE_CACHE_DIR is redirected to a tmp dir so the child never touches
     # the real per-user cache even if a dispatch were to read it.
-    env = dict(os.environ, FME_BACKEND="cpu", FME_CACHE_DIR=str(tmp_path))
+    env = dict(os.environ, PEREGRINE_BACKEND="cpu", PEREGRINE_CACHE_DIR=str(tmp_path))
     p = subprocess.run(
         [sys.executable, "-c", _ENV_BACKEND_SCRIPT],
         env=env,
@@ -370,11 +370,11 @@ def test_env_backend(tmp_path):
     assert p.returncode == 0, p.stderr
 
 
-# Child for the import-laziness guard. It imports fastmathext at a fresh, empty
-# FME_CACHE_DIR and asserts NO cache file appeared: the import must run no
+# Child for the import-laziness guard. It imports peregrine at a fresh, empty
+# PEREGRINE_CACHE_DIR and asserts NO cache file appeared: the import must run no
 # calibration and read no cache (the <50ms lazy contract). The cache file is
 # created only by an explicit calibrate() or by a dispatch that consults a present
-# GPU's crossover -- never by `import fastmathext` itself.
+# GPU's crossover -- never by `import peregrine` itself.
 _IMPORT_LAZY_SCRIPT = """\
 import os
 import sys
@@ -382,26 +382,26 @@ import sys
 cache_dir = sys.argv[1]
 before = set(os.listdir(cache_dir))
 
-import fastmathext as fme
+import peregrine as pg
 
 after = set(os.listdir(cache_dir))
 new = after - before
 assert new == set(), "import created cache files: " + repr(new)
-# the lazy default is "auto" -- import read FME_BACKEND (absent here) and nothing
+# the lazy default is "auto" -- import read PEREGRINE_BACKEND (absent here) and nothing
 # else; no cache, no calibration ran
-assert fme._backend == "auto", repr(fme._backend)
+assert pg._backend == "auto", repr(pg._backend)
 """
 
 
 def test_import_no_calibration(tmp_path):
-    # DISP-01: a bare `import fastmathext` runs no calibration and reads/writes no
+    # DISP-01: a bare `import peregrine` runs no calibration and reads/writes no
     # cache (the import budget is <50ms; calibration and the cache read are lazy).
     # Run in a subprocess so the import is genuinely fresh -- an in-process import
     # is already cached and could not observe import-time side effects. The child
-    # points FME_CACHE_DIR at a fresh empty tmp dir and asserts no file appears
+    # points PEREGRINE_CACHE_DIR at a fresh empty tmp dir and asserts no file appears
     # after the import; the cache materializes only on an explicit calibrate() or a
     # GPU-routed dispatch, never at import.
-    env = dict(os.environ, FME_CACHE_DIR=str(tmp_path))
+    env = dict(os.environ, PEREGRINE_CACHE_DIR=str(tmp_path))
     p = subprocess.run(
         [sys.executable, "-c", _IMPORT_LAZY_SCRIPT, str(tmp_path)],
         env=env,
@@ -423,7 +423,7 @@ def test_live_crossover(tmp_path, monkeypatch):
     # is the end-to-end close of DISP-01/05 on hardware: every other DISP-05 test
     # uses constructed numbers, this one proves the live device reproduces the
     # contract. Isolated to a tmp cache dir so the real per-user cache is untouched.
-    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
 
     start = time.perf_counter()
     cal = calibrate.calibrate(force=True, budget_seconds=120)
@@ -502,7 +502,7 @@ def test_live_crossover(tmp_path, monkeypatch):
     ), f"live f32 host n={large_n} should route to cuda"
 
 
-# --- DISP-03: fail-safe cache read and the FME_CACHE_DIR override -------------
+# --- DISP-03: fail-safe cache read and the PEREGRINE_CACHE_DIR override -------------
 
 
 def _write_cache_file(path, payload):
@@ -627,17 +627,17 @@ def test_signature_mismatch(tmp_path):
 
 
 def test_cache_dir_override(tmp_path, monkeypatch):
-    # FME_CACHE_DIR redirects the resolved cache path: the file lives under the
+    # PEREGRINE_CACHE_DIR redirects the resolved cache path: the file lives under the
     # override dir, named calibration.json, so tests never touch the real cache.
-    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     resolved = policy._cache_path()
     assert resolved == os.path.join(str(tmp_path), "calibration.json")
     # without the override the path falls back to the platform user cache dir and
-    # still ends in calibration.json under a fastmathext-named directory.
-    monkeypatch.delenv("FME_CACHE_DIR", raising=False)
+    # still ends in calibration.json under a peregrine-named directory.
+    monkeypatch.delenv("PEREGRINE_CACHE_DIR", raising=False)
     default = policy._cache_path()
     assert default.endswith("calibration.json")
-    assert "fastmathext" in default.lower()
+    assert "peregrine" in default.lower()
 
 
 # --- DISP-01: calibrate() measures under budget; CPU-only omits gpu/transfer ---
@@ -645,7 +645,7 @@ def test_cache_dir_override(tmp_path, monkeypatch):
 # These exercise the live calibrate() measurement on whatever build is present.
 # On the CPU-only build (the dominant gate) they measure the CPU grid only; on a
 # fresh ON build the gpu/transfer keys appear and the relevant assertions adapt.
-# Every one redirects FME_CACHE_DIR to a tmp_path so the real per-user cache is
+# Every one redirects PEREGRINE_CACHE_DIR to a tmp_path so the real per-user cache is
 # never read or written. A small budget_seconds keeps them fast: the grid stops
 # adding larger sizes once the budget projects to breach, so a handful of small
 # sizes are measured in a couple of seconds while still proving the full path.
@@ -659,7 +659,7 @@ def test_calibrate_budget(tmp_path, monkeypatch):
     # size can run past the nominal budget. Assert a generous ceiling (the budget
     # plus a wide margin for that final size) rather than the budget exactly --
     # a tight bound would be the flaky kind this suite forbids.
-    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     budget = 5.0
     start = time.perf_counter()
     result = calibrate.calibrate(force=True, budget_seconds=budget)
@@ -689,10 +689,10 @@ def test_cpu_only_calibrate(tmp_path, monkeypatch):
     # as unavailable. This is the OFF-build contract (the dominant gate). On an ON
     # build the keys are present instead -- assert that branch too so the test is
     # meaningful on both builds rather than skipped on one.
-    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     result = calibrate.calibrate(force=True, budget_seconds=5.0)
     assert "cpu" in result
-    if fme.has_cuda():
+    if pg.has_cuda():
         assert "gpu" in result and "transfer" in result
     else:
         assert "gpu" not in result, "CPU-only calibrate must omit the gpu key"
@@ -704,10 +704,10 @@ def test_cpu_only_calibrate(tmp_path, monkeypatch):
 
 def test_writes_cache(tmp_path, monkeypatch):
     # DISP-02: a fresh calibrate() writes a valid schema-versioned JSON under the
-    # FME_CACHE_DIR path. The written file parses as JSON, carries the policy
+    # PEREGRINE_CACHE_DIR path. The written file parses as JSON, carries the policy
     # SCHEMA and the running machine signature, and round-trips through
     # policy._load_cache to a non-None dict (the read/write contract closes here).
-    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     result = calibrate.calibrate(force=True, budget_seconds=5.0)
 
     path = policy._cache_path()
@@ -730,7 +730,7 @@ def test_cache_reuse(tmp_path, monkeypatch):
     # second call returns the same content as the first. A force=True call by
     # contrast DOES rewrite, so the mtime advances -- the control that shows the
     # mtime check is non-vacuous.
-    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     first = calibrate.calibrate(force=True, budget_seconds=5.0)
     path = policy._cache_path()
     mtime_after_first = os.stat(path).st_mtime_ns
@@ -758,10 +758,10 @@ def test_signature_distinct(tmp_path, monkeypatch):
     # name yields a strictly different string -- a CPU-only cache can never be
     # mistaken for a GPU cache. The signature also embeds the package version, so
     # it is stable run to run on the same build.
-    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     sig = calibrate._machine_signature()
     cpu = calibrate._cpu_brand()
-    version = fme.__version__
+    version = pg.__version__
 
     # the signature is the documented pipe-joined cpu|gpu|driver|version
     parts = sig.split("|")
@@ -769,7 +769,7 @@ def test_signature_distinct(tmp_path, monkeypatch):
     assert parts[0] == cpu
     assert parts[3] == version
 
-    if fme.has_cuda():
+    if pg.has_cuda():
         # on an ON build the GPU components are real and already non-"none"
         assert parts[1] != "none"
     else:
@@ -792,7 +792,7 @@ def test_atomic_write(tmp_path, monkeypatch):
     # The write goes to a temp file in the same dir then os.replace -- a crash
     # mid-write leaves the old file or the new, never a half-written one, and the
     # temp is unlinked on any failure so none is ever left behind on success.
-    monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     calibrate.calibrate(force=True, budget_seconds=5.0)
 
     leftover = [f for f in os.listdir(str(tmp_path)) if f.endswith(".tmp")]
