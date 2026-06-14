@@ -52,7 +52,7 @@ def _results_path(*parts: str) -> str:
 def plot_gflops_vs_n(out_path: str) -> str:
     """GFLOP/s vs n per backend: CPU f64, GPU device-resident f32, NumPy CPU f64.
 
-    CPU floor GFLOP/s comes from the cpu02 f64 cases (gflop / fastmathext.min_s),
+    CPU floor GFLOP/s comes from the cpu02 f64 cases (gflop / peregrine.min_s),
     NumPy floor from the same cases (gflop / numpy.min_s), and the GPU
     device-resident warm GFLOP/s from the committed gpu matrix without-transfer
     warm series. Every value is read from JSON; the colors are the fixed series
@@ -70,7 +70,7 @@ def plot_gflops_vs_n(out_path: str) -> str:
     gpu = report.load_series(gpu_path)
 
     cpu_n = [c["n"] for c in cpu["cases"]]
-    cpu_gflops = [c["gflop"] / c["fastmathext"]["min_s"] for c in cpu["cases"]]
+    cpu_gflops = [c["gflop"] / c["peregrine"]["min_s"] for c in cpu["cases"]]
     numpy_gflops = [c["gflop"] / c["numpy"]["min_s"] for c in cpu["cases"]]
 
     warm = sorted(
@@ -87,7 +87,7 @@ def plot_gflops_vs_n(out_path: str) -> str:
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(
         cpu_n, cpu_gflops, marker="o", color=SERIES_COLORS["cpu"],
-        label="FastMathExt CPU f64 (floor)",
+        label="Peregrine CPU f64 (floor)",
     )
     ax.plot(
         cpu_n, numpy_gflops, marker="s", color=SERIES_COLORS["numpy"],
@@ -95,7 +95,7 @@ def plot_gflops_vs_n(out_path: str) -> str:
     )
     ax.plot(
         gpu_n, gpu_gflops, marker="^", color=SERIES_COLORS["cuda"],
-        label="FastMathExt GPU f32 (device-resident, warm)",
+        label="Peregrine GPU f32 (device-resident, warm)",
     )
     ax.set_xlabel("matrix size n")
     ax.set_ylabel("GFLOP/s")
@@ -138,7 +138,7 @@ def plot_speedup_bars(out_path: str) -> str:
 
     cpu02_2048 = report._case_by_n(cpu02["cases"], 2048)
     cpu02_floor = (
-        cpu02_2048["numpy"]["min_s"] / cpu02_2048["fastmathext"]["min_s"]
+        cpu02_2048["numpy"]["min_s"] / cpu02_2048["peregrine"]["min_s"]
     )
     cpu06_64 = report._case_by_n(cpu06["cases"], 64)["speedup_vs_numpy"]
     gpu08 = report._gpu08_ratio(gpu)
