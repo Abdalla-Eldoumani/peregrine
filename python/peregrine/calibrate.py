@@ -36,12 +36,12 @@ pass completes in well under the default 120s.
 
 GPU symbols (``_cuda_time_matmul``, ``to_device``, ``from_device``, ``Array``)
 exist ONLY on a CUDA build; on a CPU-only build they are absent. Every GPU
-measurement is therefore gated behind ``fme.has_cuda()``, and the cache a
+measurement is therefore gated behind ``pg.has_cuda()``, and the cache a
 CPU-only build writes omits the ``gpu`` and ``transfer`` keys entirely.
 
 Import budget: this module runs NOTHING at import -- no measurement, no device
 init, no thread spin-up. ``calibrate()`` runs only when called, so importing
-fastmathext (which does not import this module) pays nothing and the package
+peregrine (which does not import this module) pays nothing and the package
 import stays under its 50ms budget.
 
 Security: the cache is written with ``json.dump`` (never ``pickle``), and the
@@ -62,7 +62,7 @@ import time
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 
 from .policy import SCHEMA, _cache_path
 
@@ -189,7 +189,7 @@ def _gpu_driver() -> tuple[str, str]:
     error all degrade to ``("none", "n/a")`` so the signature assembly never
     raises on a machine without the tool.
 
-    This is called only behind ``fme.has_cuda()``; on a CPU-only build the
+    This is called only behind ``pg.has_cuda()``; on a CPU-only build the
     caller substitutes ``("none", "n/a")`` directly and never invokes this.
 
     Returns
@@ -223,7 +223,7 @@ def _machine_signature() -> str:
 
     The signature is ``"{cpu}|{gpu}|{driver}|{version}"`` -- a human-debuggable
     raw string, not a hash, so a cache file can be read and understood. The GPU
-    and driver components are gated on ``fme.has_cuda()``: a CPU-only build (or a
+    and driver components are gated on ``pg.has_cuda()``: a CPU-only build (or a
     machine with no usable device) yields ``gpu="none"`` / ``driver="n/a"``,
     while a GPU run on the SAME CPU reads the real device name and driver. The two
     therefore DIFFER by construction, so a CPU-only cache is never mistaken for a
@@ -236,14 +236,14 @@ def _machine_signature() -> str:
         The pipe-joined ``cpu|gpu|driver|version`` signature.
     """
     cpu = _cpu_brand()
-    if fme.has_cuda():
-        info = fme._core._cuda_device_info()
+    if pg.has_cuda():
+        info = pg._core._cuda_device_info()
         gpu = info.get("name") or "none"
         _, driver = _gpu_driver()
     else:
         gpu = "none"
         driver = "n/a"
-    return f"{cpu}|{gpu}|{driver}|{fme.__version__}"
+    return f"{cpu}|{gpu}|{driver}|{pg.__version__}"
 
 
 def _write_cache_atomic(path: str, payload: dict) -> None:
@@ -338,7 +338,7 @@ def _measure_cpu(budget_seconds: float, start: float) -> tuple[dict, list]:
         for dtype_name, dtype in (("float32", np.float32), ("float64", np.float64)):
             a = _seeded_square(n, dtype)
             b = _seeded_square(n, dtype)
-            t = _median_time(lambda: fme.matmul(a, b), reps, _WARMUP)
+            t = _median_time(lambda: pg.matmul(a, b), reps, _WARMUP)
             cpu[dtype_name].append([n, t])
         measured_sizes.append(n)
     return cpu, measured_sizes
@@ -347,7 +347,7 @@ def _measure_cpu(budget_seconds: float, start: float) -> tuple[dict, list]:
 def _measure_gpu(sizes: list) -> dict:
     """Measure the GPU float32 per-n compute-time grid (device-resident).
 
-    Caller-gated on ``fme.has_cuda()``. The operands are staged to the device
+    Caller-gated on ``pg.has_cuda()``. The operands are staged to the device
     ONCE per size (outside the timed region), then ``_cuda_time_matmul`` returns
     the warm GEMM time in milliseconds via cudaEvent pairs after a sync -- the
     only honest GPU timer, with no H2D/D2H inside the timed region. Only float32
@@ -369,9 +369,9 @@ def _measure_gpu(sizes: list) -> dict:
     for n in sizes:
         a = _seeded_square(n, np.float32)
         b = _seeded_square(n, np.float32)
-        xa = fme.to_device(a)
-        xb = fme.to_device(b)
-        warm_ms = fme._core._cuda_time_matmul(xa, xb, _GPU_REPS, _GPU_WARMUP)
+        xa = pg.to_device(a)
+        xb = pg.to_device(b)
+        warm_ms = pg._core._cuda_time_matmul(xa, xb, _GPU_REPS, _GPU_WARMUP)
         series.append([n, warm_ms / 1e3])
     return {"float32": series}
 
@@ -379,7 +379,7 @@ def _measure_gpu(sizes: list) -> dict:
 def _measure_transfer(sizes: list) -> dict:
     """Measure H2D / D2H bandwidth and the fixed staging floor, in seconds.
 
-    Caller-gated on ``fme.has_cuda()``. ``to_device`` (H2D) and ``from_device``
+    Caller-gated on ``pg.has_cuda()``. ``to_device`` (H2D) and ``from_device``
     (D2H) both synchronize at the boundary, so a ``perf_counter`` round trip
     around them is an honest transfer time. Bandwidth is derived from the largest
     measured size (where the fixed per-call overhead is the smallest fraction of
@@ -401,14 +401,14 @@ def _measure_transfer(sizes: list) -> dict:
         ``{"h2d_gbps", "d2h_gbps", "fixed_overhead_s"}``.
     """
     def _h2d(arr) -> float:
-        return _median_time(lambda: fme.to_device(arr), _GPU_REPS, _GPU_WARMUP)
+        return _median_time(lambda: pg.to_device(arr), _GPU_REPS, _GPU_WARMUP)
 
     def _d2h(dev) -> float:
-        return _median_time(lambda: fme.from_device(dev), _GPU_REPS, _GPU_WARMUP)
+        return _median_time(lambda: pg.from_device(dev), _GPU_REPS, _GPU_WARMUP)
 
     big = sizes[-1]
     a_big = _seeded_square(big, np.float32)
-    dev_big = fme.to_device(a_big)
+    dev_big = pg.to_device(a_big)
     big_bytes = big * big * 4
     h2d_big = _h2d(a_big)
     d2h_big = _d2h(dev_big)
@@ -421,7 +421,7 @@ def _measure_transfer(sizes: list) -> dict:
 
     small = sizes[0]
     a_small = _seeded_square(small, np.float32)
-    dev_small = fme.to_device(a_small)
+    dev_small = pg.to_device(a_small)
     small_bytes = small * small * 4
     # The smallest size's round trip minus the part the measured bandwidth
     # explains is the fixed floor: the launch + Python<->native<->CUDA crossings
@@ -449,7 +449,7 @@ def calibrate(force: bool = False, budget_seconds: float = 120) -> dict:
     CPU and -- only when a usable CUDA device is present -- the GPU compute time
     per size and the H2D/D2H transfer bandwidth. Assembles the machine signature,
     writes the result atomically as a schema-versioned JSON under the cache path
-    (``FME_CACHE_DIR`` if set, else the per-user cache dir), and returns the same
+    (``PEREGRINE_CACHE_DIR`` if set, else the per-user cache dir), and returns the same
     dict.
 
     On a CPU-only build the returned dict (and the cache) contain only the
@@ -486,7 +486,7 @@ def calibrate(force: bool = False, budget_seconds: float = 120) -> dict:
     Notes
     -----
     This measures; it never decides. The backend choice lives in
-    :func:`fastmathext.policy.choose_backend`, a pure function fed this dict.
+    :func:`peregrine.policy.choose_backend`, a pure function fed this dict.
 
     Examples
     --------
@@ -494,13 +494,13 @@ def calibrate(force: bool = False, budget_seconds: float = 120) -> dict:
     real per-user cache is untouched, returns a dict carrying the ``cpu`` grid:
 
     >>> import os, tempfile
-    >>> from fastmathext.calibrate import calibrate
+    >>> from peregrine.calibrate import calibrate
     >>> with tempfile.TemporaryDirectory() as d:
-    ...     os.environ["FME_CACHE_DIR"] = d
+    ...     os.environ["PEREGRINE_CACHE_DIR"] = d
     ...     try:
     ...         result = calibrate(force=True, budget_seconds=1)
     ...     finally:
-    ...         del os.environ["FME_CACHE_DIR"]
+    ...         del os.environ["PEREGRINE_CACHE_DIR"]
     >>> isinstance(result, dict)
     True
     >>> "cpu" in result
@@ -532,7 +532,7 @@ def calibrate(force: bool = False, budget_seconds: float = 120) -> dict:
     # GPU + transfer are measured ONLY on a build with a usable device. On a
     # CPU-only build the symbols do not exist and has_cuda() is False, so the keys
     # stay absent and the policy treats the GPU as unavailable.
-    if fme.has_cuda():
+    if pg.has_cuda():
         payload["gpu"] = _measure_gpu(measured_sizes)
         payload["transfer"] = _measure_transfer(measured_sizes)
 
