@@ -502,6 +502,16 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     "gap_mib = 768\n"
     "out_bytes = (gap_mib + 256) * 1024 * 1024\n"
     "N = int((out_bytes // 4) ** 0.5)\n"  # f32 square output (N, N)
+    # Allocate the tiny rank-1 inputs FIRST, while VRAM is still plentiful, so the
+    # exhaustion below can never starve them: (N, 1) and (1, N) are N floats each.
+    # Only the (N, N) OUTPUT alloc then OOMs -- making the trigger deterministic
+    # rather than racing the input allocs against the residual free. Seeded so the
+    # parent need not see the data.
+    "rng = np.random.default_rng(909)\n"
+    "a = rng.standard_normal((N, 1)).astype(np.float32)\n"
+    "b = rng.standard_normal((1, N)).astype(np.float32)\n"
+    "xa = fme.to_device(a)\n"
+    "xb = fme.to_device(b)\n"
     # Adaptive reserve: do NOT trust a single nvidia-smi free read. The mempool is
     # created with ReleaseThreshold=UINT64_MAX (context.cu), so after prior GPU
     # tests cudaFreeAsync returns freed buffers to the POOL, not the OS, and
@@ -539,14 +549,6 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
     # output alloc below will OOM. Stop growing the reserve.
     "        break\n"
     "    reserve.append(probe)\n"
-    # Rank-1 inputs: (N, 1) and (1, N), tiny (N floats each), so to_device succeeds
-    # and only the (N, N) output allocation OOMs. Seeded so the parent need not see
-    # the data.
-    "rng = np.random.default_rng(909)\n"
-    "a = rng.standard_normal((N, 1)).astype(np.float32)\n"
-    "b = rng.standard_normal((1, N)).astype(np.float32)\n"
-    "xa = fme.to_device(a)\n"
-    "xb = fme.to_device(b)\n"
     "with warnings.catch_warnings(record=True) as caught:\n"
     "    warnings.simplefilter('always')\n"
     "    got = fme.matmul(xa, xb)\n"
