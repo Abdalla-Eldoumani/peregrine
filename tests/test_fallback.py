@@ -1,11 +1,11 @@
-"""Fallback reachability proof: FME_DISABLE_AVX2 forces the naive kernel on this
+"""Fallback reachability proof: PEREGRINE_DISABLE_AVX2 forces the naive kernel on this
 AVX2 machine, and the forced-naive result matches the blis result within the
 suite tolerance.
 
 The override is the only way to exercise the no-AVX2 path on hardware that has
 AVX2, so this test is what keeps the permanent fallback honest. The subprocess
 indirection exists because the features are memoized at the first detect() call
-(module import); FME_DISABLE_AVX2 must be in the environment before the process
+(module import); PEREGRINE_DISABLE_AVX2 must be in the environment before the process
 starts to take effect, exactly like the OMP_NUM_THREADS pattern in test_threads.
 
 The comparison is toleranced, never bitwise: the blis path chunks its k
@@ -21,7 +21,7 @@ import sys
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 from conftest import assert_matmul_close
 
 # odd dimensions on purpose: 333 is a legacy-killer size and 257/199 are not
@@ -38,14 +38,14 @@ import sys
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 
-assert fme.cpu_features()["avx2"] is False, fme.cpu_features()
+assert pg.cpu_features()["avx2"] is False, pg.cpu_features()
 
 rng = np.random.default_rng(42)
 a = rng.standard_normal((333, 257))
 b = rng.standard_normal((257, 199))
-np.save(sys.argv[1], fme.matmul(a, b))
+np.save(sys.argv[1], pg.matmul(a, b))
 """
 
 
@@ -53,7 +53,7 @@ def _run_forced_naive(tmp_path):
     out_path = tmp_path / "got_naive.npy"
     # full environment copy with the override merged in: a stripped env breaks
     # DLL resolution for the OpenMP runtime on Windows
-    env = dict(os.environ, FME_DISABLE_AVX2="1")
+    env = dict(os.environ, PEREGRINE_DISABLE_AVX2="1")
     p = subprocess.run(
         [sys.executable, "-c", SCRIPT, str(out_path)],
         env=env,
@@ -74,7 +74,7 @@ def test_disable_avx2_forces_naive_and_matches_blis(tmp_path):
     rng = np.random.default_rng(SEED)
     a = rng.standard_normal((M, K))
     b = rng.standard_normal((K, N))
-    got_blis = fme.matmul(a, b)
+    got_blis = pg.matmul(a, b)
 
     # toleranced, not bitwise: KC vs KB chunking differ across the two paths
     assert_matmul_close(got_naive, got_blis, a, b)
