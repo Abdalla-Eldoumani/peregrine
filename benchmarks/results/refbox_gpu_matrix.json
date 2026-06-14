@@ -4,7 +4,7 @@
     "processor": "Intel64 Family 6 Model 165 Stepping 2, GenuineIntel",
     "python": "3.12.4",
     "numpy": "2.4.6",
-    "fastmathext": "3.0.0",
+    "peregrine": "3.0.0",
     "cpu_features": {
       "avx2": true,
       "fma": true,
