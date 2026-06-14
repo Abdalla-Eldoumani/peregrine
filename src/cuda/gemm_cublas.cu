@@ -89,8 +89,8 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
         return;
     }
 
-    // Borrow the singleton's handle and stream (04-02): no per-call
-    // cublasCreate. The handle is already bound to the compute stream and
+    // Borrow the singleton's handle and stream: no per-call cublasCreate. The
+    // handle is already bound to the compute stream and
     // already carries the math mode decided once at init from FME_ALLOW_TF32
     // (DEFAULT_MATH off by default). We do NOT call cublasSetMathMode per GEMM:
     // the mode is fixed for the session so it cannot drift into a result that
@@ -100,10 +100,10 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     Context& ctx = context();
 
     // cuBLAS v2 takes int for m/n/k and the leading dimensions; we carry int64
-    // internally per the src int64-index rule. This phase's sizes are at most a
-    // few thousand per dimension (GPU-08 is n=2048), far inside INT_MAX, and
-    // huge-GEMM k-panel tiling is a later (Phase 5+) calibration concern, so the
-    // narrowing cast here is safe. The guard makes the assumption explicit: if a
+    // internally per the src int64-index rule. The bench sizes are at most a few
+    // thousand per dimension (up to n=2048), far inside INT_MAX, and huge-GEMM
+    // k-panel tiling is a later calibration concern, so the narrowing cast here is
+    // safe. The guard makes the assumption explicit: if a
     // dimension ever exceeds int range it is a tiling bug, not a silent
     // out-of-bounds device access.
     if (m > INT32_MAX || k > INT32_MAX || n > INT32_MAX) {
@@ -185,11 +185,10 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // The destination `c` is the caller's pageable new T[] buffer (module.cpp
     // gemm_host_typed), so this cudaMemcpyAsync D2H is NOT truly asynchronous:
     // into pageable host memory the driver inserts a synchronous staging copy
-    // through its own bounce buffer (WR-01). It is correct, just not overlapped;
-    // the transfer.cu pinned-staging cache that exists to make D2H genuinely
-    // async is deliberately NOT used here (see its IN-01 note and the
-    // single-stream caveat below). For the GPU-02 correctness entry the simple
-    // pageable copy is the right tradeoff.
+    // through its own bounce buffer. It is correct, just not overlapped; a pinned
+    // host buffer would be needed to make D2H genuinely async, which this
+    // correctness entry does not bother with -- the simple pageable copy is the
+    // right tradeoff here.
     FME_CUDA_CHECK(cudaMemcpyAsync(c, dc_p, c_bytes, cudaMemcpyDeviceToHost, stream));
 
     // The D2H copy feeds the caller's host buffer, so sync before returning: the
@@ -198,17 +197,15 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // stream-ordered behind the copy, so the result is safely in c once the
     // stream drains, and the frees ride the same stream ordering.
     //
-    // ORDERING CONTRACT (WR-01): the copy, the three frees, and this sync are
-    // correct ONLY because everything in gemm_host runs on the ONE compute
-    // stream -- the free-after-copy and copy-before-return orderings are pure
-    // stream ordering, with no event/fence. If this function is ever migrated to
-    // stage on ctx.transfer (the natural change once the pinned cache is wired,
-    // since that cache is a transfer-stream primitive), the cross-stream
-    // ordering between the transfer-stream copy and the compute-stream GEMM must
-    // be fenced exactly as matmul_device does (04-07: sync_transfer before the
-    // GEMM, sync_compute after) -- otherwise it silently becomes the
-    // use-before-ready race 04-07 fixed. Do not move the staging to another
-    // stream without adding those fences.
+    // ORDERING CONTRACT: the copy, the three frees, and this sync are correct ONLY
+    // because everything in gemm_host runs on the ONE compute stream -- the
+    // free-after-copy and copy-before-return orderings are pure stream ordering,
+    // with no event/fence. If this function is ever migrated to stage on
+    // ctx.transfer, the cross-stream ordering between the transfer-stream copy and
+    // the compute-stream GEMM must be fenced exactly as matmul_device does
+    // (sync_transfer before the GEMM, sync_compute after) -- otherwise it silently
+    // becomes a use-before-ready race. Do not move the staging to another stream
+    // without adding those fences.
     FME_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
