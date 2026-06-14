@@ -8,6 +8,46 @@
 namespace fme::cuda {
 namespace {
 
+// RAII owners for the device scratch and cudaEvents these timing/staging
+// entries allocate. The bodies are wrapped in FME_*_CHECK calls that throw on
+// failure (an OOM mid-allocation, an async launch error surfaced by a sync), and
+// without an owner a throw unwinds past the trailing cudaFreeAsync/cudaEventDestroy
+// and leaks the buffer into the context mempool (release threshold UINT64_MAX, so
+// it is never returned to the OS and compounds the very OOM that triggered it).
+// The CPU side solved exactly this with aligned_buf; these mirror it for the
+// device. The destructors run on the unwind path, so they must NOT use the
+// throwing CHECK -- they inspect nothing and discard the return code the way
+// free_device does on its live path, then clear the sticky error so it cannot
+// poison the next CUDA call. Freeing on the same stream the buffer was allocated
+// on keeps the cleanup stream-ordered behind any work already queued.
+struct device_buf {
+    void* ptr = nullptr;
+    cudaStream_t stream = nullptr;
+    device_buf() = default;
+    device_buf(void* p, cudaStream_t s) : ptr(p), stream(s) {}
+    ~device_buf() {
+        if (ptr != nullptr) {
+            cudaFreeAsync(ptr, stream);
+            cudaGetLastError();
+        }
+    }
+    device_buf(const device_buf&) = delete;
+    device_buf& operator=(const device_buf&) = delete;
+};
+
+struct cuda_event {
+    cudaEvent_t ev = nullptr;
+    ~cuda_event() {
+        if (ev != nullptr) {
+            cudaEventDestroy(ev);
+            cudaGetLastError();
+        }
+    }
+    cuda_event() = default;
+    cuda_event(const cuda_event&) = delete;
+    cuda_event& operator=(const cuda_event&) = delete;
+};
+
 // cuBLAS dispatched by operand type. The two overloads let the templated gemm
 // below stay dtype-generic while each calls the correct precision entry; alpha
 // and beta are passed in the operand type (a float* for Sgemm, double* for
@@ -112,26 +152,35 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     const size_t c_bytes = static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T);
 
     // Stream-ordered allocation from the context mempool (release threshold
-    // UINT64_MAX, set in 04-02), so repeated calls reuse buffers instead of
-    // re-allocating from the OS. All three buffers, the copies, the compute, and
-    // the free are ordered on the one compute stream, so no cross-stream event
-    // is needed. A zero-k input still allocates dA/dB (size 0 is a valid
-    // cudaMallocAsync) and dC, then gemm zero-fills dC.
-    T* da = nullptr;
-    T* db = nullptr;
-    T* dc = nullptr;
-    FME_CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&da), a_bytes, stream));
-    FME_CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&db), b_bytes, stream));
-    FME_CUDA_CHECK(cudaMallocAsync(reinterpret_cast<void**>(&dc), c_bytes, stream));
+    // UINT64_MAX), so repeated calls reuse buffers instead of re-allocating from
+    // the OS. All three buffers, the copies, the compute, and the free are
+    // ordered on the one compute stream, so no cross-stream event is needed. A
+    // zero-k input still allocates dA/dB (size 0 is a valid cudaMallocAsync) and
+    // dC, then gemm zero-fills dC. Each buffer is owned by device_buf so a throw
+    // from any CHECK below (a copy or the inner gemm surfacing an async/cuBLAS
+    // error) frees what was already allocated instead of leaking it into the
+    // mempool.
+    void* da_raw = nullptr;
+    void* db_raw = nullptr;
+    void* dc_raw = nullptr;
+    FME_CUDA_CHECK(cudaMallocAsync(&da_raw, a_bytes, stream));
+    device_buf da{da_raw, stream};
+    FME_CUDA_CHECK(cudaMallocAsync(&db_raw, b_bytes, stream));
+    device_buf db{db_raw, stream};
+    FME_CUDA_CHECK(cudaMallocAsync(&dc_raw, c_bytes, stream));
+    device_buf dc{dc_raw, stream};
+    T* da_p = static_cast<T*>(da.ptr);
+    T* db_p = static_cast<T*>(db.ptr);
+    T* dc_p = static_cast<T*>(dc.ptr);
 
     if (a_bytes > 0) {
-        FME_CUDA_CHECK(cudaMemcpyAsync(da, a, a_bytes, cudaMemcpyHostToDevice, stream));
+        FME_CUDA_CHECK(cudaMemcpyAsync(da_p, a, a_bytes, cudaMemcpyHostToDevice, stream));
     }
     if (b_bytes > 0) {
-        FME_CUDA_CHECK(cudaMemcpyAsync(db, b, b_bytes, cudaMemcpyHostToDevice, stream));
+        FME_CUDA_CHECK(cudaMemcpyAsync(db_p, b, b_bytes, cudaMemcpyHostToDevice, stream));
     }
 
-    gemm<T>(da, db, dc, m, k, n);
+    gemm<T>(da_p, db_p, dc_p, m, k, n);
 
     // The destination `c` is the caller's pageable new T[] buffer (module.cpp
     // gemm_host_typed), so this cudaMemcpyAsync D2H is NOT truly asynchronous:
@@ -141,16 +190,13 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // async is deliberately NOT used here (see its IN-01 note and the
     // single-stream caveat below). For the GPU-02 correctness entry the simple
     // pageable copy is the right tradeoff.
-    FME_CUDA_CHECK(cudaMemcpyAsync(c, dc, c_bytes, cudaMemcpyDeviceToHost, stream));
-
-    FME_CUDA_CHECK(cudaFreeAsync(da, stream));
-    FME_CUDA_CHECK(cudaFreeAsync(db, stream));
-    FME_CUDA_CHECK(cudaFreeAsync(dc, stream));
+    FME_CUDA_CHECK(cudaMemcpyAsync(c, dc_p, c_bytes, cudaMemcpyDeviceToHost, stream));
 
     // The D2H copy feeds the caller's host buffer, so sync before returning: the
-    // "every D2H feeding a host-visible return syncs first" rule. cudaFreeAsync
-    // is stream-ordered behind the copy, so the result is safely in c once the
-    // stream drains.
+    // "every D2H feeding a host-visible return syncs first" rule. The device_buf
+    // owners free da/db/dc on scope exit (after this sync); cudaFreeAsync is
+    // stream-ordered behind the copy, so the result is safely in c once the
+    // stream drains, and the frees ride the same stream ordering.
     //
     // ORDERING CONTRACT (WR-01): the copy, the three frees, and this sync are
     // correct ONLY because everything in gemm_host runs on the ONE compute
@@ -193,22 +239,26 @@ float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
     // One output buffer from the context mempool on the compute stream, reused
     // across every warmup and timed rep (the inputs do not change, so the GEMM
     // overwrites C each iteration -- beta is 0 in gemm). Allocated once so no
-    // allocation lands inside the timed region.
-    T* dc = nullptr;
-    FME_CUDA_CHECK(
-        cudaMallocAsync(reinterpret_cast<void**>(&dc), c_bytes, stream));
+    // allocation lands inside the timed region. The device_buf and cuda_event
+    // owners free the buffer and destroy the events on scope exit, including the
+    // unwind path: a throw from the GEMM, a record, a sync, or the elapsed-time
+    // query would otherwise leak the buffer into the mempool and leak the events.
+    void* dc_raw = nullptr;
+    FME_CUDA_CHECK(cudaMallocAsync(&dc_raw, c_bytes, stream));
+    device_buf dc{dc_raw, stream};
+    T* dc_p = static_cast<T*>(dc.ptr);
 
-    cudaEvent_t e0 = nullptr;
-    cudaEvent_t e1 = nullptr;
-    FME_CUDA_CHECK(cudaEventCreate(&e0));
-    FME_CUDA_CHECK(cudaEventCreate(&e1));
+    cuda_event e0;
+    cuda_event e1;
+    FME_CUDA_CHECK(cudaEventCreate(&e0.ev));
+    FME_CUDA_CHECK(cudaEventCreate(&e1.ev));
 
     // Warm the clocks: the first GEMM on a cold GPU pays clock ramp and any lazy
-    // cuBLAS init, so timing it would overstate the cost (RESEARCH/skill: warm
-    // before timing, report warm). These run on the compute stream and are not
-    // bracketed by the events.
+    // cuBLAS init, so timing it would overstate the cost (warm before timing,
+    // report warm). These run on the compute stream and are not bracketed by the
+    // events.
     for (int i = 0; i < warmups; ++i) {
-        gemm<T>(a, b, dc, m, k, n);
+        gemm<T>(a, b, dc_p, m, k, n);
     }
 
     // Sync before the start event so the warmups are fully drained and e0 marks a
@@ -216,22 +266,18 @@ float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
     // events on the same stream. cudaEventElapsedTime measures device time between
     // them, the only correct way to time an async launch.
     FME_CUDA_CHECK(cudaStreamSynchronize(stream));
-    FME_CUDA_CHECK(cudaEventRecord(e0, stream));
+    FME_CUDA_CHECK(cudaEventRecord(e0.ev, stream));
     for (int i = 0; i < reps; ++i) {
-        gemm<T>(a, b, dc, m, k, n);
+        gemm<T>(a, b, dc_p, m, k, n);
     }
-    FME_CUDA_CHECK(cudaEventRecord(e1, stream));
-    FME_CUDA_CHECK(cudaEventSynchronize(e1));
+    FME_CUDA_CHECK(cudaEventRecord(e1.ev, stream));
+    FME_CUDA_CHECK(cudaEventSynchronize(e1.ev));
 
     float ms = 0.0f;
-    FME_CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
+    FME_CUDA_CHECK(cudaEventElapsedTime(&ms, e0.ev, e1.ev));
 
-    // Destroy the events and return the buffer to the pool. These are live-path
-    // calls (not teardown), so CHECK-wrapping is correct here.
-    FME_CUDA_CHECK(cudaEventDestroy(e0));
-    FME_CUDA_CHECK(cudaEventDestroy(e1));
-    FME_CUDA_CHECK(cudaFreeAsync(dc, stream));
-
+    // dc, e0, e1 are released by their owners on return. ms is read into the
+    // return value before any destructor runs.
     return ms / static_cast<float>(reps);
 }
 
