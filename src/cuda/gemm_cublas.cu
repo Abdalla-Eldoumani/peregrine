@@ -109,7 +109,7 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     if (m > INT32_MAX || k > INT32_MAX || n > INT32_MAX) {
         throw ::fme::cuda_error(
             "cuda gemm: a dimension exceeds the int32 cuBLAS limit; "
-            "huge-GEMM tiling is not implemented at this phase");
+            "huge-GEMM tiling is not implemented");
     }
     const int mi = static_cast<int>(m);
     const int ki = static_cast<int>(k);
