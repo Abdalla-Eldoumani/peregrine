@@ -23,9 +23,9 @@ inline int64_t dtype_size(DType dt) {
 // The device-buffer handle fme.Array wraps. It owns a device pointer allocated
 // from the context mempool plus the 2-D shape and the element dtype, so it is
 // fully self-describing: from_device and the dlpack export read rows/cols/dtype
-// off the handle with no parallel state on the binding side (RESEARCH leaves the
-// shape/dtype ownership to Claude; carrying it here keeps the binding free of a
-// second source of truth that could drift from the buffer it describes).
+// off the handle with no parallel state on the binding side. Carrying the shape
+// and dtype on the handle keeps the binding free of a second source of truth that
+// could drift from the buffer it describes.
 //
 // ptr is a raw device pointer; the byte size is rows*cols*dtype_size. Ownership
 // is single-owner: exactly one Array (one capsule deleter) frees a given ptr via
@@ -42,7 +42,8 @@ struct DeviceBuffer {
 };
 
 // Allocate a device buffer of `bytes` from the context mempool (cudaMallocAsync
-// on a context stream, reused via the UINT64_MAX release threshold 04-02 set).
+// on a context stream, reused via the UINT64_MAX release threshold the context
+// sets on the pool).
 // Pre-flights cudaMemGetInfo against the CURRENT free VRAM and throws
 // fme::cuda_error carrying the cudaErrorMemoryAllocation NAME when the request
 // would exceed free (with a small headroom margin) -- never discovering OOM by
@@ -86,38 +87,11 @@ void sync_transfer();
 // (a sync can surface an asynchronous launch error) and never used at teardown.
 void sync_compute();
 
-// Pinned host-staging cache (cudaHostAlloc), total capped at 256MB.
-//
-// STATUS (IN-01): this is a Phase-5+ staging PRIMITIVE that NO Phase-4 transfer
-// path calls yet. Every current host<->device copy -- gemm_host (gemm_cublas.cu)
-// and to_device/from_device (module.cpp) -- stages through a pageable new T[]
-// buffer, so those copies are NOT pinned and the cache below is unused. It is
-// implemented and unit-tested in isolation (acquire/reuse/evict, the 256MB cap)
-// so the primitive is ready, but wiring it into the transfer paths is deferred:
-// staging from_device/to_device through it would add a device->pinned->pageable
-// hop and, for gemm_host, would move the D2H onto the transfer stream and so
-// require the 04-07 cross-stream fences (see the ordering contract in
-// gemm_cublas.cu). Do not read the comments below as "transfers are pinned" --
-// they describe what this cache WOULD provide once a path adopts it.
-//
-// Why pinned at all: a pageable host buffer forces cudaMemcpyAsync to fall back
-// to a synchronous staging copy through a driver-internal pinned bounce buffer,
-// so H2D/D2H on the transfer stream cannot truly overlap or run async. A pinned
-// buffer lets the copy be genuinely asynchronous and hits the full PCIe rate.
-//
-// Why a CAP and a cache (not allocate-per-call): cudaHostAlloc is expensive and
-// pinned pages are a scarce OS resource -- unbounded pinned memory fragments and
-// degrades all of Windows (the skill's hard rule). So buffers are pooled and
-// reused, and the running total is capped at 256MB.
-//
-// acquire returns a pinned buffer of at least `bytes`, reusing a cached one that
-// fits when possible; release returns it to the cache. The eviction policy is
-// documented in transfer.cu. acquire returning nullptr means "cap reached, no
-// reusable buffer" and the caller must fall back to an unpinned path; this plan's
-// transfers are small enough that the cap is never the binding constraint, but
-// the contract is explicit so a future large-transfer path cannot silently
-// over-commit pinned memory.
-void* pinned_acquire(int64_t bytes);
-void pinned_release(void* host_ptr);
+// Pinned host-staging is a future optimization and is not implemented here:
+// current transfers use pageable host memory (gemm_host stages through a pageable
+// new T[]; to_device/from_device copy pageable host buffers). A pageable copy
+// forces cudaMemcpyAsync through a driver-internal bounce buffer and cannot fully
+// overlap, so a pinned-buffer cache would be the way to make H2D/D2H genuinely
+// async at the full PCIe rate when a large-transfer path needs it.
 
 } // namespace fme::cuda
