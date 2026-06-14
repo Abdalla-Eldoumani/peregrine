@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.26)
-project(fastmathext LANGUAGES CXX)
+project(peregrine LANGUAGES CXX)
 
-option(FME_ENABLE_CUDA "Build the CUDA backend (requires CUDA Toolkit 12.8)" OFF)
+option(PG_ENABLE_CUDA "Build the CUDA backend (requires CUDA Toolkit 12.8)" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,7 +40,7 @@ target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
 # feature_detect, gemm_naive, fused_naive, dispatch, and module TUs must stay
 # free of AVX2 codegen so the fallback path runs everywhere; fused_naive.cpp is
 # the fused fallback and is kept OUT of this list on purpose.
-set(FME_AVX2_SOURCES
+set(PG_AVX2_SOURCES
   src/cpu/pack.cpp
   src/cpu/microkernel_avx2_f64.cpp
   src/cpu/microkernel_avx2_f32.cpp
@@ -61,13 +61,13 @@ if (MSVC)
   # byte-identical flags.
   target_compile_options(_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:/O2;/openmp:llvm;/permissive-;/W4>)
-  set_source_files_properties(${FME_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
   # No -ffast-math for the same reason. CXX-fenced for the same nvcc reason as
   # the MSVC branch (and a no-op difference on the CUDA-OFF Linux/CI build).
   target_compile_options(_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O3;-Wall;-Wextra>)
-  set_source_files_properties(${FME_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
 
   # libatomic on GCC/Clang. The MC/KC/NC sweep hook publishes its triple through
   # a std::atomic<blocking> (gemm_blis.cpp); blocking is three int64 (24 bytes),
@@ -82,13 +82,13 @@ else()
   # GCC inlines. MSVC handles the 16-byte atomic intrinsically, so this is the
   # GNU/Clang branch only. find_library keeps it portable (no hard -latomic on a
   # toolchain that lacks a separate libatomic).
-  find_library(FME_LIBATOMIC NAMES atomic libatomic.so.1)
-  if (FME_LIBATOMIC)
-    target_link_libraries(_core PRIVATE ${FME_LIBATOMIC})
+  find_library(PG_LIBATOMIC NAMES atomic libatomic.so.1)
+  if (PG_LIBATOMIC)
+    target_link_libraries(_core PRIVATE ${PG_LIBATOMIC})
   endif()
 endif()
 
-if (FME_ENABLE_CUDA)
+if (PG_ENABLE_CUDA)
   enable_language(CUDA)
   # sm_86 is the GA106 in the primary dev machine. PTX for 8.6 keeps newer
   # consumer parts working through JIT.
@@ -124,8 +124,8 @@ if (FME_ENABLE_CUDA)
     CUDA_ARCHITECTURES 86
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON)
-  target_compile_definitions(_core PRIVATE FME_HAS_CUDA=1)
+  target_compile_definitions(_core PRIVATE PG_HAS_CUDA=1)
   target_link_libraries(_core PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
 endif()
 
-install(TARGETS _core LIBRARY DESTINATION fastmathext)
+install(TARGETS _core LIBRARY DESTINATION peregrine)
