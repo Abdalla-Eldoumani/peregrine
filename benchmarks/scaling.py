@@ -8,7 +8,7 @@ measure 1.0x (RESEARCH Pitfall 3).
 The OpenMP runtime reads OMP_NUM_THREADS once at its initialization, so a single
 process cannot remeasure at different thread counts. This mirrors the
 tests/test_threads.py subprocess model: one child per thread count, the OMP env
-set in the child's environment BEFORE the child imports fastmathext, a full
+set in the child's environment BEFORE the child imports peregrine, a full
 os.environ copy so Windows DLL resolution for the OpenMP runtime survives, and
 the measured median crossing the process boundary as JSON on stdout. Each child
 verifies its own result through the single toleranced path before reporting; a
@@ -29,7 +29,7 @@ import sys
 import time
 
 # The manifest comes from the bench harness; threads are recorded per child.
-# The parent does not import fastmathext (it never benches), so no OMP env is
+# The parent does not import peregrine (it never benches), so no OMP env is
 # pinned here: only the children measure, and they pin their own.
 from bench_matmul import _machine_manifest
 
@@ -44,7 +44,7 @@ import statistics
 
 import numpy as np
 
-import fastmathext as fme
+import peregrine as pg
 
 _TESTS = sys.argv[4]
 if _TESTS not in sys.path:
@@ -59,15 +59,15 @@ rng = np.random.default_rng(0)
 a = rng.standard_normal((n, n))
 b = rng.standard_normal((n, n))
 ref = a @ b
-got = fme.matmul(a, b)
+got = pg.matmul(a, b)
 assert_matmul_close(got, ref, a, b)
 
 for _ in range(warmup):
-    fme.matmul(a, b)
+    pg.matmul(a, b)
 times = []
 for _ in range(reps):
     t0 = time.perf_counter_ns()
-    fme.matmul(a, b)
+    pg.matmul(a, b)
     times.append((time.perf_counter_ns() - t0) / 1e9)
 median = statistics.median(times)
 cv = statistics.stdev(times) / median if reps >= 2 and median > 0 else float("nan")
