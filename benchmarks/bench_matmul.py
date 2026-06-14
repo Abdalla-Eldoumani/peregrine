@@ -79,7 +79,7 @@ def _power_profile() -> str:
 
 
 def _gpu_manifest() -> tuple[str, str]:
-    # (gpu, driver) for the DESIGN_SYSTEM manifest keys, best-effort and never
+    # (gpu, driver) for the benchmark manifest, best-effort and never
     # raising. nvidia-smi ships with the driver and is queried for the device
     # name and driver version; a CPU-only build, no device, or no nvidia-smi all
     # degrade to ("none", "n/a") so the manifest records what it can prove rather
