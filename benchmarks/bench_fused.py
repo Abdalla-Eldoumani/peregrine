@@ -245,6 +245,12 @@ def _gpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
             f"  ratio {case['ratio_vs_numpy_cpu_f32']:5.1f}x"
             f"  (~{gbps:.0f} GB/s, device-resident, transfer excluded)"
         )
+        # Release the operand device handles before the next size's to_device so a
+        # multi-size sweep does not hold three prior-iteration buffers (and the
+        # final iteration's operands do not straggle to interpreter finalization,
+        # the 06-04 nanobind leaked-instance warning the verify temporaries above
+        # are already dropped to avoid).
+        del xd, yd, zd
     return series
 
 
