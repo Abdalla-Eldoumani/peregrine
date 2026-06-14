@@ -1,11 +1,11 @@
 #pragma once
 #include <cstdint>
 
-namespace fme::cpu {
+namespace pg::cpu {
 
 // Fused elementwise kernels over a flat C-contiguous buffer of n elements.
 // Three ops, two bodies each: an AVX2+FMA fast path (fused_avx2.cpp, joined to
-// FME_AVX2_SOURCES) and a plain scalar fallback (fused_naive.cpp). Dispatch
+// PG_AVX2_SOURCES) and a plain scalar fallback (fused_naive.cpp). Dispatch
 // picks between them on cpu::detect().avx2 && fma, exactly as it chooses
 // gemm_blis vs gemm_naive. This header stays intrinsic-free (it includes no AVX2
 // intrinsics header) so the no-AVX2 fallback module links it without dragging
@@ -80,4 +80,4 @@ extern template void fused_fma3_naive<double>(const double*, const double*, cons
 extern template void fused_scaled_relu_naive<float>(const float*, float*, int64_t, float);
 extern template void fused_scaled_relu_naive<double>(const double*, double*, int64_t, double);
 
-} // namespace fme::cpu
+} // namespace pg::cpu
