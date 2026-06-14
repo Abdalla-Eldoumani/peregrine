@@ -87,7 +87,7 @@ import fastmathext as fme
 from fastmathext import policy
 
 # The SUBMODULE, fetched via import_module. As of Phase 5 the package re-exports
-# the calibrate FUNCTION as fme.calibrate (the public API the design doc names),
+# the calibrate FUNCTION as fme.calibrate (the public API),
 # which shadows the submodule attribute: `from fastmathext import calibrate` and
 # `import fastmathext.calibrate as calibrate` both now bind the FUNCTION. These
 # tests need the MODULE -- they call calibrate.calibrate(), _machine_signature(),
@@ -658,7 +658,7 @@ def test_calibrate_budget(tmp_path, monkeypatch):
     # the loop measures a whole size before re-checking elapsed, so one in-flight
     # size can run past the nominal budget. Assert a generous ceiling (the budget
     # plus a wide margin for that final size) rather than the budget exactly --
-    # a tight bound would be the flaky kind tests/CLAUDE.md forbids.
+    # a tight bound would be the flaky kind this suite forbids.
     monkeypatch.setenv("FME_CACHE_DIR", str(tmp_path))
     budget = 5.0
     start = time.perf_counter()
