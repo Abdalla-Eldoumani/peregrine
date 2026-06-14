@@ -2,8 +2,8 @@
 no native build, so this file runs on every build including the WSL CPU-only
 clone (it is the BNCH-04 unit coverage the fresh-clone gate leans on).
 
-The version single-source proof: fme.__version__ must equal both the literal
-"3.0.0" and importlib.metadata.version("fastmathext"), so a drift between
+The version single-source proof: pg.__version__ must equal both the literal
+"3.0.0" and importlib.metadata.version("peregrine"), so a drift between
 pyproject and the package would fail here rather than ship. pyproject is read
 with tomllib (stdlib 3.11+), json.load's TOML sibling, never eval'd.
 """
@@ -12,7 +12,7 @@ from importlib.metadata import version as _metadata_version
 import os
 import tomllib
 
-import fastmathext as fme
+import peregrine as pg
 
 # pyproject.toml sits at the repo root, two levels up from this test file.
 _PYPROJECT = os.path.join(
@@ -32,8 +32,8 @@ def test_version_single_source():
     # The genuine single source: __version__ is read from importlib.metadata in
     # __init__.py, so it must equal both the released literal and the installed
     # package metadata. If pyproject and the package ever drift, this fails.
-    assert fme.__version__ == "3.0.0"
-    assert fme.__version__ == _metadata_version("fastmathext")
+    assert pg.__version__ == "3.0.0"
+    assert pg.__version__ == _metadata_version("peregrine")
 
 
 def test_pyproject_version():
