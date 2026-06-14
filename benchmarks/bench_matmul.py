@@ -136,7 +136,7 @@ def _machine_manifest() -> dict:
     return info
 
 
-def _bench(fn, reps: int, warmup: int) -> dict:
+def _measure_once(fn, reps: int, warmup: int) -> dict:
     for _ in range(warmup):
         fn()
     times = []
@@ -146,9 +146,10 @@ def _bench(fn, reps: int, warmup: int) -> dict:
         times.append((time.perf_counter_ns() - t0) / 1e9)
     median = statistics.median(times)
     # Coefficient of variation, stdev over median. bench-protocol rule 6 gates a
-    # series at CV > 5 percent; this phase reports it as a readout so a noisy run
-    # is visible at the console, but the gate-with-automatic-rerun machinery is
-    # Phase 7, not here. stdev needs two samples and a non-zero median.
+    # series at CV > 5 percent; this body reports it as a readout so a noisy run
+    # is visible at the console, while _bench's opt-in cv_gate wrapper owns the
+    # rerun-after-cooldown machinery. stdev needs two samples and a non-zero
+    # median.
     cv = (
         statistics.stdev(times) / median
         if reps >= 2 and median > 0
@@ -162,6 +163,48 @@ def _bench(fn, reps: int, warmup: int) -> dict:
         "cv": cv,
         "reps": reps,
     }
+
+
+def _bench(
+    fn,
+    reps: int,
+    warmup: int,
+    *,
+    cv_gate: bool = False,
+    cv_threshold: float = 0.05,
+    max_reruns: int = 2,
+    cooldown_s: float = 30,
+    cooldown_fn=time.sleep,
+) -> dict:
+    # The single shared timing core. The DEFAULT path (cv_gate False) returns
+    # _measure_once unchanged, so every existing reuser -- bench_fused's
+    # `from bench_matmul import _bench`, scaling.py, sweep_blocking.py,
+    # calibrate.py -- calls it positionally and sees a byte-identical dict shape
+    # (median_s, p25_s, p75_s, min_s, cv, reps). They are untouched by this gate.
+    result = _measure_once(fn, reps, warmup)
+    if not cv_gate:
+        return result
+    # bench-protocol rule 6: a series whose CV exceeds the threshold is
+    # invalidated and rerun after a cooldown (rule 10: >=30s between heavy
+    # series); after a bounded number of reruns a still-noisy series is recorded
+    # rather than dropped. cooldown_fn is injectable (default time.sleep) so a
+    # unit test stubs it to a no-op and never waits 30 real seconds.
+    reruns = 0
+    while result["cv"] > cv_threshold and reruns < max_reruns:
+        cooldown_fn(cooldown_s)
+        result = _measure_once(fn, reps, warmup)
+        reruns += 1
+    # rule 6/9/11: a high_cv series is STILL verified. The floor (min_s) is the
+    # honest headline statistic regardless of CV; high_cv documents the residual
+    # noise rather than hiding it behind a footnote, and the series is never
+    # stripped -- 07-03's load_series must accept the high_cv+verified pair (the
+    # AV-noisy CPU sweep on this machine is high_cv every run). The gate exists
+    # so a noisy MEDIAN is never silently published, not to "fix" the
+    # AV-vs-OpenMP barrier noise that is structural here.
+    result["high_cv"] = result["cv"] > cv_threshold
+    result["reruns"] = reruns
+    result["verified"] = True
+    return result
 
 
 def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
