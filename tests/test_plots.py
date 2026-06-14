@@ -384,7 +384,7 @@ def test_readme_is_v3_not_the_old_doc():
     # MathExt import, np.dot-on-lists) survive.
     text = _read_text(_README)
     # The old-doc markers: the v1.2 tag, the factorial/Strassen story, the old
-    # MathExt module (import and dotted call, NOT the FastMathExt project name),
+    # MathExt module (import and dotted call, NOT the Peregrine project name),
     # and np.dot-on-lists timing. None survive the rewrite.
     for marker in (
         "v1.2",
@@ -396,7 +396,7 @@ def test_readme_is_v3_not_the_old_doc():
     ):
         assert marker not in text, f"old-doc marker {marker!r} survives in README"
     assert "3.0.0" in text  # the current version is stated
-    assert "FastMathExt" in text
+    assert "Peregrine" in text
 
 
 def test_readme_round_trip_closure():
@@ -448,15 +448,15 @@ def test_readme_has_required_sections():
     # quickstart surface, the loss rows, the neutral methodology, and the
     # hardware manifest.
     text = _read_text(_README)
-    assert "FME_ENABLE_CUDA=ON" in text  # the CUDA build install
+    assert "PG_ENABLE_CUDA=ON" in text  # the CUDA build install
     assert "pip install -e ." in text  # the CPU-only default install
     assert "CUDA Toolkit 12.8" in text  # the CUDA version note
     # The quickstart surface (every public op the plan names).
     for op in (
         "matmul",
         "transpose",
-        "fme.sum",
-        "fme.mean",
+        "pg.sum",
+        "pg.mean",
         "axpby",
         "fma3",
         "scaled_relu",
