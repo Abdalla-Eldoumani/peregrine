@@ -18,7 +18,7 @@ Two methodology points specific to a blocking sweep:
    a bitwise reference would read a correct kernel as broken (RESEARCH Pitfall 4).
 
 Usage:
-    python benchmarks/sweep_blocking.py --save benchmarks/results/tuning/sweep_zpicy.json
+    python benchmarks/sweep_blocking.py --save benchmarks/results/tuning/sweep_refbox.json
 """
 
 from __future__ import annotations
