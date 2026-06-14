@@ -171,6 +171,28 @@ def test_cpu_oracle_rectangular(op_id, call, oracle, n_operands, dtype):
     assert_fused_close(np.asarray(got), ref)
 
 
+@pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
+def test_cpu_axpby_bitwise_equals_unfused(dtype):
+    # axpby is BITWISE a*x + b*y, not a single fused rounding (assert_array_equal,
+    # not the tolerance helper). The AVX2 vector body computes add(mul(a,x),
+    # mul(b,y)) -- two roundings -- which under /fp:precise (MSVC stops emitting
+    # FMA contractions; conftest header) and non-contracting GCC equals the scalar
+    # tail and the naive kernel to the last bit. A contracted fmadd(b*y, a*x) form
+    # would round once and diverge from the unfused expression in ~16% of f32
+    # elements (the within-array prefix-vs-tail inconsistency WR-01 fixed). The
+    # size spans many AVX2 blocks (8 f32 / 4 f64 per block) AND a scalar tail (the
+    # +5 is not a multiple of either width), so both code paths are checked against
+    # the same unfused reference. Strictly positive operands (no cancellation), so
+    # this is a pure rounding-form equality, not an accuracy claim.
+    n = 8 * 1000 + 5
+    rng = np.random.default_rng(11)
+    x = (np.abs(rng.standard_normal((1, n))) + 0.5).astype(dtype)
+    y = (np.abs(rng.standard_normal((1, n))) + 0.5).astype(dtype)
+    got = np.asarray(fme.axpby(x, y, a=2.0, b=3.0))
+    ref = dtype(2.0) * x + dtype(3.0) * y
+    np.testing.assert_array_equal(got, ref)
+
+
 @pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS, ids=OP_IDS)
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 @pytest.mark.parametrize("n", [LARGE_SIZE, LARGE_ODD_SIZE], ids=["16M", "16M-1"])
