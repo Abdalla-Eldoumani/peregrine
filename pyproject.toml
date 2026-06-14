@@ -4,8 +4,9 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "fastmathext"
-version = "3.0.0.dev0"
+version = "3.0.0"
 description = "Heterogeneous linear algebra for Python: packed AVX2 CPU kernels and a CUDA backend behind one zero-copy, NumPy-compatible API"
+readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "Abdalla ElDoumani" }]
@@ -13,7 +14,7 @@ dependencies = ["numpy>=2.0,<3", "platformdirs>=4.3"]
 
 [project.optional-dependencies]
 test = ["pytest==9.0.3", "hypothesis==6.155.2"]
-bench = ["pytest-benchmark==5.2.3", "threadpoolctl==3.6.0", "psutil"]
+bench = ["pytest-benchmark==5.2.3", "threadpoolctl==3.6.0", "psutil", "matplotlib==3.9.1"]
 
 [tool.scikit-build]
 minimum-version = "0.10"
