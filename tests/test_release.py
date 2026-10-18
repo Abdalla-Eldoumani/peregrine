@@ -1,6 +1,6 @@
 """Release-readiness checks for the 3.0.0 cut. Pure-Python and ungated: no GPU,
 no native build, so this file runs on every build including the WSL CPU-only
-clone (it is the BNCH-04 unit coverage the fresh-clone gate leans on).
+clone (it is the release-readiness unit coverage the fresh-clone gate leans on).
 
 The version single-source proof: pg.__version__ must equal both the literal
 "3.0.0" and importlib.metadata.version("peregrine"), so a drift between
@@ -44,8 +44,8 @@ def test_pyproject_version():
 
 
 def test_pyproject_readme_key():
-    # The [project] readme key drives the long-description on a build; BNCH-04
-    # restores it for the release. Its presence and value are the contract.
+    # The [project] readme key drives the long-description on a build; the
+    # release cut restores it. Its presence and value are the contract.
     data = _load_pyproject()
     assert data["project"]["readme"] == "README.md"
 
