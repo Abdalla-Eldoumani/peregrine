@@ -16,16 +16,15 @@ namespace pg::cpu {
 // what memset-then-add did, and it keeps the bits: an accumulator that
 // underflowed to -0.0 still lands as +0.0. Later panels store C + acc.
 //
-// f32 runs 6x16 (the f64 6x8 register budget, 12 accumulators). 8x16 stays
-// compiled so the two shapes can be measured against each other; it needs all
-// 16 ymm for accumulators and spills. No intrinsics appear here: the AVX2 SIMD
+// f32 runs 6x16 (the f64 6x8 register budget, 12 accumulators): measured
+// single-thread at 0.97-0.98 of OpenBLAS at n = 1024 and 2048, where 8x16 (all
+// 16 ymm as accumulators, so the k loop spills) reached 0.67-0.70, so 8x16 was
+// retired. No intrinsics appear here: the AVX2 SIMD
 // header is included only in the flagged .cpp files, or AVX2 codegen would leak
 // into the fallback path and recreate the legacy import crash on CPUs without
 // AVX2.
 void microkernel_f64_6x8(const double* ap, const double* bp, double* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first);
 
 void microkernel_f32_6x16(const float* ap, const float* bp, float* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first);
-
-void microkernel_f32_8x16(const float* ap, const float* bp, float* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first);
 
 } // namespace pg::cpu
