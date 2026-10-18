@@ -8,6 +8,7 @@ promotion, contiguity normalization, and clear errors.
 from __future__ import annotations
 
 import functools
+import math
 import os
 import threading
 import warnings
@@ -35,15 +36,38 @@ if os.name == "nt":
         except OSError:
             pass
 
-from . import policy
-from ._core import _has_cuda_build, cpu_features
-from ._core import axpby as _axpby_native
-from ._core import fma3 as _fma3_native
-from ._core import matmul as _matmul_native
-from ._core import scaled_relu as _scaled_relu_native
+from . import _core, policy
+from ._core import _clear_routing_facts, _has_cuda_build, _set_routing_facts, cpu_features
+from ._core import axpby_into as _axpby_into
+from ._core import fma3_into as _fma3_into
+from ._core import matmul_into as _matmul_into
+from ._core import scaled_relu_into as _scaled_relu_into
 from ._core import sum_all as _sum_all_native
-from ._core import sum_axis as _sum_axis_native
-from ._core import transpose as _transpose_native
+from ._core import sum_axis_into as _sum_axis_into
+from ._core import transpose_into as _transpose_into
+
+
+def _no_fast_entry(*args):
+    return NotImplemented
+
+
+def _fast_entry(name):
+    # Each native fast entry takes the common host case of one op and returns
+    # NotImplemented for anything else, which then runs the Python path below.
+    # PEREGRINE_DISABLE_FAST_ENTRIES (any non-empty value, read once here)
+    # binds the stub instead, so the Python path stays a fully tested path.
+    if os.environ.get("PEREGRINE_DISABLE_FAST_ENTRIES"):
+        return _no_fast_entry
+    return getattr(_core, name, _no_fast_entry)
+
+
+_fast_matmul = _fast_entry("_fast_matmul")
+_fast_transpose = _fast_entry("_fast_transpose")
+_fast_sum = _fast_entry("_fast_sum")
+_fast_mean = _fast_entry("_fast_mean")
+_fast_axpby = _fast_entry("_fast_axpby")
+_fast_fma3 = _fast_entry("_fast_fma3")
+_fast_scaled_relu = _fast_entry("_fast_scaled_relu")
 
 # calibrate() is re-exported as the public pg.calibrate. The binding is explicit
 # (not left to attribute fallthrough) BECAUSE a submodule named calibrate exists:
@@ -62,7 +86,11 @@ from .calibrate import calibrate
 if _has_cuda_build():
     from ._core import Array
     from ._core import _cuda_device_probe
+    from ._core import axpby as _axpby_device
+    from ._core import fma3 as _fma3_device
     from ._core import from_device as _from_device_native
+    from ._core import matmul as _matmul_device
+    from ._core import scaled_relu as _scaled_relu_device
     from ._core import to_device as _to_device_native
 else:
     class Array:  # noqa: D401 - sentinel; the real device type is CUDA-build-only
@@ -219,6 +247,60 @@ def _check_axis(axis, op: str) -> None:
         raise ValueError(f"{op}: axis {axis} is out of bounds for 2-dimensional input")
 
 
+def _check_out(out, op: str, dtype: np.dtype, shape: tuple) -> None:
+    # The kernel writes the result straight into out's buffer, so out must
+    # already be exactly the array a fresh result would be. A dtype compare
+    # includes byte order, and str() of a swapped dtype ('>f8') tells it apart
+    # from the native one in the message.
+    if type(out) is not np.ndarray:
+        raise TypeError(
+            f"{op}: out must be a numpy.ndarray of dtype {dtype.name}, "
+            f"got {type(out).__name__}"
+        )
+    if out.dtype != dtype:
+        raise TypeError(
+            f"{op}: out must be a numpy.ndarray of dtype {dtype.name}, got {out.dtype}"
+        )
+    flags = out.flags
+    if out.shape != shape:
+        detail = f"shape {out.shape}"
+    elif not flags.c_contiguous:
+        detail = "a non-C-contiguous array"
+    elif not flags.aligned:
+        detail = "an unaligned array"
+    elif not flags.writeable:
+        detail = "a read-only array"
+    else:
+        return
+    raise ValueError(
+        f"{op}: out must be a writeable C-contiguous array of shape {shape}, "
+        f"got {detail}"
+    )
+
+
+def _fused_out(out, arrs, op: str, dtype: np.dtype) -> np.ndarray:
+    # Every fused kernel computes out[i] from the inputs at index i alone, so
+    # an input that is out itself (same buffer, extent, and dtype) is an exact
+    # in-place update. Any other overlap would read elements already
+    # overwritten. may_share_memory without max_work compares byte bounds
+    # only, the cheap test the fast path repeats in C.
+    shape = arrs[0].shape
+    if out is None:
+        return np.empty(shape, dtype)
+    _check_out(out, op, dtype, shape)
+    ptr = out.__array_interface__["data"][0]
+    for arr in arrs:
+        if np.may_share_memory(arr, out) and not (
+            arr.dtype == dtype
+            and arr.flags.c_contiguous
+            and arr.__array_interface__["data"][0] == ptr
+        ):
+            raise ValueError(
+                f"{op}: out must be one of the inputs exactly or not overlap them"
+            )
+    return out
+
+
 # The exact mixed-residency error string, part of the public API contract.
 # Verbatim, never paraphrased: tests match on it and it is the contract.
 _MIXED_RESIDENCY_MSG = (
@@ -270,8 +352,9 @@ if _backend not in policy.BACKENDS:
 
 # The calibration the auto router uses, loaded on the first auto dispatch that
 # could reach a GPU and kept for the session, so later dispatches do no file
-# system work. None is a real value here ("no usable cache"), hence the
-# separate not-loaded-yet sentinel. calibrate() replaces it with what it wrote.
+# system work. None is a real value here (no usable cache, or no usable device
+# to route to), hence the separate not-loaded-yet sentinel. calibrate() replaces
+# it with what it wrote.
 _UNSET = object()
 _routing_calibration = _UNSET
 
@@ -343,6 +426,29 @@ def has_cuda() -> bool:
     return _cuda_unavailable_reason() == ""
 
 
+def _push_routing_facts(auto_ready: bool, calibration=None) -> None:
+    # The native matmul entry routes host products on these facts and declines
+    # whatever they leave open, so they only ever hold a decision this module
+    # would make itself. Until auto mode has looked at the device and the
+    # calibration (auto_ready), the entry hands every auto product back here.
+    usable = auto_ready and not _cuda_fallback_warned and has_cuda()
+    bound = policy.f32_cpu_flops_bound(calibration) if usable else math.inf
+    _set_routing_facts(_backend, auto_ready, usable, bound)
+
+
+# A forced backend reaches the native entry from the first call; auto waits
+# for its first dispatch, so import touches no device and reads no file.
+_push_routing_facts(False)
+
+
+def _install_routing_calibration(calibration) -> None:
+    # The one place the auto router's calibration changes, so the native entry
+    # always routes on the calibration this module routes on.
+    global _routing_calibration
+    _routing_calibration = calibration
+    _push_routing_facts(True, calibration)
+
+
 def _reset_routing_state() -> None:
     # Drops every per-process routing memo so the next dispatch re-derives it.
     # Tests point PEREGRINE_CACHE_DIR somewhere new per test and stub the device,
@@ -351,6 +457,7 @@ def _reset_routing_state() -> None:
     # and clearing it would let a failing device take auto-routed work again.
     global _routing_calibration
     _routing_calibration = _UNSET
+    _clear_routing_facts()
     _cuda_unavailable_reason.cache_clear()
     from .calibrate import _machine_signature
 
@@ -419,6 +526,7 @@ def set_backend(name: str) -> None:
     global _backend, _routing_calibration
     _backend = name
     _routing_calibration = _UNSET
+    _push_routing_facts(False)
 
 
 def to_device(a) -> Array:
@@ -504,7 +612,16 @@ def _matmul_cpu_fallback(a, b):
     return matmul(_from_device_native(a), _from_device_native(b))
 
 
-def _matmul_gpu_staged(a, b):
+def _matmul_cpu(a, b, out=None):
+    # a and b are normalized host operands; out is validated or None. NumPy
+    # allocates every host result, so its provenance matches the fast path's.
+    if out is None:
+        out = np.empty((a.shape[0], b.shape[1]), a.dtype)
+    _matmul_into(a, b, out)
+    return out
+
+
+def _matmul_gpu_staged(a, b, out=None):
     # Route a HOST array pair to the GPU by staging through the existing device
     # entries: H2D both operands (to_device, synced at the boundary), the device
     # matmul(Array, Array), then D2H the result (from_device, synced) back to a
@@ -525,13 +642,14 @@ def _matmul_gpu_staged(a, b):
     try:
         xa = _to_device_native(a)
         xb = _to_device_native(b)
-        xc = _matmul_native(xa, xb)
-        return _from_device_native(xc)
+        xc = _matmul_device(xa, xb)
+        r = _from_device_native(xc)
     except RuntimeError as exc:
         global _cuda_fallback_warned
         with _cuda_fallback_lock:
             should_warn = not _cuda_fallback_warned
             _cuda_fallback_warned = True
+        _push_routing_facts(True)
         if should_warn:
             name = _cuda_error_name(exc)
             warnings.warn(
@@ -543,7 +661,11 @@ def _matmul_gpu_staged(a, b):
         # Host operands: recompute on the host chain directly. _normalize already
         # ran upstream, so a, b are accepted-dtype C-contiguous ndarrays and the
         # fast path forwards them to the CPU kernel untouched.
-        return _matmul_native(a, b)
+        return _matmul_cpu(a, b, out)
+    if out is None:
+        return r
+    np.copyto(out, r)
+    return out
 
 
 def _host_backend_for(a_arr, b_arr) -> str:
@@ -571,25 +693,44 @@ def _host_backend_for(a_arr, b_arr) -> str:
     # auto. After a device failure this session has already been told the work
     # falls back to the cpu, so the device gets no more auto-routed work.
     if _cuda_fallback_warned or not has_cuda():
+        if _routing_calibration is _UNSET:
+            _install_routing_calibration(None)
         return "cpu"
     # A device is present: let the pure policy decide per measured (dtype, n)
     # crossover, paying the H2D+D2H round trip for a host pair. f64 never reaches
     # the GPU -- the policy hardcodes the FP64 trap, so the wrapper does not
     # special-case it here.
-    global _routing_calibration
     calibration = _routing_calibration
     if calibration is _UNSET:
         from .calibrate import _machine_signature
 
         signature = _machine_signature()
         calibration = policy._load_cache(policy._cache_path(signature), signature)
-        _routing_calibration = calibration
+        _install_routing_calibration(calibration)
     dtype = a_arr.dtype.name
     m, k = a_arr.shape
     n = b_arr.shape[1]
     return policy.choose_backend(
         dtype, m, k, n, residency="host", calibration=calibration, backend="auto"
     )
+
+
+def _check_matmul_out(a, b, dtype: np.dtype, out) -> None:
+    # The inner dimensions are checked here, before any output exists: a
+    # mismatched pair must raise the shape error, never a MemoryError from
+    # allocating an (m, n) result it could not have produced.
+    if a.shape[1] != b.shape[0]:
+        raise ValueError(f"matmul: inner dimensions do not match: {a.shape} @ {b.shape}")
+    if out is not None:
+        _check_out(out, "matmul", dtype, (a.shape[0], b.shape[1]))
+        if np.may_share_memory(out, a) or np.may_share_memory(out, b):
+            raise ValueError("matmul: out must not overlap an input")
+
+
+def _matmul_host(a, b, out):
+    if _host_backend_for(a, b) == "cuda":
+        return _matmul_gpu_staged(a, b, out)
+    return _matmul_cpu(a, b, out)
 
 
 def matmul(a, b, *, out=None):
@@ -614,31 +755,37 @@ def matmul(a, b, *, out=None):
     b : array_like or pg.Array
         Right operand; must be 2-D with as many rows as a has columns, and on
         the same side (host or device) as a.
-    out : None, optional
-        Reserved for a future preallocated-output path. The keyword is part
-        of the signature ahead of its implementation; only None is accepted.
+    out : numpy.ndarray, optional
+        Host operands only, keyword-only. The product is written into ``out``,
+        which is returned. It must be an exact numpy.ndarray of the result
+        dtype in native byte order, of shape ``(a.shape[0], b.shape[1])``,
+        C-contiguous, aligned, and writeable, and its memory must not overlap
+        either operand (a product cannot be computed in place).
 
     Returns
     -------
     numpy.ndarray or pg.Array
         The matrix product, on the host for host operands and on the device for
-        device operands. The result dtype is np.result_type(a, b) when that
-        lands on float32 or float64, so int8/int16/uint8/uint16 mixed with
-        float32 give float32. Integer-with-integer products always promote to
-        float64, unlike NumPy, which keeps int64: this is a float library, so
-        every result is a float array.
+        device operands; ``out`` itself when given. The result dtype is
+        np.result_type(a, b) when that lands on float32 or float64, so
+        int8/int16/uint8/uint16 mixed with float32 give float32.
+        Integer-with-integer products always promote to float64, unlike NumPy,
+        which keeps int64: this is a float library, so every result is a float
+        array.
 
     Raises
     ------
     ValueError
-        If an operand is not 2-D, or the inner dimensions do not match.
+        If an operand is not 2-D, the inner dimensions do not match, ``out``
+        has the wrong shape or is not a writeable, aligned C-contiguous array,
+        or ``out`` overlaps an operand.
     TypeError
-        If exactly one operand is an pg.Array (mixed residency), or an operand
-        dtype is bool, float16, complex64, complex128, or object, or if
-        promotion lands on anything other than float32, float64, or an integer
-        dtype (longdouble and clongdouble on platforms where they are distinct).
-    NotImplementedError
-        If out is anything other than None.
+        If exactly one operand is an pg.Array (mixed residency), or device
+        operands come with ``out``, or an operand dtype is bool, float16,
+        complex64, complex128, or object, or if promotion lands on anything
+        other than float32, float64, or an integer dtype (longdouble and
+        clongdouble on platforms where they are distinct), or ``out`` is not
+        a numpy.ndarray of the result dtype.
 
     Warns
     -----
@@ -655,9 +802,16 @@ def matmul(a, b, *, out=None):
            [3., 4.]])
     >>> pg.matmul(np.array([[1, 2], [3, 4]]), np.array([[1, 0], [0, 1]])).dtype
     dtype('float64')
+    >>> out = np.empty((2, 2))
+    >>> pg.matmul(np.array([[1.0, 2.0], [3.0, 4.0]]), np.eye(2), out=out) is out
+    True
+    >>> out
+    array([[1., 2.],
+           [3., 4.]])
     """
-    if out is not None:
-        raise NotImplementedError("matmul: out= is not implemented yet")
+    r = _fast_matmul(a, b, out)
+    if r is not NotImplemented:
+        return r
 
     # Residency check, BEFORE the host fast path. Return type follows residency:
     # both operands on the device returns an pg.Array, both
@@ -667,9 +821,10 @@ def matmul(a, b, *, out=None):
     # and control falls straight through to the host path with zero overhead.
     a_is_dev = isinstance(a, Array)
     b_is_dev = isinstance(b, Array)
-    if a_is_dev != b_is_dev:
-        # Exactly one operand is device-resident: the verbatim mixed-residency
-        # token, never a silent host<->device transfer the caller did not ask for.
+    if a_is_dev != b_is_dev or (a_is_dev and out is not None):
+        # Exactly one operand is device-resident, or a device product was asked
+        # to land in a host out: the verbatim mixed-residency token, never a
+        # silent host<->device transfer the caller did not ask for.
         raise TypeError(_MIXED_RESIDENCY_MSG)
     if a_is_dev and b_is_dev:
         # Both device-resident: the f32 (and forced f64) device path. f64 reaches
@@ -678,7 +833,7 @@ def matmul(a, b, *, out=None):
         # not be an pg.Array), so the FP64 trap rule is upheld upstream. Auto mode
         # catches a CUDA runtime failure, warns ONCE, and falls back to the CPU.
         try:
-            return _matmul_native(a, b)
+            return _matmul_device(a, b)
         except RuntimeError as exc:
             # The native cuda_error arm maps every PG_CUDA_CHECK / cuBLAS / OOM
             # failure to RuntimeError carrying the cuda error NAME. This is
@@ -701,6 +856,7 @@ def matmul(a, b, *, out=None):
             with _cuda_fallback_lock:
                 should_warn = not _cuda_fallback_warned
                 _cuda_fallback_warned = True
+            _push_routing_facts(True)
             if should_warn:
                 name = _cuda_error_name(exc)
                 warnings.warn(
@@ -720,9 +876,9 @@ def matmul(a, b, *, out=None):
     # replacement: any operand that is not an ndarray, not 2-D, not C-contiguous,
     # or a different/unaccepted dtype falls through to the full policy chain
     # below, which keeps the exact rejection, promotion, and error contract. The
-    # native call still raises ValueError on mismatched inner dimensions, so the
-    # shape contract holds here too. No copy is made: a qualifying input is
-    # already contiguous, so the kernel takes a zero-copy view of it.
+    # inner-dimension and out checks run here too, so the shape contract holds.
+    # No copy is made: a qualifying input is already contiguous, so the kernel
+    # takes a zero-copy view of it.
     if (
         type(a) is np.ndarray
         and type(b) is np.ndarray
@@ -740,9 +896,8 @@ def matmul(a, b, *, out=None):
         # into the existing CPU kernel call, so the fast path stays a no-overhead
         # pre-branch. A GPU route only happens for a host f32 pair the policy (or a
         # forced set_backend("cuda")) sends to the device.
-        if _host_backend_for(a, b) == "cuda":
-            return _matmul_gpu_staged(a, b)
-        return _matmul_native(a, b)
+        _check_matmul_out(a, b, a.dtype, out)
+        return _matmul_host(a, b, out)
 
     a_arr = _prepare(a, "a")
     b_arr = _prepare(b, "b")
@@ -770,13 +925,11 @@ def matmul(a, b, *, out=None):
     # Normalize to the promoted dtype + C-contiguity, THEN route on the backend
     # (the staging path needs accepted-dtype contiguous host operands, which these
     # now are). Same backend decision as the fast path: CPU unless a present GPU's
-    # measured crossover (or a forced "cuda") wins for this host f32 pair. The CPU
-    # route is byte-identical to the prior single _matmul_native call.
-    a_norm = _normalize(a_arr, common)
-    b_norm = _normalize(b_arr, common)
-    if _host_backend_for(a_norm, b_norm) == "cuda":
-        return _matmul_gpu_staged(a_norm, b_norm)
-    return _matmul_native(a_norm, b_norm)
+    # measured crossover (or a forced "cuda") wins for this host f32 pair. The
+    # overlap check sees the operands as passed, before normalization copies
+    # any of them, so the rule is the same whatever layout the caller used.
+    _check_matmul_out(a_arr, b_arr, common, out)
+    return _matmul_host(_normalize(a_arr, common), _normalize(b_arr, common), out)
 
 
 def transpose(a) -> np.ndarray:
@@ -820,9 +973,22 @@ def transpose(a) -> np.ndarray:
     >>> float(a[0, 0])
     1.0
     """
+    r = _fast_transpose(a)
+    if r is not NotImplemented:
+        return r
     arr = _prepare(a, "a", "transpose")
     common = _resolve_dtype(arr, "transpose")
-    return _transpose_native(_normalize(arr, common))
+    arr = _normalize(arr, common)
+    out = np.empty(arr.shape[::-1], common)
+    _transpose_into(arr, out)
+    return out
+
+
+def _sum_axis(arr: np.ndarray, axis: int) -> np.ndarray:
+    # axis 0 leaves one value per column, axis 1 one per row.
+    out = np.empty(arr.shape[1 - axis], arr.dtype)
+    _sum_axis_into(arr, axis, out)
+    return out
 
 
 def sum(a, *, axis=None):
@@ -869,6 +1035,9 @@ def sum(a, *, axis=None):
     >>> pg.sum(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=1)
     array([3., 7.])
     """
+    r = _fast_sum(a, axis)
+    if r is not NotImplemented:
+        return r
     _check_axis(axis, "sum")
     arr = _prepare(a, "a", "sum")
     common = _resolve_dtype(arr, "sum")
@@ -878,7 +1047,7 @@ def sum(a, *, axis=None):
         # float32 input yields a float32 scalar (the round trip through a
         # double-precision Python float is lossless for a float32 value).
         return common.type(_sum_all_native(arr))
-    return _sum_axis_native(arr, int(axis))
+    return _sum_axis(arr, int(axis))
 
 
 def mean(a, *, axis=None):
@@ -930,6 +1099,9 @@ def mean(a, *, axis=None):
     >>> pg.mean(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=1)
     array([1.5, 3.5])
     """
+    r = _fast_mean(a, axis)
+    if r is not NotImplemented:
+        return r
     _check_axis(axis, "mean")
     arr = _prepare(a, "a", "mean")
     common = _resolve_dtype(arr, "mean")
@@ -943,10 +1115,10 @@ def mean(a, *, axis=None):
         total = common.type(_sum_all_native(arr))
     elif axis == 0:
         count = arr.shape[0]
-        total = _sum_axis_native(arr, 0)
+        total = _sum_axis(arr, 0)
     else:
         count = arr.shape[1]
-        total = _sum_axis_native(arr, 1)
+        total = _sum_axis(arr, 1)
 
     # When the reduced axis is empty but the output is not, NumPy warns "Mean of
     # empty slice" before the division. The division itself, count == 0, then
@@ -958,7 +1130,9 @@ def mean(a, *, axis=None):
         warnings.warn("Mean of empty slice", RuntimeWarning, stacklevel=2)
 
     # True division, never reciprocal multiply: x / count and x * (1 / count)
-    # round differently, and NumPy composes mean with a division.
+    # round differently, and NumPy composes mean with a division. count is a
+    # Python int, so NumPy's weak-scalar rule converts it to the result dtype
+    # and divides in that dtype (float32 stays float32, never a double divide).
     return total / count
 
 
@@ -979,7 +1153,7 @@ def _fused_residency(operands, op: str) -> str:
     return "host"
 
 
-def axpby(x, y, *, a=1.0, b=1.0):
+def axpby(x, y, *, a=1.0, b=1.0, out=None):
     """Elementwise ``a*x + b*y`` for two same-shape 2-D arrays.
 
     Computes the unfused expression ``a*x + b*y`` within the elementwise
@@ -997,23 +1171,37 @@ def axpby(x, y, *, a=1.0, b=1.0):
         Operands; must be 2-D and the same shape, and on the same side (both
         host or both device).
     a, b : float, optional
-        Scalar coefficients, keyword-only. Default 1.0 each.
+        Scalar coefficients, keyword-only. Default 1.0 each. Each converts to
+        the result dtype before the multiply, as NumPy does for a Python
+        scalar, so float32 operands give a float32 result computed with
+        float32 coefficients.
+    out : numpy.ndarray, optional
+        Host operands only, keyword-only. The result is written into ``out``,
+        which is returned. It must be an exact numpy.ndarray of the result
+        dtype in native byte order, of the operands' shape, C-contiguous,
+        aligned, and writeable. It may be exactly one of the operands (same
+        buffer, shape, and dtype) for an in-place update; any other overlap
+        with an operand raises ValueError.
 
     Returns
     -------
     numpy.ndarray
-        ``a*x + b*y`` elementwise. The result dtype is np.result_type across the
-        operands when that lands on float32 or float64; integer operands promote
-        to float64 (this is a float library).
+        ``a*x + b*y`` elementwise; ``out`` itself when given. The result dtype
+        is np.result_type across the operands when that lands on float32 or
+        float64; integer operands promote to float64 (this is a float library).
 
     Raises
     ------
     ValueError
-        If an operand is not 2-D, or the operands differ in shape.
+        If an operand is not 2-D, or the operands differ in shape,
+        or ``out`` has the wrong shape, is not a writeable aligned C-contiguous
+        array, or overlaps an operand other than exactly.
     TypeError
         If an operand dtype is bool, float16, complex64, complex128, or object,
-        if promotion lands on anything other than float32/float64/integer, or if
-        the operands are split across host and device.
+        if promotion lands on anything other than float32/float64/integer, if
+        the operands are split across host and device, or if
+        ``out`` is not a numpy.ndarray of the result dtype, or device operands
+        come with ``out``.
 
     Examples
     --------
@@ -1024,29 +1212,41 @@ def axpby(x, y, *, a=1.0, b=1.0):
     >>> pg.axpby(x, y, a=2.0, b=-1.0)
     array([[ -8., -16.],
            [-24., -32.]])
+    >>> pg.axpby(x, y, a=2.0, b=-1.0, out=x) is x
+    True
+    >>> x
+    array([[ -8., -16.],
+           [-24., -32.]])
     """
+    r = _fast_axpby(x, y, a, b, out)
+    if r is not NotImplemented:
+        return r
     if _fused_residency((x, y), "axpby") == "device":
         # Device-resident path: both operands are pg.Array, so the native
         # axpby Array overload runs the grid-stride kernel device-in/device-out and
-        # returns an pg.Array. nanobind dispatches on the operand type (Array vs
-        # ndarray), so the same _axpby_native binds the device overload here and the
-        # host overload below. Scalars cross as Python floats; no host->GPU staging
+        # returns an pg.Array. Scalars cross as Python floats; no host->GPU staging
         # (v1 is device-resident only). dtype/shape validation lives in the binding
-        # (a mismatch raises ValueError via the shape_error translator).
-        return _axpby_native(x, y, float(a), float(b))
+        # (a mismatch raises ValueError via the shape_error translator). A device
+        # result cannot land in a host out without a transfer nobody asked for.
+        if out is not None:
+            raise TypeError(_mixed_residency_msg("axpby"))
+        return _axpby_device(x, y, float(a), float(b))
     xa = _prepare(x, "x", "axpby")
     ya = _prepare(y, "y", "axpby")
     common = _resolve_dtype_multi((xa, ya), "axpby")
     _check_same_shape((xa, ya), "axpby")
+    out = _fused_out(out, (xa, ya), "axpby", common)
     # Host fused ALWAYS computes on the CPU: v1 has no host->GPU auto-staging
     # (no _matmul_gpu_staged analog, no policy/choose_backend call). float(a) /
-    # float(b) cast the scalars at the boundary, mirroring sum's int(axis).
-    return _axpby_native(
-        _normalize(xa, common), _normalize(ya, common), float(a), float(b)
+    # float(b) cast the scalars at the boundary, mirroring sum's int(axis); the
+    # binding narrows them to the result dtype.
+    _axpby_into(
+        _normalize(xa, common), _normalize(ya, common), float(a), float(b), out
     )
+    return out
 
 
-def fma3(x, y, z):
+def fma3(x, y, z, *, out=None):
     """Elementwise fused multiply-add ``x*y + z`` for three same-shape arrays.
 
     Computes ``x*y + z`` in a single rounding (a true fused multiply-add), so it
@@ -1062,22 +1262,33 @@ def fma3(x, y, z):
     x, y, z : array_like or pg.Array
         Operands; must be 2-D and the same shape, and on the same side (all host
         or all device).
+    out : numpy.ndarray, optional
+        Host operands only, keyword-only. The result is written into ``out``,
+        which is returned. It must be an exact numpy.ndarray of the result
+        dtype in native byte order, of the operands' shape, C-contiguous,
+        aligned, and writeable. It may be exactly one of the operands (same
+        buffer, shape, and dtype) for an in-place update; any other overlap
+        with an operand raises ValueError.
 
     Returns
     -------
     numpy.ndarray
-        ``x*y + z`` elementwise. The result dtype is np.result_type across all
-        three operands when that lands on float32 or float64; integer operands
-        promote to float64.
+        ``x*y + z`` elementwise; ``out`` itself when given. The result dtype is
+        np.result_type across all three operands when that lands on float32 or
+        float64; integer operands promote to float64.
 
     Raises
     ------
     ValueError
-        If an operand is not 2-D, or the operands differ in shape.
+        If an operand is not 2-D, or the operands differ in shape,
+        or ``out`` has the wrong shape, is not a writeable aligned C-contiguous
+        array, or overlaps an operand other than exactly.
     TypeError
         If an operand dtype is bool, float16, complex64, complex128, or object,
-        if promotion lands on anything other than float32/float64/integer, or if
-        the operands are split across host and device.
+        if promotion lands on anything other than float32/float64/integer, if
+        the operands are split across host and device, or if
+        ``out`` is not a numpy.ndarray of the result dtype, or device operands
+        come with ``out``.
 
     Examples
     --------
@@ -1089,23 +1300,33 @@ def fma3(x, y, z):
     >>> pg.fma3(x, y, z)
     array([[ 6., 13.],
            [22., 33.]])
+    >>> out = np.empty((2, 2))
+    >>> pg.fma3(x, y, z, out=out) is out
+    True
     """
+    r = _fast_fma3(x, y, z, out)
+    if r is not NotImplemented:
+        return r
     if _fused_residency((x, y, z), "fma3") == "device":
         # Device-resident path: all three operands are pg.Array, so the
         # native fma3 Array overload runs the device kernel and returns an
-        # pg.Array (same nanobind type-dispatch as axpby). No host->GPU staging.
-        return _fma3_native(x, y, z)
+        # pg.Array. No host->GPU staging.
+        if out is not None:
+            raise TypeError(_mixed_residency_msg("fma3"))
+        return _fma3_device(x, y, z)
     xa = _prepare(x, "x", "fma3")
     ya = _prepare(y, "y", "fma3")
     za = _prepare(z, "z", "fma3")
     common = _resolve_dtype_multi((xa, ya, za), "fma3")
     _check_same_shape((xa, ya, za), "fma3")
-    return _fma3_native(
-        _normalize(xa, common), _normalize(ya, common), _normalize(za, common)
+    out = _fused_out(out, (xa, ya, za), "fma3", common)
+    _fma3_into(
+        _normalize(xa, common), _normalize(ya, common), _normalize(za, common), out
     )
+    return out
 
 
-def scaled_relu(x, *, scale=1.0):
+def scaled_relu(x, *, scale=1.0, out=None):
     """Elementwise ``maximum(scale*x, 0)`` for a 2-D array.
 
     Computes ``np.maximum(scale*x, 0)`` within the elementwise tolerance for
@@ -1121,21 +1342,33 @@ def scaled_relu(x, *, scale=1.0):
         Input; must be 2-D.
     scale : float, optional
         Scalar multiplier applied before the rectifier, keyword-only. Default
-        1.0.
+        1.0. It converts to the result dtype before the multiply, as NumPy does
+        for a Python scalar, so a float32 input gives a float32 result.
+    out : numpy.ndarray, optional
+        Host operands only, keyword-only. The result is written into ``out``,
+        which is returned. It must be an exact numpy.ndarray of the result
+        dtype in native byte order, of the input's shape, C-contiguous,
+        aligned, and writeable. It may be exactly ``x`` (same
+        buffer, shape, and dtype) for an in-place update; any other overlap
+        with ``x`` raises ValueError.
 
     Returns
     -------
     numpy.ndarray
-        ``maximum(scale*x, 0)`` elementwise. The result dtype is the input dtype
-        after promotion (integers promote to float64).
+        ``maximum(scale*x, 0)`` elementwise; ``out`` itself when given. The
+        result dtype is the input dtype after promotion (integers promote to
+        float64).
 
     Raises
     ------
     ValueError
-        If ``x`` is not 2-D.
+        If ``x`` is not 2-D, or ``out`` has the wrong shape, is not a writeable
+        aligned C-contiguous array, or overlaps ``x`` other than exactly.
     TypeError
         If the dtype is bool, float16, complex64, complex128, object, or any
-        promoted dtype other than float32 or float64.
+        promoted dtype other than float32 or float64, or if
+        ``out`` is not a numpy.ndarray of the result dtype, or device operands
+        come with ``out``.
 
     Examples
     --------
@@ -1145,12 +1378,24 @@ def scaled_relu(x, *, scale=1.0):
     >>> pg.scaled_relu(x, scale=3.0)
     array([[0., 6.],
            [9., 0.]])
+    >>> pg.scaled_relu(x, scale=3.0, out=x) is x
+    True
+    >>> x
+    array([[0., 6.],
+           [9., 0.]])
     """
+    r = _fast_scaled_relu(x, scale, out)
+    if r is not NotImplemented:
+        return r
     if _fused_residency((x,), "scaled_relu") == "device":
         # Device-resident path: the operand is an pg.Array, so the native
         # scaled_relu Array overload runs the device kernel (NaN-propagating, like
         # the CPU path) and returns an pg.Array. No host->GPU staging.
-        return _scaled_relu_native(x, float(scale))
+        if out is not None:
+            raise TypeError(_mixed_residency_msg("scaled_relu"))
+        return _scaled_relu_device(x, float(scale))
     xa = _prepare(x, "x", "scaled_relu")
     common = _resolve_dtype_multi((xa,), "scaled_relu")
-    return _scaled_relu_native(_normalize(xa, common), float(scale))
+    out = _fused_out(out, (xa,), "scaled_relu", common)
+    _scaled_relu_into(_normalize(xa, common), float(scale), out)
+    return out
