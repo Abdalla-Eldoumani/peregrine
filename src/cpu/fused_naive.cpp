@@ -1,4 +1,5 @@
 #include "cpu/fused.hpp"
+#include "cpu/threads.hpp"
 
 #include <cmath>
 
@@ -33,31 +34,55 @@ inline T relu_nan_safe_scalar(T sx) {
 
 template <typename T>
 void fused_axpby_naive(const T* x, const T* y, T* out, int64_t n, T a, T b) {
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = a * x[i] + b * y[i];
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < n; ++i) {
+            out[i] = a * x[i] + b * y[i];
+        }
     }
 }
 
 template <typename T>
 void fused_fma3_naive(const T* x, const T* y, const T* z, T* out, int64_t n) {
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = std::fma(x[i], y[i], z[i]);
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < n; ++i) {
+            out[i] = std::fma(x[i], y[i], z[i]);
+        }
     }
 }
 
 template <typename T>
 void fused_scaled_relu_naive(const T* x, T* out, int64_t n, T scale) {
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = relu_nan_safe_scalar<T>(scale * x[i]);
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < n; ++i) {
+            out[i] = relu_nan_safe_scalar<T>(scale * x[i]);
+        }
     }
 }
 
