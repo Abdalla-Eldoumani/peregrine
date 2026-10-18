@@ -1,4 +1,4 @@
-"""The matmul wrapper fast path (CPU-06 mandatory scope).
+"""The matmul wrapper fast path, required for the small-matrix speed target.
 
 At n=8 the wrapper helpers alone (2x np.asarray, 2x np.ascontiguousarray,
 np.result_type) cost ~1.8 us against a 1.75 us 2x-NumPy budget, so the small
