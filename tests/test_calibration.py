@@ -1,19 +1,16 @@
-"""Calibration and dispatch suite, covering DISP-01..05. This file is a Wave 0
-scaffold: it establishes the shared infrastructure (the requires_cuda skip gate
-and the PEREGRINE_CACHE_DIR cache isolation idiom) so the later Phase 5 waves fill in
-each reserved test under its own name without re-establishing setup. It asserts
-nothing about calibrate/policy behavior yet -- those modules do not exist until
-Waves 2-3 -- beyond proving the file collects and that the introspection smoke
-passes on every build.
+"""Calibration and dispatch suite: calibration cost, the cache, its fail-safe
+read, the static fallback, and the routing decisions. The shared infrastructure
+(the requires_cuda skip gate and the PEREGRINE_CACHE_DIR cache isolation idiom)
+lives here once so each test needs no setup of its own.
 
 requires_cuda() (conftest) is the one GPU gate, identical to test_cuda.py: build
 flag plus a usable-device probe, deferring to pg.has_cuda(). CPU-only and the
 WSL/GCC clone stay green; only the GPU-measurement tests (the live crossover and
-the real-device calibrate path) carry @gpu. The bulk of DISP-05 is NOT gated: a
+the real-device calibrate path) carry @gpu. Most routing tests are NOT gated: a
 backend decision is a PURE function fed a synthetic calibration dict, so it runs
 everywhere and asserts a backend ENUM ("cpu" / "cuda"), needing no tolerance.
 
-Cache isolation -- the design names PEREGRINE_CACHE_DIR (DISP-03). Every in-process
+Cache isolation -- the design names PEREGRINE_CACHE_DIR. Every in-process
 test that touches the calibration cache redirects it to a pytest tmp_path so the
 real per-user cache is never read or written:
 
@@ -32,45 +29,41 @@ monkeypatching in-process:
                        env=env, capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stderr          # child error surfaces as itself
 
-A warn-once or other process-global sentinel (RESEARCH Pitfall 5) is isolated
+A warn-once or other process-global sentinel is isolated
 the same way the forced-OOM test isolates its sentinel (test_cuda.py:544-568): a
 subprocess per assertion, never an in-process reset that leaks across tests.
 
-Any numeric CPU-vs-GPU comparison a later wave adds routes through
-assert_matmul_close (conftest), never an inline rtol -- the single toleranced
-path, exactly like the CPU and CUDA suites; f32 is judged against the f64 ground
-truth the same way. Most DISP-05 tests compare a backend enum and need no
-tolerance at all.
+Any numeric CPU-vs-GPU comparison routes through assert_matmul_close
+(conftest), never an inline rtol -- the single toleranced path, exactly like the
+CPU and CUDA suites; f32 is judged against the f64 ground truth the same way.
+Most routing tests compare a backend enum and need no tolerance at all.
 
-Reserved -k test names, one per acceptance point in the Phase 5 validation map.
-This wave (05-02) fills the pure-policy decision and cache-read names; the
-measurement and integration names stay reserved for their waves. The names do
-not change.
+The -k test names, one per acceptance point, with the code each one exercises:
 
-    DISP-01 (no calibration at import; bounded calibrate):
-        calibrate_budget          calibration completes within its time budget   [Wave 3: calibrate.py]
-        cpu_only_calibrate        a CPU-only build calibrates without a device    [Wave 3: calibrate.py]
-    DISP-02 (cache write; signature):
-        writes_cache              calibrate persists a cache file                 [Wave 3: calibrate.py]
-        cache_reuse               a second run reuses the cache, does not redo     [Wave 3: calibrate.py]
-        signature_distinct        a different machine signature -> a distinct key  [Wave 3: calibrate.py]
-    DISP-03 (corrupt/mismatch -> recalibrate, never half-load; cache override):
-        corrupt_recalibrate       a corrupt cache is discarded and recalibrated   [Wave 2: policy._load_cache]
-        schema_mismatch           an unknown schema version -> recalibrate         [Wave 2: policy._load_cache]
-        signature_mismatch        a signature mismatch -> recalibrate              [Wave 2: policy._load_cache]
-        atomic_write              the cache write is atomic, never half-written    [Wave 3: calibrate.py]
-        cache_dir_override        PEREGRINE_CACHE_DIR redirects the cache location       [Wave 2: policy._cache_path]
-    DISP-04 (conservative static fallback; transfer cost in crossover):
-        static_fallback           no cache -> a conservative CPU-preferring choice [Wave 2: policy.choose_backend]
-        transfer_cost             the crossover accounts for host<->device transfer[Wave 2: policy.choose_backend]
-    DISP-05 (routing decisions; the FP64 trap):
-        f64_host_cpu              host f64 never auto-routes to the GPU            [Wave 2: policy.choose_backend]
-        f32_256_host_cpu          host f32 n=256 stays on the CPU (overhead floor) [Wave 2: policy.choose_backend]
-        f32_4096_host_gpu         host f32 n=4096 routes to the GPU                [Wave 2: policy.choose_backend]
-        f32_device_gpu            f32 device-resident routes to the GPU            [Wave 2: policy.choose_backend]
-        set_backend               an explicit backend choice is honored           [Wave 2: policy.choose_backend]
-        env_backend               PEREGRINE_BACKEND (subprocess, env-before-import)      [Wave 4: __init__.py]
-        live_crossover            real RTX 3060 calibration reproduces DISP-05 (@gpu) [Wave 4: integration]
+    No calibration at import; bounded calibrate:
+        calibrate_budget          calibration completes within its time budget   [calibrate.py]
+        cpu_only_calibrate        a CPU-only build calibrates without a device    [calibrate.py]
+    Cache write; signature:
+        writes_cache              calibrate persists a cache file                 [calibrate.py]
+        cache_reuse               a second run reuses the cache, does not redo     [calibrate.py]
+        signature_distinct        a different machine signature -> a distinct key  [calibrate.py]
+    Corrupt/mismatch -> recalibrate, never half-load; cache override:
+        corrupt_recalibrate       a corrupt cache is discarded and recalibrated   [policy._load_cache]
+        schema_mismatch           an unknown schema version -> recalibrate         [policy._load_cache]
+        signature_mismatch        a signature mismatch -> recalibrate              [policy._load_cache]
+        atomic_write              the cache write is atomic, never half-written    [calibrate.py]
+        cache_dir_override        PEREGRINE_CACHE_DIR redirects the cache location [policy._cache_path]
+    Conservative static fallback; transfer cost in crossover:
+        static_fallback           no cache -> a conservative CPU-preferring choice [policy.choose_backend]
+        transfer_cost             the crossover accounts for host<->device transfer[policy.choose_backend]
+    Routing decisions; the FP64 trap:
+        f64_host_cpu              host f64 never auto-routes to the GPU            [policy.choose_backend]
+        f32_256_host_cpu          host f32 n=256 stays on the CPU (overhead floor) [policy.choose_backend]
+        f32_4096_host_gpu         host f32 n=4096 routes to the GPU                [policy.choose_backend]
+        f32_device_gpu            f32 device-resident routes to the GPU            [policy.choose_backend]
+        set_backend               an explicit backend choice is honored           [policy.choose_backend]
+        env_backend               PEREGRINE_BACKEND (subprocess, env-before-import) [__init__.py]
+        live_crossover            real RTX 3060 calibration reproduces the routing (@gpu) [integration]
 """
 
 import importlib
@@ -86,7 +79,7 @@ import pytest
 import peregrine as pg
 from peregrine import policy
 
-# The SUBMODULE, fetched via import_module. As of Phase 5 the package re-exports
+# The SUBMODULE, fetched via import_module. The package re-exports
 # the calibrate FUNCTION as pg.calibrate (the public API),
 # which shadows the submodule attribute: `from peregrine import calibrate` and
 # `import peregrine.calibrate as calibrate` both now bind the FUNCTION. These
@@ -98,7 +91,7 @@ calibrate = importlib.import_module("peregrine.calibrate")
 from conftest import assert_matmul_close, requires_cuda
 
 _CUDA_OK, _CUDA_REASON = requires_cuda()
-# Reused by every device-touching test the later waves add (the live crossover
+# Reused by every device-touching test (the live crossover
 # and the real-device calibrate path). The scaffold smoke test below is
 # deliberately NOT decorated: it must pass on every build to prove the file is
 # wired and collects even when CUDA is off.
@@ -107,8 +100,8 @@ gpu = pytest.mark.skipif(not _CUDA_OK, reason=_CUDA_REASON)
 
 def test_calibration_module_scaffold():
     # Runs everywhere, including CPU-only and WSL: proves this file collects and
-    # is wired to the package without depending on calibrate/policy (which do not
-    # exist until Waves 2-3). has_cuda() is the stable introspection surface and
+    # is wired to the package without depending on calibrate/policy.
+    # has_cuda() is the stable introspection surface and
     # returns a bool on every build (False on a CPU-only build, never an
     # exception), so the scaffold can assert its type as the everywhere-smoke,
     # mirroring test_cuda.py's test_has_cuda_runtime.
@@ -117,11 +110,11 @@ def test_calibration_module_scaffold():
 
 # --- synthetic calibration table -------------------------------------------
 #
-# The whole DISP-05 contract is provable WITHOUT a GPU by feeding choose_backend
+# The whole routing contract is provable WITHOUT a GPU by feeding choose_backend
 # a synthetic calibration dict: it is a pure function, so its decisions are
 # fixed by the numbers in the table, not by the hardware. The numbers below are
 # constructed so the four acceptance points hold BY CONSTRUCTION, encoding the
-# physical fact the single-GFLOP/s model gets wrong (RESEARCH CRITICAL pitfall):
+# physical fact the single-GFLOP/s model gets wrong:
 # at small n the host GPU path is dominated by a FIXED staging+launch floor, not
 # by asymptotic bandwidth, so n=256 host stays on the CPU while n=4096 host
 # crosses to the GPU.
@@ -176,7 +169,7 @@ def synthetic_calibration():
     }
 
 
-# --- DISP-05: the four auto-mode acceptance points (pure, CPU-only) ----------
+# --- routing: the four auto-mode acceptance points (pure, CPU-only) ----------
 
 
 def test_f64_host_cpu():
@@ -193,7 +186,7 @@ def test_f64_host_cpu():
 def test_f32_256_host_cpu():
     # Host f32 n=256 stays on the CPU: the GPU compute + H2D/D2H round trip +
     # fixed staging floor (~0.93ms) exceeds the honest CPU time (~0.61ms). This
-    # is the point a single-GFLOP/s model gets wrong (RESEARCH CRITICAL pitfall).
+    # is the point a single-GFLOP/s model gets wrong.
     table = synthetic_calibration()
     got = policy.choose_backend(
         "float32", 256, 256, 256, residency="host", calibration=table, backend="auto"
@@ -223,7 +216,7 @@ def test_f32_device_gpu():
         assert got == "cuda", f"f32 device n={n} must route to cuda, got {got}"
 
 
-# --- DISP-04: static fallback and the transfer-cost crossover ----------------
+# --- static fallback and the transfer-cost crossover ----------------
 
 
 def test_static_fallback():
@@ -267,7 +260,7 @@ def test_transfer_cost():
     assert device == "cuda"
 
 
-# --- DISP-05: explicit backend override (set_backend / PEREGRINE_BACKEND) ----------
+# --- explicit backend override (set_backend / PEREGRINE_BACKEND) ----------
 
 
 def test_set_backend_forces_cpu():
@@ -296,7 +289,7 @@ def test_set_backend_forces_cuda_routing():
 
 
 def test_set_backend():
-    # The wrapper-level set_backend (DISP-05 override half). cpu/auto succeed and
+    # The wrapper-level set_backend (the override half of routing). cpu/auto succeed and
     # return None; an out-of-set value raises ValueError naming the allowed set;
     # on a CPU-only build "cuda" raises the VERBATIM "cuda backend requested but
     # <reason>" RuntimeError (the same token to_device raises -- the contract is
@@ -350,7 +343,7 @@ assert out.shape == (64, 64) and out.dtype == np.float32
 
 
 def test_env_backend(tmp_path):
-    # DISP-05: PEREGRINE_BACKEND maps to the backend at import. The variable MUST be in
+    # PEREGRINE_BACKEND maps to the backend at import. The variable MUST be in
     # the environment before the process starts (the dispatch policy reads it once
     # at import, exactly like PEREGRINE_DISABLE_AVX2 in test_fallback.py), so this spawns
     # a child with a FULL env copy plus the override merged in -- a stripped env
@@ -394,7 +387,7 @@ assert pg._backend == "auto", repr(pg._backend)
 
 
 def test_import_no_calibration(tmp_path):
-    # DISP-01: a bare `import peregrine` runs no calibration and reads/writes no
+    # A bare `import peregrine` runs no calibration and reads/writes no
     # cache (the import budget is <50ms; calibration and the cache read are lazy).
     # Run in a subprocess so the import is genuinely fresh -- an in-process import
     # is already cached and could not observe import-time side effects. The child
@@ -416,11 +409,11 @@ def test_import_no_calibration(tmp_path):
 
 @gpu
 def test_live_crossover(tmp_path, monkeypatch):
-    # DISP-05 (live, @gpu): on a fresh ON build, an actual calibrate() on the real
+    # Live, @gpu: on a fresh ON build, an actual calibrate() on the real
     # RTX 3060 must complete within budget, return gpu + transfer entries (a true
-    # GPU-signature cache), and the four DISP-05 crossover points must hold when
+    # GPU-signature cache), and the four routing crossover points must hold when
     # the policy is fed the REAL measured numbers -- not the synthetic table. This
-    # is the end-to-end close of DISP-01/05 on hardware: every other DISP-05 test
+    # is the end-to-end check of calibration and routing on hardware: every other routing test
     # uses constructed numbers, this one proves the live device reproduces the
     # contract. Isolated to a tmp cache dir so the real per-user cache is untouched.
     monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
@@ -442,7 +435,7 @@ def test_live_crossover(tmp_path, monkeypatch):
     parts = cal["signature"].split("|")
     assert parts[1] != "none" and parts[2] != "n/a", cal["signature"]
 
-    # the four DISP-05 points, fed the LIVE numbers. The measured grid only spans
+    # the four routing points, fed the LIVE numbers. The measured grid only spans
     # the sizes the budget allowed; key the points off what was actually measured.
     measured_ns = [pt[0] for pt in cal["cpu"]["float32"]]
     large_n = measured_ns[-1]
@@ -463,7 +456,7 @@ def test_live_crossover(tmp_path, monkeypatch):
     # size as a host array, because the host path adds the H2D+D2H round trip and
     # the fixed staging floor on top of the identical compute comparison. So the
     # host path can never pick cuda where the device path picks cpu -- the device
-    # crossover sits at a smaller-or-equal n. This is the load-bearing DISP-04/05
+    # crossover sits at a smaller-or-equal n. This is the load-bearing fallback and routing
     # property and it holds regardless of the absolute CPU-time magnitude (it falls
     # straight out of _transfer_time >= 0 in the policy). The exact small-n
     # host->cpu point is asserted on the synthetic table (test_f32_256_host_cpu),
@@ -492,7 +485,7 @@ def test_live_crossover(tmp_path, monkeypatch):
     ), f"live f32 device n={large_n} should route to cuda"
 
     # the largest measured host f32 crosses to the GPU: the GEMM time saved dwarfs
-    # the transfer round trip at large n (the headline DISP-05 win, on real numbers)
+    # the transfer round trip at large n (the headline routing win, on real numbers)
     assert (
         policy.choose_backend(
             "float32", large_n, large_n, large_n,
@@ -502,7 +495,7 @@ def test_live_crossover(tmp_path, monkeypatch):
     ), f"live f32 host n={large_n} should route to cuda"
 
 
-# --- DISP-03: fail-safe cache read and the PEREGRINE_CACHE_DIR override -------------
+# --- fail-safe cache read and the PEREGRINE_CACHE_DIR override -------------
 
 
 def _write_cache_file(path, payload):
@@ -598,7 +591,7 @@ def test_malformed_body_recalibrate(tmp_path):
 
     # the load-bearing consequence: with the cache rejected to None, the dispatch
     # path falls back to the conservative static choice and does NOT crash, for
-    # every (dtype, residency) -- the fail-safe contract DISP-03 promises.
+    # every (dtype, residency) -- the fail-safe contract of the cache read.
     for dtype in ("float32", "float64"):
         for residency in ("host", "device"):
             assert (
@@ -640,7 +633,7 @@ def test_cache_dir_override(tmp_path, monkeypatch):
     assert "peregrine" in default.lower()
 
 
-# --- DISP-01: calibrate() measures under budget; CPU-only omits gpu/transfer ---
+# --- calibrate() measures under budget; CPU-only omits gpu/transfer ---
 #
 # These exercise the live calibrate() measurement on whatever build is present.
 # On the CPU-only build (the dominant gate) they measure the CPU grid only; on a
@@ -653,7 +646,7 @@ def test_cache_dir_override(tmp_path, monkeypatch):
 
 @pytest.mark.slow
 def test_calibrate_budget(tmp_path, monkeypatch):
-    # DISP-01: calibrate() returns a dict carrying the CPU grid and completes
+    # calibrate() returns a dict carrying the CPU grid and completes
     # within its time budget. budget_seconds is a hard ceiling, not a tight bound:
     # the loop measures a whole size before re-checking elapsed, so one in-flight
     # size can run past the nominal budget. Assert a generous ceiling (the budget
@@ -684,7 +677,7 @@ def test_calibrate_budget(tmp_path, monkeypatch):
 
 
 def test_cpu_only_calibrate(tmp_path, monkeypatch):
-    # DISP-01: on a CPU-only build calibrate() measures the CPU grid only and the
+    # On a CPU-only build calibrate() measures the CPU grid only and the
     # returned dict has NO gpu and NO transfer key, so the policy treats the GPU
     # as unavailable. This is the OFF-build contract (the dominant gate). On an ON
     # build the keys are present instead -- assert that branch too so the test is
@@ -699,11 +692,11 @@ def test_cpu_only_calibrate(tmp_path, monkeypatch):
         assert "transfer" not in result, "CPU-only calibrate must omit the transfer key"
 
 
-# --- DISP-02: cache write, reuse, and the GPU-distinguishing signature ---------
+# --- cache write, reuse, and the GPU-distinguishing signature ---------
 
 
 def test_writes_cache(tmp_path, monkeypatch):
-    # DISP-02: a fresh calibrate() writes a valid schema-versioned JSON under the
+    # A fresh calibrate() writes a valid schema-versioned JSON under the
     # PEREGRINE_CACHE_DIR path. The written file parses as JSON, carries the policy
     # SCHEMA and the running machine signature, and round-trips through
     # policy._load_cache to a non-None dict (the read/write contract closes here).
@@ -724,7 +717,7 @@ def test_writes_cache(tmp_path, monkeypatch):
 
 
 def test_cache_reuse(tmp_path, monkeypatch):
-    # DISP-02: a second force=False call reuses the cache without re-measuring --
+    # A second force=False call reuses the cache without re-measuring --
     # the second-run-uses-cache contract. Prove it two ways: the cache file's
     # mtime is unchanged across the second call (no rewrite happened), and the
     # second call returns the same content as the first. A force=True call by
@@ -752,7 +745,7 @@ def test_cache_reuse(tmp_path, monkeypatch):
 
 
 def test_signature_distinct(tmp_path, monkeypatch):
-    # DISP-02: the machine signature a CPU-only run produces (gpu=none, driver=n/a)
+    # The machine signature a CPU-only run produces (gpu=none, driver=n/a)
     # differs from a GPU-run signature on the SAME CPU. On the CPU-only build the
     # helper emits the none/n/a GPU+driver components, so swapping in a real GPU
     # name yields a strictly different string -- a CPU-only cache can never be
@@ -783,11 +776,11 @@ def test_signature_distinct(tmp_path, monkeypatch):
         )
 
 
-# --- DISP-03 (write half): the atomic, crash-safe cache write ------------------
+# --- the write half of the fail-safe cache: the atomic, crash-safe cache write ------------------
 
 
 def test_atomic_write(tmp_path, monkeypatch):
-    # DISP-03 write half: after calibrate() writes the cache there is no leftover
+    # The write half of the fail-safe cache: after calibrate() writes the cache there is no leftover
     # *.tmp file in the cache dir and the target is a complete, parseable JSON.
     # The write goes to a temp file in the same dir then os.replace -- a crash
     # mid-write leaves the old file or the new, never a half-written one, and the
