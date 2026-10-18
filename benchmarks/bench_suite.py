@@ -518,6 +518,20 @@ def _proto_argv(proto: Protocol, smoke: bool) -> list[str]:
     return a
 
 
+_PRIORITY = "normal"
+
+
+def _raise_priority() -> str:
+    # Both contenders share the process, so the class favors neither; it keeps
+    # normal-priority background threads from preempting the timed loop.
+    if os.name != "nt":
+        return "normal"
+    import ctypes
+
+    k32 = ctypes.windll.kernel32
+    return "high" if k32.SetPriorityClass(k32.GetCurrentProcess(), 0x80) else "normal"
+
+
 def fresh_process_runner(smoke: bool):
     """The last chance for a noisy cell: this script re-invoked for that cell alone."""
 
@@ -530,6 +544,7 @@ def fresh_process_runner(smoke: bool):
                     "--cell", json.dumps(cell.spec()),
                     "--out", out, "--fresh-child",
                     *_proto_argv(proto, smoke),
+                    *(["--normal-priority"] if _PRIORITY == "normal" else []),
                 ]
                 # The child inherits the environment so its OpenMP runtime
                 # starts with the same OMP_NUM_THREADS as this process did.
@@ -717,7 +732,12 @@ def _parse(argv):
     p.add_argument("--samples", type=int, default=None, help="samples per contender per cell (min 30)")
     p.add_argument("--warmups", type=int, default=None, help="warmup samples per contender per cell (min 5)")
     p.add_argument("--switch-gap-ms", type=float, default=None, help="idle gap at every contender switch (default 300)")
-    p.add_argument("--batch-target-us", type=float, default=200.0)
+    # 50 ms, well above the 200 us floor: on this laptop a 6-thread call straggles
+    # whenever background work wakes on a busy core's SMT sibling, and averaging
+    # each sample over many calls is what brought 6-thread CV under 5 percent.
+    p.add_argument("--batch-target-us", type=float, default=50000.0)
+    p.add_argument("--normal-priority", action="store_true",
+                   help="leave the process at normal priority (default on Windows: HIGH for every contender alike)")
     p.add_argument("--rewarm-ms", type=float, default=None,
                    help="untimed running of each contender before sampling, after every switch (default 200)")
     p.add_argument("--cooldown-s", type=float, default=30.0, help="between series and before each CV rerun")
@@ -782,6 +802,8 @@ def _line(r: dict) -> str:
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = _parse(argv)
+    global _PRIORITY
+    _PRIORITY = "normal" if args.normal_priority else _raise_priority()
     proto, cooldown = _protocol(args)
     clock = PdhClock()
     clock_obj = clock if clock.available else None
@@ -816,7 +838,8 @@ def main(argv=None) -> int:
     out_path = args.out or os.path.join(RESULTS_LOCAL, f"{'+'.join(args.group)}-{stamp}.json")
     manifest = protocol_manifest(
         argv=["bench_suite.py", *argv], series_seed=seed, clock=clock,
-        extra={"smoke": args.smoke, "protocol": dataclasses.asdict(proto), "series_cooldown_s": cooldown},
+        extra={"smoke": args.smoke, "protocol": dataclasses.asdict(proto), "series_cooldown_s": cooldown,
+               "priority_class": _PRIORITY},
     )
     result = {"manifest": manifest, "cells": []}
     fresh = None if args.fresh_child else fresh_process_runner(args.smoke)
