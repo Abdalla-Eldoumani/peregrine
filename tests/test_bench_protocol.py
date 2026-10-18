@@ -690,6 +690,9 @@ def test_manifest_keys_and_redaction():
         assert key in m, key
     assert m["series_order_seed"] == 7
     assert set(m["source_tree"]) == {"commit", "dirty"}
+    if hasattr(pg._core, "_build_info"):
+        for key in ("compiler", "compiler_flags", "openmp_runtime"):
+            assert m[key] != "unknown", key
     text = json.dumps(m)
     assert home not in text and home.replace("\\", "/") not in text
     assert json.dumps(home)[1:-1] not in text
