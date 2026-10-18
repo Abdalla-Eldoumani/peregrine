@@ -17,6 +17,7 @@ import enum
 import functools
 import importlib
 import inspect
+import itertools
 import math
 import os
 import struct
@@ -32,7 +33,14 @@ from hypothesis import strategies as st
 
 import peregrine as pg
 from peregrine import policy
-from test_calibration import _stub_gpu_machine, _write_cache_file, synthetic_calibration
+from test_calibration import (
+    _smoothed_real_calibration,
+    _staged_seconds,
+    _stub_gpu_machine,
+    _write_cache_file,
+    real_calibration,
+    synthetic_calibration,
+)
 
 calibrate = importlib.import_module("peregrine.calibrate")
 
@@ -617,17 +625,35 @@ def test_pushes_follow_the_router(tmp_path, monkeypatch):
 
 
 def _calibrations():
+    # with no fixed staging cost the GPU wins from the smallest product on
     early = synthetic_calibration()
-    early["transfer"]["fixed_overhead_s"] = 0.0
+    early["staged"]["float32"] = [
+        [n, _staged_seconds(n, 0.0)] for n, _ in early["staged"]["float32"]
+    ]
+    # a flat 10 s GPU wins only far past the largest measured size, where the
+    # CPU's extrapolated time passes 10 s
+    late = synthetic_calibration()
+    late["gpu"]["float32"] = [[n, 10.0] for n, _ in late["gpu"]["float32"]]
+    # a GPU ten times slower than the CPU at every size never wins
     never = synthetic_calibration()
-    never["gpu"]["float32"] = [[n, 10.0] for n, _ in never["gpu"]["float32"]]
-    return [synthetic_calibration(), early, never]
+    never["gpu"]["float32"] = [[n, 10.0 * t] for n, t in never["cpu"]["float32"]]
+    return [
+        synthetic_calibration(), early, late, never,
+        real_calibration(), _smoothed_real_calibration(),
+    ]
+
+
+def _host(cal, m, k, n):
+    return policy.choose_backend(
+        "float32", m, k, n, residency="host", calibration=cal, backend="auto"
+    )
 
 
 @given(data=st.data())
 def test_bound_admits_no_gpu_shape(data):
     # The native entry computes a host float32 product on the CPU without asking
-    # the policy whenever 2*m*k*n <= the bound, so the policy must agree.
+    # the policy whenever 2*m*k*n <= the bound, so the policy must agree for
+    # every shape under it, skinny or fat, with the long side in any position.
     cal = data.draw(st.sampled_from(_calibrations()))
     bound = policy.f32_cpu_flops_bound(cal)
     cap = min(bound, 2.0 * 8192**3)
@@ -635,26 +661,74 @@ def test_bound_admits_no_gpu_shape(data):
     k = data.draw(st.integers(1, max(1, min(8192, int(cap // (2 * n))))))
     m = data.draw(st.integers(1, max(1, min(8192, int(cap // (2 * n * k))))))
     assume(2.0 * m * k * n <= bound)
-    got = policy.choose_backend(
-        "float32", m, k, n, residency="host", calibration=cal, backend="auto"
-    )
-    assert got == "cpu"
+    m, k, n = data.draw(st.permutations([m, k, n]))
+    assert _host(cal, m, k, n) == "cpu"
+
+
+def test_bound_admits_no_gpu_shape_at_the_edge():
+    # The shapes with the most work the bound admits: the largest cube, the
+    # long vector products, and slabs in between, in every orientation.
+    for cal in _calibrations():
+        bound = policy.f32_cpu_flops_bound(cal)
+        if math.isinf(bound) or bound < 2.0:
+            continue
+        half = int(bound // 2)
+        side = round(half ** (1.0 / 3.0)) + 1
+        while 2.0 * side**3 > bound:
+            side -= 1
+        shapes = [(side, side, side), (1, 1, half)]
+        shapes += [(a, a, half // (a * a)) for a in (2, 8, 32) if half >= a * a]
+        for shape in shapes:
+            for m, k, n in set(itertools.permutations(shape)):
+                assert 2.0 * m * k * n <= bound
+                assert _host(cal, m, k, n) == "cpu", (m, k, n, cal["signature"])
 
 
 def test_bound_is_tight():
+    # A cube attains the AM-GM byte floor the bound is built on whenever the two
+    # bandwidths are equal, so there a cube two walk steps past the bound goes
+    # to the GPU: the bound gives up no more than the walk's resolution. With
+    # unequal bandwidths a cube moves more than the floor and the bound sits
+    # lower; test_measured_bound pins it on the measured calibration.
     for cal in _calibrations():
         bound = policy.f32_cpu_flops_bound(cal)
-        if math.isinf(bound):
+        equal = cal["transfer"]["h2d_gbps"] == cal["transfer"]["d2h_gbps"]
+        if math.isinf(bound) or bound == 0.0 or not equal:
             continue
-        n = int(bound // 2) + 1
-        got = policy.choose_backend(
-            "float32", 1, 1, n, residency="host", calibration=cal, backend="auto"
-        )
-        assert got == "cuda"
+        n = math.ceil((bound * policy._BOUND_STEP**2 / 2.0) ** (1.0 / 3.0))
+        assert _host(cal, n, n, n) == "cuda", (n, cal["signature"])
+    early, late, never = _calibrations()[1:4]
+    assert policy.f32_cpu_flops_bound(early) == 0.0
+    assert _host(early, 1, 1, 1) == "cuda"
+    assert 2.0 * 4096**3 < policy.f32_cpu_flops_bound(late) < math.inf
+    assert math.isinf(policy.f32_cpu_flops_bound(never))
     assert math.isinf(policy.f32_cpu_flops_bound(None))
     no_gpu = synthetic_calibration()
     del no_gpu["gpu"]
     assert math.isinf(policy.f32_cpu_flops_bound(no_gpu))
+
+
+def test_measured_bound():
+    # On the measured calibration every host product up to about a 59-cube
+    # stays on the CPU and the first square sent to the GPU is n=60, so a small
+    # calibrated product never leaves the native entry.
+    bound = policy.f32_cpu_flops_bound(real_calibration())
+    assert 2.0 * 59**3 <= bound < 2.0 * 60**3
+    assert _host(real_calibration(), 59, 59, 59) == "cpu"
+    assert _host(real_calibration(), 60, 60, 60) == "cuda"
+
+
+def test_calibrated_cuda_build_keeps_small_products_native(monkeypatch):
+    # With a device and the measured calibration installed, the native entry
+    # takes an 8x8 auto product itself and hands a product past the bound to
+    # the policy.
+    monkeypatch.setattr(pg, "_cuda_fallback_warned", False)
+    _stub_gpu_machine(monkeypatch)
+    pg._install_routing_calibration(real_calibration())
+    small = np.ones((8, 8), np.float32)
+    large = np.ones((64, 64), np.float32)
+    assert NATIVE["matmul"](small, small, None) is not NotImplemented
+    assert NATIVE["matmul"](large, large, None) is NotImplemented
 
 
 # --- the switch, the device path, and the build record --------------------------
