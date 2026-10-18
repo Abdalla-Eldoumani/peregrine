@@ -15,14 +15,17 @@ things and nothing else:
   logging, no global mutation. The wrapper owns side effects; this only decides.
 
 The load-bearing design fact (the reason this module exists rather than a single
-threshold constant): the crossover compares per-(dtype, n) MEASURED wall times,
-NOT one asymptotic GFLOP/s figure. A single-constant model -- cpu_time =
-work/CPU_GFLOPS vs gpu_time = work/GPU_GFLOPS + transfer using the warm large-n
-throughput -- routes EVERYTHING, including a 256x256 host GEMM, to the GPU,
-because at small n the GPU never reaches that warm throughput: a fixed launch +
-cuBLAS setup + host-staging floor dominates. Storing the measured per-n times and
-interpolating between them encodes that floor by construction, so a small host
-matrix correctly stays on the CPU while a large one crosses to the GPU.
+threshold constant): the crossover compares MEASURED wall times interpolated at
+the product's work, NOT one asymptotic GFLOP/s figure. A single-constant model --
+cpu_time = work/CPU_GFLOPS vs gpu_time = work/GPU_GFLOPS + transfer using the warm
+large-n throughput -- routes EVERYTHING, including a 256x256 host GEMM, to the
+GPU, because at small n the GPU never reaches that warm throughput: a fixed
+launch + cuBLAS setup + host-staging floor dominates. Interpolating the measured
+times encodes that floor by construction, so a small host matrix correctly stays
+on the CPU while a large one crosses to the GPU. The times are looked up by the
+work 2*m*k*n and the host transfer by the bytes each operand moves, never by one
+dimension alone, so a matrix-vector product with a large n is not mistaken for a
+large square one.
 
 Security: the cache is read with ``json.load`` ONLY, never ``pickle`` -- pickle
 deserialization executes arbitrary code, JSON cannot. After loading, the schema
@@ -105,8 +108,9 @@ def _load_cache(path: str, expected_signature: str):
        not match ``SCHEMA`` (a foreign / older / newer cache) -> ``None``;
     3. the signature does not match the running machine/build -> ``None``;
     4. the body is structurally malformed -- a missing or empty ``cpu`` grid, a
-       grid point that is not an ``[n, time]`` pair, or a ``gpu`` series present
-       without a well-formed ``transfer`` triple -> ``None``.
+       grid point that is not an ``[n, time]`` pair of positive numbers, a grid
+       whose ``n`` does not strictly ascend, or a ``gpu`` series present without
+       a well-formed ``staged`` series and ``transfer`` triple -> ``None``.
 
     The schema integer promises the fields exist and are well-formed, but a
     truncated file, a non-atomic external writer, or a foreign tool can stamp the
@@ -114,7 +118,9 @@ def _load_cache(path: str, expected_signature: str):
     defense: a structurally malformed body collapses to ``None`` like every other
     rejection so a partial dict never reaches :func:`choose_backend`, where
     ``grid[0][0]`` / ``calibration["cpu"][dtype]`` / ``calibration["transfer"]``
-    would otherwise raise ``IndexError`` / ``KeyError`` on the dispatch hot path.
+    would otherwise raise ``IndexError`` / ``KeyError``, and the log-log
+    interpolation would raise on a zero time or a repeated ``n``, on the
+    dispatch hot path.
 
     Only ``json.load`` is used -- never ``pickle`` -- so a tampered cache cannot
     execute code; it can only be rejected or, at worst, route sub-optimally.
@@ -146,23 +152,26 @@ def _load_cache(path: str, expected_signature: str):
         return None
     # Structural validation (step 4): the schema + signature gate does not prove
     # the body is well-formed. A non-empty per-dtype [n, time] CPU grid is
-    # required, and if a "gpu" series is present then the "transfer" triple it
-    # depends on must be present and complete (a positive bandwidth pair so the
-    # _transfer_time division below cannot hit a zero). Any defect collapses to
-    # None -- recalibrate or static fallback -- exactly like a parse/schema/
-    # signature failure, so a malformed body never reaches choose_backend.
+    # required, and if a "gpu" series is present then the "staged" series its
+    # fixed cost is fitted from and the "transfer" triple must be present and
+    # complete (a positive bandwidth pair so the _transfer_time division below
+    # cannot hit a zero). Any defect collapses to None -- recalibrate or static
+    # fallback -- exactly like a parse/schema/signature failure, so a malformed
+    # body never reaches choose_backend.
     cpu = data.get("cpu")
     if not isinstance(cpu, dict):
         return None
-    for dt in ("float32", "float64"):
-        grid = cpu.get(dt)
-        if not isinstance(grid, list) or not grid:
-            return None
-        if not all(isinstance(p, list) and len(p) == 2 for p in grid):
-            return None
+    if not (_is_grid(cpu.get("float32")) and _is_grid(cpu.get("float64"))):
+        return None
     gpu = data.get("gpu")
     if gpu is not None:
-        if not (isinstance(gpu, dict) and gpu.get("float32")):
+        staged = data.get("staged")
+        if not (
+            isinstance(gpu, dict)
+            and _is_grid(gpu.get("float32"))
+            and isinstance(staged, dict)
+            and _is_grid(staged.get("float32"))
+        ):
             return None
         transfer = data.get("transfer")
         if not isinstance(transfer, dict) or not all(
@@ -174,79 +183,126 @@ def _load_cache(path: str, expected_signature: str):
     return data
 
 
-def _interp_time(grid, n) -> float:
-    """Linear-interpolate a measured wall time at ``n`` from a ``[n, time_s]`` grid.
+def _is_grid(grid) -> bool:
+    # The log-log interpolation divides by logs of neighbouring sizes and times,
+    # so it needs positive values and strictly ascending sizes.
+    return (
+        isinstance(grid, list)
+        and len(grid) > 0
+        and all(isinstance(p, list) and len(p) == 2 and p[0] > 0 and p[1] > 0 for p in grid)
+        and all(p[0] < q[0] for p, q in zip(grid, grid[1:]))
+    )
 
-    ``grid`` is the ascending-by-n list of measured ``[n, time_s]`` points for
-    one (dtype, residency-independent compute) series. Below the smallest grid n
-    the time is clamped to the smallest point and above the largest to the
-    largest point: extrapolating a cubic GEMM cost off the measured range would
-    be less trustworthy than clamping, and the calibration grid spans the sizes
-    that matter. Between grid points the time is linearly interpolated.
+
+def _interp_time(grid, flops) -> float:
+    """Log-log interpolate a measured wall time at ``flops`` of work.
+
+    ``grid`` is one ascending ``[n, time_s]`` series of square products, so the
+    point at ``n`` sits at ``F = 2*n**3``. Interpolating log time against log F
+    is the same as against the log of the equivalent cube side
+    ``(F/2)**(1/3)``, since one log is an affine function of the other, so the
+    grid's own sizes serve as the knots. GEMM cost is close to a power of its
+    work, which a straight line in log-log space follows and a straight line in
+    linear space does not.
+
+    Below the smallest point the time is clamped: a smaller product is never
+    slower, and nothing measured says how much faster it is. Above the largest
+    point the time follows the last segment's slope rather than clamping:
+    clamping would freeze both compute times while a host product's transfer
+    kept growing, so past some size every square product would turn back to
+    the CPU although the GPU's lead was widening where the measurements stopped.
 
     Parameters
     ----------
     grid : list of [int, float]
-        Ascending ``[n, time_s]`` measurements.
-    n : int
-        The size to estimate a time for.
+        Ascending ``[n, time_s]`` measurements of square products.
+    flops : float
+        The work ``2*m*k*n`` to estimate a time for.
 
     Returns
     -------
     float
-        The interpolated (or clamped) wall time in seconds.
+        The interpolated, clamped, or extrapolated wall time in seconds.
     """
-    if n <= grid[0][0]:
+    side = (flops / 2.0) ** (1.0 / 3.0)
+    if side <= grid[0][0] or len(grid) == 1:
         return grid[0][1]
-    if n >= grid[-1][0]:
-        return grid[-1][1]
-    for i in range(1, len(grid)):
-        n1, t1 = grid[i]
-        if n <= n1:
-            n0, t0 = grid[i - 1]
-            # linear between the bracketing measured points
-            frac = (n - n0) / (n1 - n0)
-            return t0 + frac * (t1 - t0)
-    return grid[-1][1]
+    i = 1
+    while i < len(grid) - 1 and side > grid[i][0]:
+        i += 1
+    (n0, t0), (n1, t1) = grid[i - 1], grid[i]
+    return t0 * (side / n0) ** (math.log(t1 / t0) / math.log(n1 / n0))
 
 
-def _transfer_time(transfer, dtype, n) -> float:
-    """Estimate the host round-trip a host-array GPU GEMM pays, in seconds.
+def _transfer_time(transfer, m, k, n) -> float:
+    """Estimate the transfers a host float32 GEMM routed to the GPU pays, in seconds.
 
-    A host GEMM routed to the GPU stages two operands up (H2D) and one result
-    back (D2H), then pays a fixed staging overhead -- the three Python ->
-    native -> CUDA crossings plus the kernel launch and the pageable-copy setup.
-    That fixed floor is what keeps a small host matrix on the CPU even though the
-    GPU's compute alone is faster. Device-resident inputs pay none of this, which
-    is why their crossover is at a much smaller n.
+    The two operands go up (``4*(m*k + k*n)`` bytes at the H2D bandwidth) and
+    the product comes back (``4*m*n`` bytes at the D2H bandwidth). Only float32
+    reaches the GPU from the host, so the width is fixed. Device-resident inputs
+    pay none of this, which is why their crossover is at less work.
 
     Parameters
     ----------
     transfer : dict
-        ``{"h2d_gbps", "d2h_gbps", "fixed_overhead_s"}`` measured bandwidths and
-        the fixed staging floor.
-    dtype : str
-        ``"float32"`` or ``"float64"`` -- sets the per-element byte width.
-    n : int
-        The square operand dimension.
+        ``{"h2d_gbps", "d2h_gbps", ...}`` measured bandwidths in GB/s.
+    m, k, n : int
+        GEMM dimensions (M x K times K x N).
 
     Returns
     -------
     float
-        The H2D(2 operands) + D2H(1 result) round-trip time plus the fixed
-        overhead, in seconds.
+        The upload plus download time in seconds.
     """
-    itemsize = 8 if dtype == "float64" else 4
-    nbytes = n * n * itemsize
     # Floor the bandwidth before dividing: _load_cache rejects a cache whose
     # bandwidths are <= 0, but a degenerate-but-positive reading (a fast device
     # against a coarse timer) could still round low, and this function must never
     # raise ZeroDivisionError on the dispatch hot path. A 1e-12 GB/s floor makes a
     # near-zero bandwidth read as effectively infinite transfer time (the GPU
     # loses), which is the conservative direction.
-    h2d = 2 * nbytes / (max(transfer["h2d_gbps"], 1e-12) * 1e9)
-    d2h = nbytes / (max(transfer["d2h_gbps"], 1e-12) * 1e9)
-    return h2d + d2h + transfer["fixed_overhead_s"]
+    up = 4.0 * (m * k + k * n) / (max(transfer["h2d_gbps"], 1e-12) * 1e9)
+    down = 4.0 * m * n / (max(transfer["d2h_gbps"], 1e-12) * 1e9)
+    return up + down
+
+
+def _staging_floor(calibration) -> float:
+    """Fit the fixed cost of the staged GPU path from its measured series.
+
+    The model prices a staged square product at ``gpu_t + transfer + t_fixed``.
+    ``t_fixed`` is the value that minimizes the summed squared relative error of
+    that model against the staged series, ``sum(((model_i - staged_i) /
+    staged_i)**2)``, whose closed form is the mean of the residuals
+    ``staged_i - gpu_i - transfer_i`` weighted by ``1/staged_i**2``. A relative
+    fit counts every size alike; an absolute one would be settled by the
+    largest sizes, where the residual is millisecond-scale error in the
+    transfer model rather than a fixed cost, while the fixed cost only decides
+    anything at the small sizes. A fixed cost cannot be negative, so the fit is
+    floored at zero, which also keeps a host product's GPU cost at or above the
+    compute-only cost a device-resident product is judged by.
+
+    Parameters
+    ----------
+    calibration : dict
+        A calibration dict carrying ``gpu``, ``staged``, and ``transfer``.
+
+    Returns
+    -------
+    float
+        The fitted fixed cost in seconds.
+    """
+    gpu = calibration["gpu"]["float32"]
+    # calibrate() times both series at the same sizes, so the lookup is exact
+    # and the interpolation only serves a cache written some other way.
+    gpu_at = dict(gpu)
+    # A square product moves n**2 times the bytes of a 1x1x1 one each way.
+    unit_transfer = _transfer_time(calibration["transfer"], 1, 1, 1)
+    num = den = 0.0
+    for n, staged in calibration["staged"]["float32"]:
+        g = gpu_at[n] if n in gpu_at else _interp_time(gpu, 2.0 * n**3)
+        w = 1.0 / staged**2
+        num += w * (staged - g - unit_transfer * n * n)
+        den += w
+    return max(num / den, 0.0)
 
 
 def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
@@ -267,24 +323,28 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
     3. no calibration, or a calibration with no ``"gpu"`` series (a CPU-only
        build's cache) -> ``"cpu"`` (rule 4, the conservative static fallback:
        prefer the CPU when there is nothing measured to justify the GPU);
-    4. otherwise the measured per-(dtype, n) crossover (rule 4): a device-
-       resident input compares GPU compute vs CPU time with NO transfer cost; a
-       host input adds the H2D+D2H round trip plus the fixed staging floor, so it
-       crosses to the GPU at a larger n than a device-resident input does.
+    4. otherwise the measured crossover (rule 4) at the product's work
+       ``F = 2*m*k*n``: the CPU and GPU compute times are interpolated at ``F``
+       from the square calibration grids. A device-resident input compares
+       compute alone. A host input adds the upload of ``4*(m*k + k*n)`` bytes,
+       the download of ``4*m*n`` bytes, and the staged path's fixed cost fitted
+       from the staged series, so it crosses to the GPU at more work than a
+       device-resident input does, and a product with one small dimension,
+       whose bytes are large for its work, stays on the CPU.
 
     Parameters
     ----------
     dtype : str
         ``"float32"`` or ``"float64"``.
     m, k, n : int
-        GEMM dimensions (M x K times K x N); ``n`` keys the measured grids.
+        GEMM dimensions (M x K times K x N).
     residency : str
         ``"host"`` (operands in host memory, transfer cost applies) or
         ``"device"`` (already on the device, no transfer cost).
     calibration : dict or None
         A calibration dict from :func:`_load_cache`, or ``None`` for the static
-        fallback. The ``"gpu"`` and ``"transfer"`` keys are absent on a CPU-only
-        build.
+        fallback. The ``"gpu"``, ``"staged"``, and ``"transfer"`` keys are
+        absent on a CPU-only build.
     backend : str
         ``"auto"`` (run the policy), ``"cpu"`` or ``"cuda"`` (forced).
 
@@ -328,23 +388,36 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
     if calibration is None or not calibration.get("gpu"):
         return "cpu"
 
-    # Rule 4, measured half: compare per-n MEASURED wall times, not a single
-    # GFLOP/s. cpu_t and gpu_compute_t are interpolated from the calibration
-    # grids at this n.
-    cpu_t = _interp_time(calibration["cpu"][dtype], n)
-    gpu_compute_t = _interp_time(calibration["gpu"][dtype], n)
+    # Rule 4, measured half. The work is formed in double in the same order the
+    # native entry forms it, so both sides compare the same number to the bound.
+    flops = 2.0 * m * k * n
+    cpu_t = _interp_time(calibration["cpu"][dtype], flops)
+    gpu_t = _interp_time(calibration["gpu"][dtype], flops)
 
     # Rule 3 (residency): device-resident inputs pay no transfer cost, so the
-    # comparison is compute-vs-compute and the GPU wins at a far smaller n.
+    # comparison is compute-vs-compute and the GPU wins at far less work.
     if residency == "device":
-        return "cuda" if gpu_compute_t < cpu_t else "cpu"
+        return "cuda" if gpu_t < cpu_t else "cpu"
 
-    # Host inputs pay the H2D+D2H round trip plus the fixed staging floor. That
-    # floor is exactly why a small host matrix (e.g. n=256) stays on the CPU even
-    # though the GPU's compute alone is faster -- the single-GFLOP/s model misses
-    # it and wrongly routes small host GEMMs to the GPU.
-    xfer_t = _transfer_time(calibration["transfer"], dtype, n)
-    return "cuda" if (gpu_compute_t + xfer_t) < cpu_t else "cpu"
+    # Host inputs pay their bytes both ways plus the staged path's fixed cost.
+    # That fixed cost is why a small host matrix (e.g. n=256) stays on the CPU
+    # even though the GPU's compute alone is faster, and the bytes are why a
+    # matrix-vector product stays there at any size.
+    host_t = (
+        gpu_t
+        + _transfer_time(calibration["transfer"], m, k, n)
+        + _staging_floor(calibration)
+    )
+    return "cuda" if host_t < cpu_t else "cpu"
+
+
+# The bound's walk runs over a log grid in F with this ratio between points
+# (the equivalent cube side moves about 0.7 percent per point), from the
+# smallest product up to the work of a cube of side 2**20. A product past that
+# needs at least 12*(2**20)**2 bytes, 13 TB, of operands (the AM-GM bound
+# below), so none exists.
+_BOUND_STEP = 2.0 ** (1.0 / 32.0)
+_BOUND_TOP = 2.0 * 2.0**60
 
 
 def f32_cpu_flops_bound(calibration) -> float:
@@ -353,7 +426,21 @@ def f32_cpu_flops_bound(calibration) -> float:
     The native matmul entry computes a host float32 product on the CPU, without
     asking :func:`choose_backend`, when its ``2*m*k*n`` is at most this bound.
     The bound must therefore never admit a shape that :func:`choose_backend`
-    would send to the GPU; it is the largest value with that property.
+    would send to the GPU, whatever its proportions. For work ``F`` no shape's
+    host GPU cost is below ``gpu_t(F) + t_fixed + 12*(F/2)**(2/3) / bw``, where
+    ``bw`` is the faster of the two bandwidths: by the AM-GM inequality
+    ``4*(m*k + k*n + m*n) >= 12*(m*k*n)**(2/3)``, with equality for a cube, and
+    no byte moves faster than the faster direction. The bound is the largest
+    ``F`` such that ``cpu_t(F') <=`` that cost for every ``F' <= F``.
+
+    It is found on a fine log grid in ``F`` that includes every calibration
+    size, so both interpolated times are monotone between neighbouring points
+    and their extremes over each interval sit at its ends. An interval passes
+    only if the CPU's slowest end is no slower than the GPU's fastest end plus
+    the cost terms at the interval's start, which proves the inequality across
+    the whole interval, not only at the points. The walk stops at the first
+    interval that fails, which keeps it to a few hundred points for a
+    calibration with a crossover.
 
     Parameters
     ----------
@@ -363,9 +450,9 @@ def f32_cpu_flops_bound(calibration) -> float:
     Returns
     -------
     float
-        ``2*(n0 - 1)``, where ``n0`` is the smallest ``n`` the host decision
-        sends to the GPU, or ``inf`` when no calibration or no ``"gpu"`` series
-        exists or no ``n`` goes to the GPU.
+        The bound in flops: ``0.0`` when even the smallest product may go to
+        the GPU, and ``inf`` when no calibration or no ``"gpu"`` series exists
+        or no product goes to the GPU.
 
     Examples
     --------
@@ -375,14 +462,23 @@ def f32_cpu_flops_bound(calibration) -> float:
     """
     if calibration is None or not calibration.get("gpu"):
         return math.inf
-    # The host decision reads n alone. With m = k = 1, 2*n is the smallest
-    # product any shape with that n has, so the first n sent to the GPU sets
-    # the bound. Past the largest measured n both interpolated times clamp
-    # while the transfer time grows, so no larger n can turn to the GPU.
-    grids = calibration["cpu"]["float32"] + calibration["gpu"]["float32"]
-    for n in range(1, math.ceil(max(p[0] for p in grids)) + 1):
-        if choose_backend(
-            "float32", 1, 1, n, residency="host", calibration=calibration, backend="auto"
-        ) == "cuda":
-            return 2.0 * (n - 1)
+    cpu = calibration["cpu"]["float32"]
+    gpu = calibration["gpu"]["float32"]
+    fixed = _staging_floor(calibration)
+    transfer = calibration["transfer"]
+    bandwidth = max(transfer["h2d_gbps"], transfer["d2h_gbps"], 1e-12) * 1e9
+    steps = math.ceil(math.log(_BOUND_TOP / 2.0) / math.log(_BOUND_STEP))
+    points = sorted(
+        {2.0 * _BOUND_STEP**i for i in range(steps + 1)}
+        | {2.0 * n**3 for n, _ in cpu + gpu if 2.0 * n**3 < _BOUND_TOP}
+    )
+    bound = 0.0
+    lo = points[0]
+    cpu_lo, gpu_lo = _interp_time(cpu, lo), _interp_time(gpu, lo)
+    for hi in points[1:]:
+        cpu_hi, gpu_hi = _interp_time(cpu, hi), _interp_time(gpu, hi)
+        floor = min(gpu_lo, gpu_hi) + fixed + 12.0 * (lo / 2.0) ** (2.0 / 3.0) / bandwidth
+        if max(cpu_lo, cpu_hi) > floor:
+            return bound
+        bound, lo, cpu_lo, gpu_lo = hi, hi, cpu_hi, gpu_hi
     return math.inf
