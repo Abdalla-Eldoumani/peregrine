@@ -1,9 +1,9 @@
-"""Thread-scaling measurement for the f64 BLIS kernel (CPU-05).
+"""Thread-scaling measurement for the f64 BLIS kernel.
 
-CPU-05 requires >= 4x f64 throughput from 1 to 6 threads at n=1024 under
+The target is >= 4x f64 throughput from 1 to 6 threads at n=1024 under
 /openmp:llvm. At n=1024 with NC=4080 there is exactly one jc block, so all of
 the scaling comes from the parallel ic loop; a jc-only parallelization would
-measure 1.0x (RESEARCH Pitfall 3).
+measure 1.0x.
 
 The OpenMP runtime reads OMP_NUM_THREADS once at its initialization, so a single
 process cannot remeasure at different thread counts. This mirrors the
@@ -151,7 +151,7 @@ def run(threads: list[int], n: int, reps: int, warmup: int, cooldown: float) -> 
             f"  floor(min) {m['min_gflops']:6.1f} GF/s  cv {m['cv']*100:4.1f}%  verified True"
         )
 
-    # CPU-05 is the 6-vs-1 ratio at n=1024. Report it on both the median and the
+    # The scaling target is the 6-vs-1 ratio at n=1024. Report it on both the median and the
     # noise-robust floor: under background load the median ratio understates
     # scaling (more threads -> higher chance one worker is preempted at the
     # barrier), so the floor ratio is the honest ceiling on this machine.
@@ -170,13 +170,13 @@ def run(threads: list[int], n: int, reps: int, warmup: int, cooldown: float) -> 
             print(
                 f"\n6-vs-1 thread scaling at n={n}:"
                 f" {ratio_floor:.2f}x floor / {ratio_med:.2f}x median"
-                f"  (CPU-05 target >= 4x)"
+                f"  (target >= 4x)"
             )
             if ratio_floor < 4.0:
                 print(
                     "  below the 4x target on the floor too: confirm ic parallelism"
                     " engages all cores, threads pinned, background load quiet"
-                    " (CPU-05 is a requirement, surface a shortfall rather than"
+                    " (the 4x target is a requirement, surface a shortfall rather than"
                     " accept silently)"
                 )
     return results
@@ -184,7 +184,7 @@ def run(threads: list[int], n: int, reps: int, warmup: int, cooldown: float) -> 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
-    # 1,2,4,6 are the CPU-05 series; 12 measures SMT (the skill predicts 6 wins
+    # 1,2,4,6 are the scaling-target series; 12 measures SMT (the skill predicts 6 wins
     # for FMA-bound code but it is measured, not assumed).
     p.add_argument("--threads", type=int, nargs="+", default=[1, 2, 4, 6, 12])
     p.add_argument("--n", type=int, default=1024)
