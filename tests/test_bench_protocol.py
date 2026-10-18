@@ -295,7 +295,7 @@ def _ok_check(refs):
 
 
 def _proto(**kw):
-    base = dict(samples=10, warmups=5, switch_gap_s=0.0, strike_cooldown_s=30.0, fresh_cooldown_s=120.0)
+    base = dict(samples=10, warmups=5, switch_gap_s=0.0, rewarm_s=0.0, strike_cooldown_s=30.0, fresh_cooldown_s=120.0)
     base.update(kw)
     return Protocol(**base)
 
@@ -314,6 +314,31 @@ def test_abba_order_seeded_start():
 def test_abba_blocks_mirror():
     assert abba_blocks(["A", "B"], 4) == ["A", "B", "B", "A", "A", "B", "B", "A"]
     assert abba_blocks(["A", "B", "C"], 2) == ["A", "B", "C", "C", "B", "A"]
+
+
+def test_rewarm_keeps_cold_clock_calls_out_of_the_samples():
+    # A contender that runs 4x slow for its first 150 ms of activity after each
+    # switch, the way a core idled through the gap ramps its clock back.
+    ft = _FakeTime()
+    state = {"since_switch": 0.0}
+
+    def body(slow_s, fast_s):
+        def fn():
+            d = slow_s if state["since_switch"] < 0.15 else fast_s
+            ft.advance(d)
+            state["since_switch"] += d
+            return np.array([1.0])
+        return fn
+
+    def gap(_s):
+        state["since_switch"] = 0.0
+
+    a = Contender("peregrine", body(400e-6, 100e-6))
+    b = Contender("numpy", body(800e-6, 200e-6))
+    res = run_cell("cell", [a, b], _ok_check, _proto(rewarm_s=0.2, switch_gap_s=0.3), sleep=gap, now=ft.now)
+    assert res["status"] == "ok"
+    for name, fast in (("peregrine", 100e-6), ("numpy", 200e-6)):
+        assert max(res["contenders"][name]["samples_s"]) == pytest.approx(fast)
 
 
 def test_batch_size_from_fastest():
@@ -361,9 +386,9 @@ def test_device_contender_rewarmed_after_each_switch():
     blocks = abba_blocks(res["order"], res["rounds"])
     prev = [res["order"][-1]] + blocks[:-1]
     entries = sum(1 for b, p in zip(blocks, prev) if b == "peregrine" and p != b)
-    # pilot (one call: 1 ms is over the target) + warmups + samples + one
-    # re-warm per entry into the device contender's block.
-    assert len(calls) == 1 + 5 + res["contenders"]["peregrine"]["n_samples"] + entries
+    # pre-pilot warm (one call) + pilot (one call: 1 ms is over the target) +
+    # warmups + samples + one re-warm per entry into the device contender's block.
+    assert len(calls) == 1 + 1 + 5 + res["contenders"]["peregrine"]["n_samples"] + entries
 
 
 def test_verify_last_mode_checks_last_call():
