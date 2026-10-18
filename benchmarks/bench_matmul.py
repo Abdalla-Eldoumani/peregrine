@@ -898,7 +898,8 @@ def protocol_manifest(*, argv: list[str], series_seed: int | None, clock, extra=
     build = build() if callable(build) else {}
     info.update(
         {
-            "machine": platform.node(),
+            # A label, never the hostname: results files get committed.
+            "machine": os.environ.get("PEREGRINE_BENCH_MACHINE", "unnamed"),
             "os_build": platform.platform(),
             "cpu_brand": _cpu_brand(),
             "power_plan": info["power_profile"],
