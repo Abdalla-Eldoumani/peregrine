@@ -1,5 +1,7 @@
 #include "cpu/gemm_naive.hpp"
 
+#include "cpu/threads.hpp"
+
 #include <algorithm>
 #include <cstring>
 
@@ -19,18 +21,26 @@ void gemm_naive(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // inside L2 on Comet Lake, which is the machine this blocks for.
     constexpr int64_t KB = 64;
 
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < m; ++i) {
-        T* ci = c + i * n;
-        for (int64_t k0 = 0; k0 < k; k0 += KB) {
-            const int64_t k1 = std::min(k0 + KB, k);
-            for (int64_t p = k0; p < k1; ++p) {
-                const T aval = a[i * k + p];
-                const T* bp = b + p * n;
-                for (int64_t j = 0; j < n; ++j) {
-                    ci[j] += aval * bp[j];
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < m; ++i) {
+            T* ci = c + i * n;
+            for (int64_t k0 = 0; k0 < k; k0 += KB) {
+                const int64_t k1 = std::min(k0 + KB, k);
+                for (int64_t p = k0; p < k1; ++p) {
+                    const T aval = a[i * k + p];
+                    const T* bp = b + p * n;
+                    for (int64_t j = 0; j < n; ++j) {
+                        ci[j] += aval * bp[j];
+                    }
                 }
             }
         }
