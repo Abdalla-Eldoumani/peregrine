@@ -169,10 +169,12 @@ Context& context() {
     return the_ctx;
 }
 
-cuda_device_info device_probe() {
-    // Cheap and never-throwing: this is what has_cuda and the test gate call to
-    // decide "is a usable device here" without paying full context init. Every
-    // CUDA result is inspected by hand, not via the throwing CHECK macros, so a
+namespace {
+
+cuda_device_info probe_once() {
+    // Never-throwing: this is what has_cuda and the test gate call to decide
+    // "is a usable device here" without paying full context init. Every CUDA
+    // result is inspected by hand, not via the throwing CHECK macros, so a
     // driverless or device-less machine gets a not-present verdict instead of an
     // exception. Reason strings name the specific failure mode.
     cuda_device_info info{};
@@ -195,6 +197,27 @@ cuda_device_info device_probe() {
         return info;
     }
 
+    // Single attribute reads, not cudaGetDeviceProperties, decide presence:
+    // the property query fills every field of the struct and is much slower
+    // than reading the two attributes the verdict needs.
+    cudaError_t attr_err = cudaDeviceGetAttribute(
+        &info.cc_major, cudaDevAttrComputeCapabilityMajor, kDevice);
+    if (attr_err == cudaSuccess) {
+        attr_err = cudaDeviceGetAttribute(
+            &info.cc_minor, cudaDevAttrComputeCapabilityMinor, kDevice);
+    }
+    if (attr_err != cudaSuccess) {
+        info.reason =
+            std::string("no device (") + cudaGetErrorName(attr_err) + ")";
+        return info;
+    }
+    if (info.cc_major < kMinCcMajor) {
+        info.reason = "compute capability too low";
+        return info;
+    }
+
+    // The runtime API exposes the device name only through the property struct.
+    // It keys the calibration cache, so it is paid here, once per process.
     cudaDeviceProp props{};
     const cudaError_t prop_err = cudaGetDeviceProperties(&props, kDevice);
     if (prop_err != cudaSuccess) {
@@ -202,16 +225,19 @@ cuda_device_info device_probe() {
             std::string("no device (") + cudaGetErrorName(prop_err) + ")";
         return info;
     }
-
-    info.cc_major = props.major;
-    info.cc_minor = props.minor;
     info.name = props.name;
-    if (props.major < kMinCcMajor) {
-        info.reason = "compute capability too low";
-        return info;
-    }
 
     info.present = true;
+    return info;
+}
+
+} // namespace
+
+cuda_device_info device_probe() {
+    // Device presence and capability cannot change within a process, and the
+    // runtime already caches a failed driver init, so the first verdict stands.
+    // Function-local static initialization is thread-safe in C++11 and later.
+    static const cuda_device_info info = probe_once();
     return info;
 }
 
