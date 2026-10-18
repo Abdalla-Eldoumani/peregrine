@@ -630,7 +630,8 @@ def _fmt_s(s: float) -> str:
     return f"{s / 60:.1f} min" if s >= 120 else f"{s:.1f} s"
 
 
-def list_cells(groups, seeds, proto: Protocol, cooldown_s: float, clock_on: bool, cuda: bool) -> None:
+def list_cells(groups, seeds, proto: Protocol, cooldown_s: float, clock_on: bool, cuda: bool,
+               cell_cooldown_s: float = 10.0) -> None:
     grand = 0.0
     for g in groups:
         cells = select([g], seeds, cuda)
@@ -643,7 +644,7 @@ def list_cells(groups, seeds, proto: Protocol, cooldown_s: float, clock_on: bool
             heavy += e >= HEAVY_CELL_S
             tag = "" if e else ("  (skipped)" if needs_cuda(c) else "  (unsupported)")
             print(f"  {c.id:52s} {e:8.1f} s{tag}")
-        cool = (max(0, n_series - 1) + heavy) * cooldown_s
+        cool = max(0, n_series - 1) * cooldown_s + heavy * min(cooldown_s, cell_cooldown_s)
         grand += est + cool
         print(
             f"group {g}: {len(cells)} cells in {n_series} series, est {_fmt_s(est + cool)}"
@@ -732,15 +733,18 @@ def _parse(argv):
     p.add_argument("--samples", type=int, default=None, help="samples per contender per cell (min 30)")
     p.add_argument("--warmups", type=int, default=None, help="warmup samples per contender per cell (min 5)")
     p.add_argument("--switch-gap-ms", type=float, default=None, help="idle gap at every contender switch (default 300)")
-    # 50 ms, well above the 200 us floor: on this laptop a 6-thread call straggles
-    # whenever background work wakes on a busy core's SMT sibling, and averaging
-    # each sample over many calls is what brought 6-thread CV under 5 percent.
-    p.add_argument("--batch-target-us", type=float, default=50000.0)
+    # 250 ms, far above the 200 us floor: on this laptop a 6-thread call varies
+    # about 10 percent call to call for both libraries (background work waking on
+    # a busy core's SMT sibling), and the CV of a K-call mean falls as 1/sqrt(K).
+    # 50 ms settled small and single-thread cells; 6-thread GEMM needs more calls.
+    p.add_argument("--batch-target-us", type=float, default=250000.0)
     p.add_argument("--normal-priority", action="store_true",
                    help="leave the process at normal priority (default on Windows: HIGH for every contender alike)")
     p.add_argument("--rewarm-ms", type=float, default=None,
                    help="untimed running of each contender before sampling, after every switch (default 200)")
     p.add_argument("--cooldown-s", type=float, default=30.0, help="between series and before each CV rerun")
+    p.add_argument("--cell-cooldown-s", type=float, default=10.0,
+                   help="after any cell that ran 10 s or more, within a series")
     p.add_argument("--no-cooldown", action="store_true")
     p.add_argument("--clock-floor", type=float, default=None, help="discard samples below this %% Processor Performance")
     p.add_argument("--clock-ceiling", type=float, default=None, help="discard samples above this %% Processor Performance")
@@ -820,7 +824,7 @@ def main(argv=None) -> int:
         return 0
 
     if args.list:
-        list_cells(args.group, args.seeds, proto, cooldown, clock_obj is not None, cuda)
+        list_cells(args.group, args.seeds, proto, cooldown, clock_obj is not None, cuda, args.cell_cooldown_s)
         return 0
 
     cells = [Cell.from_spec(json.loads(args.cell))] if args.cell else select(args.group, args.seeds, cuda)
@@ -843,19 +847,21 @@ def main(argv=None) -> int:
     )
     result = {"manifest": manifest, "cells": []}
     fresh = None if args.fresh_child else fresh_process_runner(args.smoke)
-    pending = False
+    cell_cooldown = 0.0 if cooldown == 0 else args.cell_cooldown_s
+    wait = 0.0
     for i, series in enumerate(series_order(cells, seed)):
-        pending = pending or i > 0
+        if i > 0:
+            wait = max(wait, cooldown)
         for cell in series:
-            if pending and cooldown > 0:
-                time.sleep(cooldown)
+            if wait > 0:
+                time.sleep(wait)
             t0 = time.perf_counter()
             try:
                 r = run_one(cell, proto, clock=clock_obj, fresh_runner=fresh)
             except RuntimeError as e:
                 print(f"thread check failed: {e}", file=sys.stderr)
                 return 2
-            pending = time.perf_counter() - t0 >= HEAVY_CELL_S
+            wait = cell_cooldown if time.perf_counter() - t0 >= HEAVY_CELL_S else 0.0
             result["cells"].append(r)
             _write(out_path, result)
             print(_line(r))
