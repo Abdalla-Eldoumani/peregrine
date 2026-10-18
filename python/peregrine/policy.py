@@ -37,6 +37,7 @@ holds.
 """
 
 import json
+import math
 import os
 
 # Bump on ANY change to the calibration-dict fields; the loader rejects unknown
@@ -344,3 +345,44 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
     # it and wrongly routes small host GEMMs to the GPU.
     xfer_t = _transfer_time(calibration["transfer"], dtype, n)
     return "cuda" if (gpu_compute_t + xfer_t) < cpu_t else "cpu"
+
+
+def f32_cpu_flops_bound(calibration) -> float:
+    """Return a work bound below which every host float32 GEMM stays on the CPU.
+
+    The native matmul entry computes a host float32 product on the CPU, without
+    asking :func:`choose_backend`, when its ``2*m*k*n`` is at most this bound.
+    The bound must therefore never admit a shape that :func:`choose_backend`
+    would send to the GPU; it is the largest value with that property.
+
+    Parameters
+    ----------
+    calibration : dict or None
+        A calibration dict from :func:`_load_cache`, or ``None``.
+
+    Returns
+    -------
+    float
+        ``2*(n0 - 1)``, where ``n0`` is the smallest ``n`` the host decision
+        sends to the GPU, or ``inf`` when no calibration or no ``"gpu"`` series
+        exists or no ``n`` goes to the GPU.
+
+    Examples
+    --------
+    >>> from peregrine import policy
+    >>> policy.f32_cpu_flops_bound(None)
+    inf
+    """
+    if calibration is None or not calibration.get("gpu"):
+        return math.inf
+    # The host decision reads n alone. With m = k = 1, 2*n is the smallest
+    # product any shape with that n has, so the first n sent to the GPU sets
+    # the bound. Past the largest measured n both interpolated times clamp
+    # while the transfer time grows, so no larger n can turn to the GPU.
+    grids = calibration["cpu"]["float32"] + calibration["gpu"]["float32"]
+    for n in range(1, math.ceil(max(p[0] for p in grids)) + 1):
+        if choose_backend(
+            "float32", 1, 1, n, residency="host", calibration=calibration, backend="auto"
+        ) == "cuda":
+            return 2.0 * (n - 1)
+    return math.inf
