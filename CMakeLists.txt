@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.26)
 project(peregrine LANGUAGES CXX)
 
 option(PG_ENABLE_CUDA "Build the CUDA backend (requires CUDA Toolkit 12.8)" OFF)
+option(PG_BUILD_CEILINGS "Build the dev-only hardware ceiling tool" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -126,6 +127,12 @@ if (PG_ENABLE_CUDA)
     CUDA_STANDARD_REQUIRED ON)
   target_compile_definitions(_core PRIVATE PG_HAS_CUDA=1)
   target_link_libraries(_core PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
+endif()
+
+# After the CUDA block: the tool's PCIe probe needs the CUDA language enabled
+# here first. The tool has no install() rule, so it never reaches a wheel.
+if (PG_BUILD_CEILINGS)
+  add_subdirectory(tools/ceilings)
 endif()
 
 install(TARGETS _core LIBRARY DESTINATION peregrine)
