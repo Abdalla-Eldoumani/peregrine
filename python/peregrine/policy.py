@@ -43,8 +43,10 @@ import os
 # schemas (a cache written by an older or newer build is discarded and the
 # machine recalibrates). This is the single source of truth: calibrate.py
 # imports SCHEMA from here and stamps it into every cache it writes, so the
-# writer and the reader can never drift apart.
-SCHEMA = 1
+# writer and the reader can never drift apart. Schema 2 adds the "staged" series;
+# schema 1 caches also carry a CPU grid that was timed through the auto router and
+# so includes its per-call routing cost, which must never be trusted again.
+SCHEMA = 2
 
 # The two manual-override backends route directly within rules 1-2 (correctness
 # and the hard exclusions) without consulting the table; "auto" runs the
@@ -53,22 +55,32 @@ SCHEMA = 1
 BACKENDS = ("auto", "cpu", "cuda")
 
 
-def _cache_path() -> str:
-    """Resolve the calibration cache file path.
+def _cache_path(signature: str) -> str:
+    """Resolve the calibration cache file path for one machine signature.
 
     ``PEREGRINE_CACHE_DIR`` overrides the location (the test-isolation hook: tests
     point it at a tmp dir so the real per-user cache is never touched).
     Otherwise the platform user cache dir is used with ``appauthor=False`` for
-    the clean single-level ``.../peregrine/calibration.json`` path -- the
-    default double-nests the app name as both author and name. platformdirs is
-    imported here, not at module top, so the import cost is paid on first
-    dispatch, never at ``import peregrine``.
+    the clean single-level ``.../peregrine/`` directory -- the default
+    double-nests the app name as both author and name. The file name carries a
+    short hash of the signature, so a CPU-only build and a CUDA build sharing one
+    cache directory keep separate caches instead of overwriting each other on
+    every calibration. platformdirs and hashlib are imported here, not at module
+    top, so the import cost is paid on first dispatch, never at
+    ``import peregrine``.
+
+    Parameters
+    ----------
+    signature : str
+        The machine/build signature the cache belongs to.
 
     Returns
     -------
     str
-        Absolute path to ``calibration.json`` under the resolved cache dir.
+        Absolute path to ``calibration-<hash>.json`` under the resolved cache dir.
     """
+    import hashlib
+
     override = os.environ.get("PEREGRINE_CACHE_DIR")
     if override:
         base = override
@@ -76,7 +88,8 @@ def _cache_path() -> str:
         import platformdirs
 
         base = platformdirs.user_cache_dir("peregrine", appauthor=False)
-    return os.path.join(base, "calibration.json")
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+    return os.path.join(base, f"calibration-{digest}.json")
 
 
 def _load_cache(path: str, expected_signature: str):
