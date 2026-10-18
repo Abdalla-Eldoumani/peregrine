@@ -505,6 +505,7 @@ def _proto_argv(proto: Protocol, smoke: bool) -> list[str]:
         "--samples", str(proto.samples),
         "--warmups", str(proto.warmups),
         "--switch-gap-ms", repr(proto.switch_gap_s * 1e3),
+        "--rewarm-ms", repr(proto.rewarm_s * 1e3),
         "--batch-target-us", repr(proto.batch_target_s * 1e6),
         "--verify-mode", proto.verify_mode,
     ]
@@ -717,6 +718,8 @@ def _parse(argv):
     p.add_argument("--warmups", type=int, default=None, help="warmup samples per contender per cell (min 5)")
     p.add_argument("--switch-gap-ms", type=float, default=None, help="idle gap at every contender switch (default 300)")
     p.add_argument("--batch-target-us", type=float, default=200.0)
+    p.add_argument("--rewarm-ms", type=float, default=None,
+                   help="untimed running of each contender before sampling, after every switch (default 200)")
     p.add_argument("--cooldown-s", type=float, default=30.0, help="between series and before each CV rerun")
     p.add_argument("--no-cooldown", action="store_true")
     p.add_argument("--clock-floor", type=float, default=None, help="discard samples below this %% Processor Performance")
@@ -746,6 +749,7 @@ def _protocol(args) -> tuple[Protocol, float]:
         warmups=args.warmups if args.warmups is not None else (2 if args.smoke else 5),
         batch_target_s=args.batch_target_us * 1e-6,
         switch_gap_s=gap_ms / 1e3,
+        rewarm_s=(args.rewarm_ms if args.rewarm_ms is not None else (0.0 if args.smoke else 200.0)) / 1e3,
         strike_cooldown_s=cooldown,
         fresh_cooldown_s=0.0 if quiet else 120.0,
         clock_floor=args.clock_floor,
