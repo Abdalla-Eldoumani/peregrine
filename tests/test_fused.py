@@ -451,6 +451,9 @@ def _run_thread_subprocess(tmp_path, omp_threads):
     # full environment copy with the override merged in: a stripped env breaks
     # DLL resolution for the OpenMP runtime on Windows (mirrors test_threads.py).
     env = dict(os.environ, OMP_NUM_THREADS=str(omp_threads))
+    # PEREGRINE_NUM_THREADS outranks OMP_NUM_THREADS; inherited, it would make
+    # both children run the same count.
+    env.pop("PEREGRINE_NUM_THREADS", None)
     p = subprocess.run(
         [sys.executable, "-c", _THREAD_SCRIPT, str(out_path)],
         env=env,
