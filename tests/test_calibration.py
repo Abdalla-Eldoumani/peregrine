@@ -1190,14 +1190,14 @@ def test_cpu_series_bypasses_router(tmp_path, monkeypatch):
         raise AssertionError("calibration must not consult the auto router")
 
     seen = []
-    real_native = pg._matmul_native
+    real_native = pg._matmul_cpu
 
     def _native(a, b):
         seen.append(pg._backend)
         return real_native(a, b)
 
     monkeypatch.setattr(pg, "_host_backend_for", _router)
-    monkeypatch.setattr(pg, "_matmul_native", _native)
+    monkeypatch.setattr(pg, "_matmul_cpu", _native)
     calibrate.calibrate(force=True, budget_seconds=0)
     assert seen and set(seen) == {"cpu"}
     assert pg._backend == "cuda"
