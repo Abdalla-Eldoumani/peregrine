@@ -64,6 +64,12 @@ The -k test names, one per acceptance point, with the code each one exercises:
         set_backend               an explicit backend choice is honored           [policy.choose_backend]
         env_backend               PEREGRINE_BACKEND (subprocess, env-before-import) [__init__.py]
         live_crossover            real RTX 3060 calibration reproduces the routing (@gpu) [integration]
+    Routing on work and bytes moved:
+        staged_fit                the fixed cost is fitted from the staged series [policy._staging_floor]
+        skinny_host               skinny host products stay on the CPU            [policy.choose_backend]
+        reproduces_measured       grid decisions match measured staged vs CPU     [policy.choose_backend]
+        monotone                  square decisions are monotone in the work       [policy.choose_backend]
+        device_crosses            device-resident crosses no later than host      [policy.choose_backend]
     Per-process memos (no file system work after the first auto dispatch):
         memoizes_calibration      the second dispatch reads no file and no NVML    [__init__.py]
         invalidate                reset hook and set_backend drop the memos        [__init__.py]
@@ -135,12 +141,16 @@ def test_calibration_module_scaffold():
 # Times are per-(dtype, n) measured wall seconds on a log grid (the cache shape):
 #   cpu:  honest ~55 GF/s f32 / ~80 GF/s f64, work = 2*n^3 flops
 #   gpu:  a ~50us cuBLAS launch floor + asymptotic ~2600 GF/s compute (NO transfer)
-#   transfer: H2D(2 operands) + D2H(1 result) at ~12 GB/s PCIe, plus an ~800us
-#             fixed staging floor (three Python->native->CUDA crossings + launch
-#             + pageable-copy setup) that dominates at small n.
+#   transfer: H2D(2 operands) + D2H(1 result) at ~12 GB/s PCIe
+#   staged: gpu + transfer + an 800us fixed staging floor (three
+#           Python->native->CUDA crossings + launch + pageable-copy setup) that
+#           dominates at small n; the policy fits its fixed cost from this
+#           series, and the fit recovers the 800us exactly.
 #
-# Resulting host crossover is ~n=298, device crossover ~n=112, so:
-#   f32 n=256 host  -> CPU  (gpu_compute + transfer 0.93ms > cpu 0.61ms)
+# Resulting host square crossover is n=299, and a device-resident product goes
+# to the GPU at every size (below n=128 both times clamp to the n=128 values,
+# where the GPU's compute is already faster), so:
+#   f32 n=256 host  -> CPU  (gpu_compute + transfer + fixed 0.93ms > cpu 0.61ms)
 #   f32 n=4096 host -> CUDA (70.5ms < cpu 2499ms)
 #   f32 n=512 device-> CUDA (gpu_compute 0.15ms < cpu 4.88ms, no transfer)
 #   f32 n=256 device-> CUDA while n=256 host -> CPU  (transfer-cost crossover)
@@ -155,6 +165,11 @@ def _cpu_seconds(n, gflops):
 def _gpu_seconds(n):
     # fixed cuBLAS launch floor + asymptotic 2600 GF/s compute (compute only)
     return 50e-6 + 2.0 * n**3 / 2600e9
+
+
+def _staged_seconds(n, fixed=800e-6):
+    # 8*n^2 bytes up and 4*n^2 down at 12 GB/s each, plus the fixed floor
+    return _gpu_seconds(n) + 12.0 * n * n / 12e9 + fixed
 
 
 def synthetic_calibration():
@@ -173,6 +188,7 @@ def synthetic_calibration():
             # carries no f64 GPU entry (and the FP64 trap fires before any lookup)
             "float32": [[n, _gpu_seconds(n)] for n in _GRID],
         },
+        "staged": {"float32": [[n, _staged_seconds(n)] for n in _GRID]},
         "transfer": {
             "h2d_gbps": 12.0,
             "d2h_gbps": 12.0,
@@ -180,6 +196,77 @@ def synthetic_calibration():
         },
         "calibrated_at": "2026-06-13T00:00:00",
     }
+
+
+# A calibration this suite's reference machine (i7-10750H, RTX 3060 Laptop,
+# CUDA build) measured, kept verbatim so the routing tests also run on real
+# numbers. Its CPU float32 series is flat from n=64 to n=128, where the GEMM
+# starts threading; the tests that must not depend on that step also run on
+# _smoothed_real_calibration, which has none.
+_REAL_SIZES = [16, 32, 38, 45, 54, 64, 128, 256, 512, 1024, 2048, 4096]
+_REAL_SERIES = {
+    "cpu32": [4.3e-6, 2.10e-5, 3.24e-5, 4.90e-5, 7.59e-5, 1.278e-4, 1.305e-4,
+              3.734e-4, 1.79e-3, 7.46e-3, 5.498e-2, 0.41793],
+    "cpu64": [4.2e-6, 2.05e-5, 2.80e-5, 4.80e-5, 7.59e-5, 1.249e-4, 2.147e-4,
+              7.910e-4, 3.69e-3, 1.860e-2, 0.12796, 0.94408],
+    "gpu32": [1.33e-5, 1.64e-5, 2.15e-5, 2.15e-5, 2.25e-5, 1.74e-5, 1.84e-5,
+              2.56e-5, 7.68e-5, 5.683e-4, 4.2301e-3, 3.47505e-2],
+    "staged32": [9.09e-5, 9.36e-5, 1.073e-4, 1.071e-4, 1.121e-4, 9.91e-5, 1.186e-4,
+                 2.013e-4, 7.236e-4, 2.5916e-3, 1.019e-2, 6.507e-2],
+}
+
+
+def real_calibration():
+    """The reference machine's measured CUDA-build calibration dict."""
+
+    def grid(key):
+        return [[n, t] for n, t in zip(_REAL_SIZES, _REAL_SERIES[key])]
+
+    return {
+        "schema": policy.SCHEMA,
+        "signature": "reference|machine|table",
+        "cpu": {"float32": grid("cpu32"), "float64": grid("cpu64")},
+        "gpu": {"float32": grid("gpu32")},
+        "staged": {"float32": grid("staged32")},
+        "transfer": {"h2d_gbps": 10.82, "d2h_gbps": 4.50, "fixed_overhead_s": 3.95e-5},
+        "calibrated_at": "2026-10-17T00:00:00",
+    }
+
+
+def _smoothed_real_calibration():
+    # The reference calibration with the threaded CPU rate of n=128 carried down
+    # to the small sizes: the series once small products run as efficiently as
+    # n=128 does.
+    table = real_calibration()
+    table["signature"] = "reference|smoothed|table"
+    t128 = dict(table["cpu"]["float32"])[128]
+    table["cpu"]["float32"] = [
+        [n, t128 * (n / 128) ** 3 if n < 128 else t] for n, t in table["cpu"]["float32"]
+    ]
+    return table
+
+
+def _routing_tables():
+    return [synthetic_calibration(), real_calibration(), _smoothed_real_calibration()]
+
+
+def _host(table, m, k, n):
+    return policy.choose_backend(
+        "float32", m, k, n, residency="host", calibration=table, backend="auto"
+    )
+
+
+def _device(table, m, k, n):
+    return policy.choose_backend(
+        "float32", m, k, n, residency="device", calibration=table, backend="auto"
+    )
+
+
+# Square sizes from 1 past the largest grid point, so the interpolation, both
+# clamped and extrapolated ends, and every knot are covered.
+_SQUARE_NS = sorted(
+    {*range(1, 700), *np.geomspace(700, 32768, 300).astype(int).tolist()}
+)
 
 
 # --- routing: the four auto-mode acceptance points (pure, CPU-only) ----------
@@ -271,6 +358,80 @@ def test_transfer_cost():
     )
     assert host == "cpu"
     assert device == "cuda"
+
+
+# --- routing on work and bytes moved ------------------------------------------
+
+
+def test_staged_fit_recovers_the_fixed_floor():
+    # The synthetic staged series is gpu + transfer + 800us exactly, so the fit
+    # must return the 800us; with no fixed part it must return zero, never less.
+    assert policy._staging_floor(synthetic_calibration()) == pytest.approx(800e-6, rel=1e-12)
+    table = synthetic_calibration()
+    table["staged"]["float32"] = [[n, _staged_seconds(n, 0.0)] for n in _GRID]
+    assert 0.0 <= policy._staging_floor(table) < 1e-15
+    # a staged series faster than its own compute plus transfer is floored at zero
+    table["staged"]["float32"] = [[n, _gpu_seconds(n) / 2] for n in _GRID]
+    assert policy._staging_floor(table) == 0.0
+
+
+def test_skinny_host_products_stay_on_cpu():
+    # A product with a small dimension moves bytes out of all proportion to its
+    # work, so on the measured calibration it stays on the CPU however long its
+    # other dimensions are: (1, 1, 4096) is 8 kiloflops, and the matrix-vector
+    # products below move a whole 4096-square operand for 2*4096**2 flops.
+    shapes = [
+        (1, 1, 4096), (1, 4096, 1), (4096, 1, 1),
+        (1, 4096, 4096), (4096, 4096, 1), (4096, 1, 4096),
+    ]
+    for table in (real_calibration(), _smoothed_real_calibration()):
+        for shape in shapes:
+            assert _host(table, *shape) == "cpu", shape
+
+
+def test_model_reproduces_measured_staged_decisions():
+    # At every measured size the host decision is the one the measurements make
+    # themselves, staged GPU path against CPU: the CPU up to n=54 and the GPU
+    # from n=64, the measured crossover. Squares past the largest measured size
+    # stay on the GPU.
+    table = real_calibration()
+    cpu = dict(table["cpu"]["float32"])
+    for n, staged in table["staged"]["float32"]:
+        assert _host(table, n, n, n) == ("cuda" if staged < cpu[n] else "cpu"), n
+    assert _host(table, 54, 54, 54) == "cpu"
+    for n in (64, 256, 4096, 8192, 16384):
+        assert _host(table, n, n, n) == "cuda", n
+    # without the CPU's threading step the crossover moves, but large squares
+    # still go to the GPU
+    for n in (256, 4096, 16384):
+        assert _host(_smoothed_real_calibration(), n, n, n) == "cuda", n
+
+
+def test_square_decision_is_monotone_in_work():
+    # Once a square product goes to the GPU every larger one does too, including
+    # past the largest measured size, where both times follow the last
+    # segment's slope. Clamping them there instead would send host squares past
+    # about n=15,000 back to the CPU on the reference calibration.
+    for table in _routing_tables():
+        for decide in (_host, _device):
+            got = [decide(table, n, n, n) for n in _SQUARE_NS]
+            first = got.index("cuda")
+            assert set(got[:first]) <= {"cpu"} and set(got[first:]) == {"cuda"}, (
+                decide.__name__, _SQUARE_NS[first], table["signature"]
+            )
+
+
+def test_device_crosses_no_later_than_host():
+    # The host path prices the same compute plus transfers and a fixed cost that
+    # are never negative, so wherever a host product goes to the GPU the same
+    # product already resident on the device does too.
+    dims = (1, 7, 64, 300, 4096)
+    shapes = [(n, n, n) for n in _SQUARE_NS]
+    shapes += [(m, k, n) for m in dims for k in dims for n in dims]
+    for table in _routing_tables():
+        for shape in shapes:
+            if _host(table, *shape) == "cuda":
+                assert _device(table, *shape) == "cuda", shape
 
 
 # --- explicit backend override (set_backend / PEREGRINE_BACKEND) ----------
@@ -479,7 +640,8 @@ def test_live_crossover(tmp_path, monkeypatch):
     # host path can never pick cuda where the device path picks cpu -- the device
     # crossover sits at a smaller-or-equal n. This is the load-bearing fallback and routing
     # property and it holds regardless of the absolute CPU-time magnitude (it falls
-    # straight out of _transfer_time >= 0 in the policy). The exact small-n
+    # straight out of the transfer time and the fitted fixed cost both being
+    # >= 0 in the policy). The exact small-n
     # host->cpu point is asserted on the synthetic table (test_f32_256_host_cpu),
     # where the CPU baseline is honest by construction; here the live CPU grid only
     # has to be internally consistent, which the inequality checks.
@@ -609,6 +771,24 @@ def test_malformed_body_recalibrate(tmp_path):
     bad["transfer"]["h2d_gbps"] = 0.0
     _write_cache_file(path, bad)
     assert policy._load_cache(path, sig) is None
+
+    # gpu present but staged absent: the fixed-cost fit would raise KeyError
+    bad = _valid()
+    del bad["staged"]
+    _write_cache_file(path, bad)
+    assert policy._load_cache(path, sig) is None
+
+    # a zero time or a repeated size: the log-log interpolation would raise
+    for series, dt in (("cpu", "float32"), ("cpu", "float64"), ("gpu", "float32"),
+                       ("staged", "float32")):
+        bad = _valid()
+        bad[series][dt][1][1] = 0.0
+        _write_cache_file(path, bad)
+        assert policy._load_cache(path, sig) is None, (series, dt)
+        bad = _valid()
+        bad[series][dt][1][0] = bad[series][dt][0][0]
+        _write_cache_file(path, bad)
+        assert policy._load_cache(path, sig) is None, (series, dt)
 
     # the load-bearing consequence: with the cache rejected to None, the dispatch
     # path falls back to the conservative static choice and does NOT crash, for
