@@ -16,12 +16,12 @@ extern template void gemm_blis<float>(const float*, const float*, float*, int64_
 extern template void gemm_blis<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 
 // MC, KC, NC are loop bounds, not unroll factors, so making them runtime-settable
-// costs nothing at execution time and lets the sweep walk the
-// MC{48,72,96,144} x KC{192,256,320} x NC{2048,4080} grid in one process instead
-// of forcing 24 rebuilds. MR and NR stay compile-time because they are the
-// structural register-tile shape. KC changes the pc-chunking of each element's
-// accumulation, so results differ bitwise across KC values within tolerance;
-// thread-count invariance at a fixed blocking is unaffected.
+// costs nothing at execution time and lets a sweep walk its grid in one process
+// instead of rebuilding per point. Each dtype has its own triple because the
+// register tiles differ (6x8 f64, 6x16 f32). MR and NR stay compile-time because
+// they are the structural register-tile shape. KC changes the pc-chunking of
+// each element's accumulation, so results differ bitwise across KC values within
+// tolerance; thread-count invariance at a fixed blocking is unaffected.
 struct blocking {
     int64_t mc, kc, nc;
 };
@@ -33,7 +33,8 @@ struct blocking {
 // another. store_blocking publishes the whole struct in one atomic store;
 // load_blocking takes a coherent snapshot. gemm_blis calls load_blocking once at
 // entry into locals, so a concurrent store cannot change the loop bounds mid-run.
-void store_blocking(blocking b) noexcept;
-blocking load_blocking() noexcept;
+// f32 selects the float32 triple, otherwise the float64 one.
+void store_blocking(blocking b, bool f32) noexcept;
+blocking load_blocking(bool f32) noexcept;
 
 } // namespace pg::cpu
