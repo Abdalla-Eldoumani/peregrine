@@ -42,7 +42,7 @@ Repository = "https://github.com/Abdalla-Eldoumani/peregrine"
 Issues = "https://github.com/Abdalla-Eldoumani/peregrine/issues"
 
 [project.optional-dependencies]
-test = ["pytest==9.0.3", "hypothesis==6.155.2"]
+test = ["pytest==9.0.3", "hypothesis==6.155.2", "threadpoolctl==3.6.0"]
 bench = ["threadpoolctl==3.6.0", "matplotlib==3.9.1"]
 
 [tool.scikit-build]
