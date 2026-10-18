@@ -37,7 +37,7 @@
       }
     ]
   },
-  "benchmark": "fuse-05",
+  "benchmark": "fused-chain",
   "chain": "scaled_relu(fma3(axpby(x,y,a,b),z))",
   "constants": {
     "a": 2.0,
