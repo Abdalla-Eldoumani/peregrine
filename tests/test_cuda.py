@@ -5,16 +5,13 @@ device paths on the PG_ENABLE_CUDA=ON build (GPU tests skip cleanly, never fail
 for absent hardware).
 
 requires_cuda() (conftest) is the one gate: build flag plus a usable-device
-probe. It migrates to pg.has_cuda() in 04-05 when that public runtime predicate
-lands; the gate's meaning (built AND device present) does not change.
+probe, deferring to the public pg.has_cuda(); the gate means built AND device
+present.
 
-The -k area names (context, gemm, tolerance, roundtrip, residency, transfer,
-routing, oom, fallback, has_cuda) match the phase research Test Map so the later
-plans fill in each placeholder under its own name. They assert nothing about
-device behavior yet beyond what this plan delivers: this plan proves the file
-collects-and-skips cleanly and that the build-flag smoke passes everywhere.
+The -k area names are context, gemm, tolerance, roundtrip, residency, transfer,
+routing, oom, fallback, and has_cuda.
 
-Correctness tests added by later plans route every CPU-vs-GPU comparison through
+Correctness tests route every CPU-vs-GPU comparison through
 assert_matmul_close (conftest), never an inline tolerance, exactly like the CPU
 suite; f32 GPU compares against the f64 ground truth the same way.
 """
@@ -39,7 +36,7 @@ gpu = pytest.mark.skipif(not _CUDA_OK, reason=_CUDA_REASON)
 def test_has_cuda_runtime():
     # Runs everywhere, including CPU-only and WSL: the public runtime predicate
     # must exist and return a bool on every build, the cross-platform half of the
-    # API-04 surface. has_cuda() composes the build flag AND a usable-device probe
+    # introspection surface. has_cuda() composes the build flag AND a usable-device probe
     # (driver, count>0, cc>=7.0); on a CPU-only build it is simply False, never an
     # exception, so auto-mode code can branch on it without a try/except.
     assert isinstance(pg.has_cuda(), bool)
@@ -49,7 +46,7 @@ def test_has_cuda_runtime():
 def test_has_cuda_true_on_cuda_build_with_device():
     # Under the gate, the build flag and a usable device are both present, so the
     # public runtime predicate must be True. The private build flag is also True
-    # here, but the public surface is has_cuda(); has_cuda_build is gone (API-04).
+    # here, but the public surface is has_cuda(); has_cuda_build is gone.
     assert pg.has_cuda() is True
     assert not hasattr(pg, "has_cuda_build")
 
@@ -59,7 +56,7 @@ def test_has_cuda_true_on_cuda_build_with_device():
 # suite gets this for free from conftest, but the clean-shutdown child below is a
 # bare interpreter that does NOT load conftest, so it registers the directory
 # itself. This duplicates conftest's shim deliberately: it keeps the regression
-# fence self-contained until 04-05 makes the package self-sufficient at import.
+# fence self-contained even before any package code runs.
 _CHILD_DLL_SETUP = (
     "import os\n"
     "_b = os.path.join(os.environ.get('CUDA_PATH', ''), 'bin')\n"
@@ -78,7 +75,7 @@ _CLEAN_SHUTDOWN_SCRIPT = _CHILD_DLL_SETUP + (
     "assert info['present'] is True, info\n"
 )
 
-# CR-01 regression: a pg.Array bound to a MODULE GLOBAL is still alive when the
+# Regression: a pg.Array bound to a MODULE GLOBAL is still alive when the
 # interpreter finalizes, so its ~Array runs AFTER the atexit teardown destroyed
 # the context's transfer stream. Before the teardown-tolerant free_device, that
 # ~Array called cudaFreeAsync on the destroyed stream (a use-after-teardown the
@@ -97,7 +94,7 @@ _GLOBAL_ARRAY_SHUTDOWN_SCRIPT = _CHILD_DLL_SETUP + (
 
 @gpu
 def test_context_inits():
-    # GPU-01: first use builds the process-lifetime singleton (device props,
+    # First use builds the process-lifetime singleton (device props,
     # streams, mempool, cublas/cublasLt handles). _cuda_device_info drives that
     # build and reports the bound device. Under the gate a usable device is
     # present, so the props must be populated; the dev box is sm_86 (cc 8.6) and
@@ -112,7 +109,7 @@ def test_context_inits():
 
 @gpu
 def test_context_clean_shutdown():
-    # GPU-01 regression fence for the static-destruction-order trap: a child that
+    # Regression fence for the static-destruction-order trap: a child that
     # builds the context and exits must return 0 with no CUDA shutdown error in
     # stderr. Full env copy so Windows DLL resolution survives in the child
     # (the test_threads.py subprocess shape). If teardown ever regresses to a
@@ -136,7 +133,7 @@ def test_context_clean_shutdown():
 
 @gpu
 def test_module_global_array_clean_shutdown():
-    # CR-01 regression fence: a pg.Array held in a module global is alive at
+    # Regression fence: a pg.Array held in a module global is alive at
     # interpreter finalization, so ~Array runs AFTER the atexit teardown
     # destroyed the transfer stream. The teardown-tolerant free_device must make
     # that a no-op (g_torn_down skips the free; the live path never throws), so
@@ -167,7 +164,7 @@ _GEMM_SIZES = [1, 7, 64, 250, 333, 512]
 @gpu
 @pytest.mark.parametrize("n", _GEMM_SIZES)
 def test_gemm_f32_matches_numpy(n):
-    # GPU-02: f32 device GEMM via cublasSgemm and the no-transpose trick matches
+    # f32 device GEMM via cublasSgemm and the no-transpose trick matches
     # NumPy. assert_matmul_close compares f32 against the f64 ground truth it
     # recomputes from a, b, exactly like the CPU suite -- the single toleranced
     # path, no inline rtol. Rectangular k so a wrong leading dimension in the
@@ -184,9 +181,9 @@ def test_gemm_f32_matches_numpy(n):
 @gpu
 @pytest.mark.parametrize("n", _GEMM_SIZES)
 def test_gemm_f64_matches_numpy(n):
-    # GPU-02: f64 device GEMM via cublasDgemm, identical no-transpose layout. f64
+    # f64 device GEMM via cublasDgemm, identical no-transpose layout. f64
     # is computed on the device for the forced-resident path even though it never
-    # auto-routes here (the FP64 trap is a dispatch rule, 04-05); the kernel must
+    # auto-routes here (the FP64 trap is a dispatch rule); the kernel must
     # still be correct. Through the f64 arm of the same tolerance contract.
     rng = np.random.default_rng(40260613 + n)
     k = n + 5
@@ -199,7 +196,7 @@ def test_gemm_f64_matches_numpy(n):
 
 @gpu
 def test_gemm_zero_dims():
-    # GPU-02 zero-sized dim semantics: the guards run before any
+    # Zero-sized dim semantics: the guards run before any
     # cuBLAS launch (an empty GEMM must not reach cuBLAS). (m,0)@(0,n) is an m x n
     # matrix of exact zeros; (0,k)@(k,n) is an empty (0,n). Exact equality, not
     # toleranced: a k=0 product is exactly zero and an empty result has no
@@ -241,7 +238,7 @@ _TF32_SCRIPT = _CHILD_DLL_SETUP + (
 
 @gpu
 def test_tf32_off_by_default_matches_contract(tmp_path):
-    # GPU-02 math-mode policy. Two halves:
+    # Math-mode policy. Two halves:
     #   1. The default path (no PEREGRINE_ALLOW_TF32) is DEFAULT_MATH and passes the
     #      standard f32 tolerance contract.
     #   2. A subprocess with PEREGRINE_ALLOW_TF32=1 takes the TF32 path. TF32's 10-bit
@@ -288,12 +285,12 @@ def test_tf32_off_by_default_matches_contract(tmp_path):
 @gpu
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_to_from_device_roundtrip(dtype):
-    # GPU-03 / GPU-04: to_device copies a host array up to a pg.Array, from_device
+    # to_device copies a host array up to a pg.Array, from_device
     # copies it back (D2H on the transfer stream, synced before the return). A pure
     # copy must round-trip byte-IDENTICAL: this is a transfer, not a computation, so
     # exact equality is the right assertion (assert_matmul_close is for the kernel
     # path, not for a memcpy). Both dtypes -- to_device accepts f64 too (it is just
-    # memory; the f64-never-auto-routes rule is a dispatch concern, 04-05). Rectangular
+    # memory; the f64-never-auto-routes rule is a dispatch concern). Rectangular
     # so a row/col swap in the shape plumbing would surface.
     a = np.random.default_rng(20260613).standard_normal((7, 5)).astype(dtype)
     x = pg._core.to_device(a)
@@ -305,7 +302,7 @@ def test_to_from_device_roundtrip(dtype):
 
 @gpu
 def test_from_device_returns_ndarray():
-    # GPU-03: from_device returns a numpy.ndarray, not a pg.Array -- the
+    # from_device returns a numpy.ndarray, not a pg.Array -- the
     # residency-out type (ndarray in -> ndarray out). The device handle does not
     # leak back out of from_device.
     a = np.ones((3, 4), dtype=np.float32)
@@ -316,12 +313,12 @@ def test_from_device_returns_ndarray():
 
 @gpu
 def test_dlpack_device_is_cuda():
-    # GPU-03: the pg.Array dlpack export reports a CUDA device. __dlpack_device__
+    # The pg.Array dlpack export reports a CUDA device. __dlpack_device__
     # returns (device_type, device_id); the DLPack enum for CUDA is kDLCUDA == 2.
     # __dlpack__ produces a dlpack-protocol object whose capsule is a "dltensor" on
     # that CUDA device. We assert the device tag and the capsule, NOT a
     # numpy.from_dlpack zero-copy: numpy has no device memory and cannot pull a CUDA
-    # dltensor (RESEARCH line 271), and a device-aware consumer (cupy/torch) is not
+    # dltensor, and a device-aware consumer (cupy/torch) is not
     # required to be installed.
     a = np.ones((4, 4), dtype=np.float32)
     x = pg._core.to_device(a)
@@ -341,13 +338,13 @@ def test_dlpack_device_is_cuda():
 
 @gpu
 def test_device_matmul_roundtrip():
-    # GPU-03 (the REQUIRED device-resident entry): matmul(Array, Array) -> Array,
+    # The REQUIRED device-resident entry: matmul(Array, Array) -> Array,
     # device-in/device-out. to_device both f32 operands, run the device GEMM on the
     # device buffers (no host staging), assert the result is a pg.Array, then
     # from_device it and compare to NumPy through assert_matmul_close (the single
     # toleranced path; f32 is judged against the f64 ground truth exactly like the
-    # CPU suite). This proves gemm (04-03) + transfers + the device matmul entry
-    # compose end to end on device buffers -- the entry 04-05's wrapper layers
+    # CPU suite). This proves gemm + transfers + the device matmul entry
+    # compose end to end on device buffers -- the entry the Python wrapper layers
     # residency semantics on top of. Rectangular k so a wrong leading dimension
     # would show as a value error, not hide behind a square shape.
     rng = np.random.default_rng(20260614)
@@ -368,7 +365,7 @@ def test_device_matmul_roundtrip():
 @gpu
 @pytest.mark.parametrize("n", [250, 512])
 def test_device_matmul_transfer_ordering(n):
-    # GPU-07 regression fence for the cross-stream use-before-ready race: to_device
+    # Regression fence for the cross-stream use-before-ready race: to_device
     # allocates + copies operands on the TRANSFER stream while cuBLAS runs the GEMM
     # on the COMPUTE stream, and the matmul output buffer is allocated on transfer
     # too. With no ordering between the streams cuBLAS read operands and wrote the
@@ -393,7 +390,7 @@ def test_device_matmul_transfer_ordering(n):
 
 @gpu
 def test_mixed_residency_raises():
-    # GPU-06 residency: exactly one device-resident operand is the verbatim
+    # Residency: exactly one device-resident operand is the verbatim
     # mixed-residency TypeError, never a silent host<->device
     # transfer. Both operand orders, since the wrapper must reject either side
     # being the device one.
@@ -409,7 +406,7 @@ def test_mixed_residency_raises():
 
 @gpu
 def test_f32_device_routes_to_gpu():
-    # GPU-05: two f32 device-resident operands route to the GPU. The return type
+    # Two f32 device-resident operands route to the GPU. The return type
     # is the proof the device path was taken (residency-out: pg.Array in ->
     # pg.Array out). from_device of the result then matches NumPy through the
     # single toleranced path. Rectangular k so a wrong leading dimension surfaces.
@@ -425,7 +422,7 @@ def test_f32_device_routes_to_gpu():
 
 @gpu
 def test_f64_never_auto_routes():
-    # GPU-05 hard exclusion (the FP64 trap): a HOST f64 matmul returns an ndarray
+    # Hard exclusion (the FP64 trap): a HOST f64 matmul returns an ndarray
     # computed on the CPU and never silently lands on the GPU (GA106 FP64 is 1/64
     # FP32, measured slower than this CPU). A forced device-resident f64 (both
     # operands explicitly to_device'd) is allowed and computes correctly -- forced
@@ -457,11 +454,11 @@ def test_f64_never_auto_routes():
 # sentinel would suppress the warning in a later test; the device allocation must
 # be freed on a clean child exit, never wedging the display GPU). The child sizes
 # the allocation against CURRENT free VRAM (nvidia-smi memory.free), NEVER the
-# nominal 6144 (Pitfall 5): free fluctuates with the display. A rank-1 product
+# nominal 6144: free fluctuates with the display. A rank-1 product
 # (K=1) keeps the INPUTS tiny so the OOM fires on the matmul OUTPUT allocation,
 # the path the auto-mode fallback wraps. The child DLL shim is required because a
 # bare interpreter does not load conftest's toolkit-bin registration -- though
-# 04-05 also gives the package its own import-time discovery, the shim stays
+# the package also has its own import-time discovery, the shim stays
 # belt-and-suspenders for a child that imports before any package code runs.
 #
 # The OOM is forced by RESERVING free VRAM in device-resident arrays first, so the
@@ -576,7 +573,7 @@ _OOM_SCRIPT = _CHILD_DLL_SETUP + (
 
 @gpu
 def test_forced_oom_warns_once_and_falls_back(tmp_path):
-    # GPU-06: a device-resident f32 matmul whose output allocation exceeds CURRENT
+    # A device-resident f32 matmul whose output allocation exceeds CURRENT
     # free VRAM raises cudaErrorMemoryAllocation in the native pre-flight, which
     # the wrapper catches in auto mode, warns ONCE with the verbatim fallback
     # token, and recomputes on the CPU. The subprocess isolates the warn-once
