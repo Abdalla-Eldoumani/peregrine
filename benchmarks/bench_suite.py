@@ -532,6 +532,46 @@ def _raise_priority() -> str:
     return "high" if k32.SetPriorityClass(k32.GetCurrentProcess(), 0x80) else "normal"
 
 
+_AFFINITY = None
+
+
+def _physical_core_mask() -> int | None:
+    # The first logical processor of every physical core, from the OS topology.
+    # Windows otherwise parks two of six workers on SMT siblings for seconds at
+    # a time: 6-thread GEMM CV here fell from 6 to 8 percent to 1 to 2 percent
+    # for Peregrine and roughly halved for OpenBLAS once both were confined.
+    if os.name != "nt":
+        return None
+    import ctypes
+
+    class Info(ctypes.Structure):
+        _fields_ = [("mask", ctypes.c_size_t), ("relationship", ctypes.c_uint32),
+                    ("_union", ctypes.c_ubyte * 16)]
+
+    k32 = ctypes.windll.kernel32
+    size = ctypes.c_uint32(0)
+    k32.GetLogicalProcessorInformation(None, ctypes.byref(size))
+    buf = (Info * (size.value // ctypes.sizeof(Info)))()
+    if not k32.GetLogicalProcessorInformation(buf, ctypes.byref(size)):
+        return None
+    mask = 0
+    for info in buf:
+        if info.relationship == 0 and info.mask:  # RelationProcessorCore
+            mask |= info.mask & -info.mask
+    return mask or None
+
+
+def _confine_to_physical_cores() -> str | None:
+    mask = _physical_core_mask()
+    if mask is None:
+        return None
+    import ctypes
+
+    k32 = ctypes.windll.kernel32
+    k32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    return hex(mask) if k32.SetProcessAffinityMask(k32.GetCurrentProcess(), mask) else None
+
+
 def fresh_process_runner(smoke: bool):
     """The last chance for a noisy cell: this script re-invoked for that cell alone."""
 
@@ -545,6 +585,7 @@ def fresh_process_runner(smoke: bool):
                     "--out", out, "--fresh-child",
                     *_proto_argv(proto, smoke),
                     *(["--normal-priority"] if _PRIORITY == "normal" else []),
+                    *(["--all-logical-cpus"] if _AFFINITY is None else []),
                 ]
                 # The child inherits the environment so its OpenMP runtime
                 # starts with the same OMP_NUM_THREADS as this process did.
@@ -733,11 +774,13 @@ def _parse(argv):
     p.add_argument("--samples", type=int, default=None, help="samples per contender per cell (min 30)")
     p.add_argument("--warmups", type=int, default=None, help="warmup samples per contender per cell (min 5)")
     p.add_argument("--switch-gap-ms", type=float, default=None, help="idle gap at every contender switch (default 300)")
-    # 250 ms, far above the 200 us floor: on this laptop a 6-thread call varies
-    # about 10 percent call to call for both libraries (background work waking on
-    # a busy core's SMT sibling), and the CV of a K-call mean falls as 1/sqrt(K).
-    # 50 ms settled small and single-thread cells; 6-thread GEMM needs more calls.
-    p.add_argument("--batch-target-us", type=float, default=250000.0)
+    # 100 ms, far above the 200 us floor: averaging each sample over many calls is
+    # what settled small and single-thread cells here, while 250 ms samples made a
+    # 6-thread cell outlast the laptop's turbo window (clocks fell from about 145
+    # to 121 percent in the last block, for both libraries).
+    p.add_argument("--batch-target-us", type=float, default=100000.0)
+    p.add_argument("--all-logical-cpus", action="store_true",
+                   help="do not restrict the process to one logical CPU per physical core")
     p.add_argument("--normal-priority", action="store_true",
                    help="leave the process at normal priority (default on Windows: HIGH for every contender alike)")
     p.add_argument("--rewarm-ms", type=float, default=None,
@@ -806,8 +849,9 @@ def _line(r: dict) -> str:
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = _parse(argv)
-    global _PRIORITY
+    global _PRIORITY, _AFFINITY
     _PRIORITY = "normal" if args.normal_priority else _raise_priority()
+    _AFFINITY = None if args.all_logical_cpus else _confine_to_physical_cores()
     proto, cooldown = _protocol(args)
     clock = PdhClock()
     clock_obj = clock if clock.available else None
@@ -843,7 +887,7 @@ def main(argv=None) -> int:
     manifest = protocol_manifest(
         argv=["bench_suite.py", *argv], series_seed=seed, clock=clock,
         extra={"smoke": args.smoke, "protocol": dataclasses.asdict(proto), "series_cooldown_s": cooldown,
-               "priority_class": _PRIORITY},
+               "priority_class": _PRIORITY, "affinity_mask": _AFFINITY},
     )
     result = {"manifest": manifest, "cells": []}
     fresh = None if args.fresh_child else fresh_process_runner(args.smoke)
