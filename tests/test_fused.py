@@ -1,20 +1,20 @@
 """Fused elementwise suite: axpby, fma3, scaled_relu, both backends.
 
-FUSE-02 (CPU AVX2 matches the unfused NumPy expression incl exact NaN/Inf) and
-the CPU half of FUSE-04 (all dtypes, sizes 0 to 16M, NaN/Inf). Every CPU-vs-NumPy
+The CPU AVX2 kernels match the unfused NumPy expression, including exact NaN/Inf,
+across all dtypes and sizes 0 to 16M. Every CPU-vs-NumPy
 and GPU-vs-NumPy comparison routes through assert_fused_close (conftest), never an
 inline tolerance, exactly like the matmul and reduction suites. fma3 compares
 against the unfused NumPy x*y + z and the helper allows the single-rounding fused
 result to be at least as accurate (the elementwise-fused tolerance contract).
 
-The reserved -k area names from the phase Test Map (filled here):
+The -k area names:
 
-    cpu and oracle  -> FUSE-02 CPU AVX2 matches unfused NumPy, all dtypes/sizes
-    relu and nan    -> FUSE-02 scaled_relu NaN propagation (the np.maximum trap)
-    thread          -> FUSE-02 bitwise thread stability (OMP 1 vs N subprocess)
-    error           -> FUSE-02 dtype rejection / promotion / same-shape errors
-    gpu             -> FUSE-03 device grid-stride/float4 matches the same oracle
-    property        -> FUSE-04 hypothesis property over drawn shapes + large @example
+    cpu and oracle  -> CPU AVX2 matches unfused NumPy, all dtypes/sizes
+    relu and nan    -> scaled_relu NaN propagation (the np.maximum trap)
+    thread          -> bitwise thread stability (OMP 1 vs N subprocess)
+    error           -> dtype rejection / promotion / same-shape errors
+    gpu             -> device grid-stride/float4 matches the same oracle
+    property        -> hypothesis property over drawn shapes + large @example
 
 GPU tests skip cleanly with a stated reason on a CPU-only build or a machine
 without a device, so the whole file stays green on the WSL/GCC
@@ -45,7 +45,7 @@ DTYPES = [np.float32, np.float64]
 
 # The oracle adds 16M and 16M-1 as explicit examples (the 0..16M range and the
 # odd-tail float4 probe) rather than across the full cartesian grid, to keep
-# suite runtime sane (CONTEXT: mind 16M runtime; RESEARCH FUSE-04 Pitfall 4).
+# suite runtime sane.
 LARGE_SIZE = 16 * 1024 * 1024
 LARGE_ODD_SIZE = 16 * 1024 * 1024 - 1
 
@@ -128,7 +128,7 @@ def _operands(shape, dtype, n_operands, seed=0):
 
 
 # ---------------------------------------------------------------------------
-# FUSE-02 / FUSE-04: oracle, all dtypes, legacy-killer + round + odd sizes.
+# Oracle, all dtypes, legacy-killer + round + odd sizes.
 # -k "cpu and oracle"
 # ---------------------------------------------------------------------------
 
@@ -190,7 +190,7 @@ def _ulp_distance(got, ref):
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 def test_cpu_axpby_bitwise_equals_unfused(dtype):
     # axpby's vector body is add(mul(a,x), mul(b,y)) -- written as two roundings to
-    # match the unfused NumPy expression a*x + b*y (the WR-01 contract; fma3 is the
+    # match the unfused NumPy expression a*x + b*y (the axpby contract; fma3 is the
     # one op that contracts to a single rounding). Whether those two roundings
     # SURVIVE to the result depends on the compiler's sanctioned FP model, and the
     # honest claim differs per platform:
@@ -240,7 +240,7 @@ def test_cpu_axpby_bitwise_equals_unfused(dtype):
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 @pytest.mark.parametrize("n", [LARGE_SIZE, LARGE_ODD_SIZE], ids=["16M", "16M-1"])
 def test_cpu_oracle_large(op_id, call, oracle, n_operands, dtype, n):
-    # The 0..16M FUSE-04 range and the 16M-1 odd-tail probe, as a FEW explicit
+    # The 0..16M range and the 16M-1 odd-tail probe, as a FEW explicit
     # (1, n) examples rather than across the full cartesian grid (runtime). 16M-1
     # is odd so the very last element is a scalar-tail element after the last full
     # AVX2 block -- the legacy-killer class at scale.
@@ -263,7 +263,7 @@ def test_cpu_oracle_int_promotes_to_float64():
 
 
 # ---------------------------------------------------------------------------
-# FUSE-02: NaN / Inf positional. The scaled_relu NaN trap is lane-position
+# NaN / Inf positional. The scaled_relu NaN trap is lane-position
 # sensitive, so specials land at every offset incl the tail.
 # -k "relu and nan" / -k "nan"
 # ---------------------------------------------------------------------------
@@ -272,8 +272,8 @@ def test_cpu_oracle_int_promotes_to_float64():
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 @pytest.mark.parametrize("scale", [1.0, 3.0, -2.0], ids=["s1", "s3", "sneg"])
 def test_relu_nan_propagates_at_every_lane(dtype, scale):
-    # scaled_relu(NaN) must PROPAGATE NaN, not collapse to 0 (the bare maxps trap
-    # RESEARCH Pitfall 1). Build a flat row long enough to span several AVX2
+    # scaled_relu(NaN) must PROPAGATE NaN, not collapse to 0 (the bare maxps
+    # trap). Build a flat row long enough to span several AVX2
     # blocks and a non-empty tail, then put a NaN at EVERY lane offset in turn,
     # including the last element (the tail lane). np.maximum is the oracle.
     width = 8 if dtype == np.float32 else 4
@@ -289,7 +289,7 @@ def test_relu_nan_propagates_at_every_lane(dtype, scale):
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 def test_relu_negative_nan_propagates(dtype):
-    # -NaN is still NaN: scaled_relu(-NaN) propagates, never 0 (RESEARCH line 230).
+    # -NaN is still NaN: scaled_relu(-NaN) propagates, never 0.
     # The sign bit of a NaN is not meaningful to np.maximum, but it must stay NaN.
     n = 11
     x = np.full((1, n), -np.nan, dtype=dtype)
@@ -315,8 +315,8 @@ def test_relu_signed_inf_positions(dtype):
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 def test_fma3_inf_times_zero_is_nan(dtype):
-    # inf*0 + z = NaN, exactly like the unfused NumPy expression (RESEARCH line
-    # 242). Place the inf*0 pair at multiple offsets including the tail.
+    # inf*0 + z = NaN, exactly like the unfused NumPy expression. Place the
+    # inf*0 pair at multiple offsets including the tail.
     n = 14
     rng = np.random.default_rng(1)
     x = rng.standard_normal((1, n)).astype(dtype)
@@ -353,7 +353,7 @@ def test_axpby_inf_operand_positions(dtype):
 
 
 # ---------------------------------------------------------------------------
-# FUSE-02: dtype rejection / promotion / same-shape / ndim errors.
+# Dtype rejection / promotion / same-shape / ndim errors.
 # -k "error"
 # ---------------------------------------------------------------------------
 
@@ -423,7 +423,7 @@ def test_error_3d_input_is_value_error(op_id, call, oracle, n_operands):
 
 
 # ---------------------------------------------------------------------------
-# FUSE-02: bitwise thread stability (OMP 1 vs N subprocess). Elementwise has no
+# Bitwise thread stability (OMP 1 vs N subprocess). Elementwise has no
 # cross-element accumulation, so the result is bitwise thread-stable by
 # construction -- but the test is still required. -k "thread"
 # ---------------------------------------------------------------------------
@@ -472,7 +472,7 @@ def test_thread_count_bitwise_identical(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# FUSE-04: hypothesis property over drawn shapes + the legacy-killer @example
+# Hypothesis property over drawn shapes + the legacy-killer @example
 # pins + an explicit large @example. -k "property"
 # ---------------------------------------------------------------------------
 
@@ -572,7 +572,7 @@ test_property_matches_unfused_numpy = example(
 
 
 # ---------------------------------------------------------------------------
-# FUSE-03: the device path matches the same oracle. The device-resident kernels
+# The device path matches the same oracle. The device-resident kernels
 # (grid-stride/float4) compute on pg.Array operands; the result, brought back
 # with from_device, must match the SAME assert_fused_close oracle as the CPU
 # path. The marker resolves to a clean skip on CPU-only and WSL. -k "gpu"
@@ -681,10 +681,10 @@ def test_gpu_matches_oracle_nan_inf(op_id, call, oracle, n_operands, dtype):
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 @pytest.mark.parametrize("n", [LARGE_SIZE, LARGE_ODD_SIZE], ids=["16M", "16M-1"])
 def test_gpu_matches_oracle_large(op_id, call, oracle, n_operands, dtype, n):
-    # The 0..16M FUSE-04 range and the 16M-1 odd-tail float4 probe on the device:
+    # The 0..16M range and the 16M-1 odd-tail float4 probe on the device:
     # 16M-1 is odd so the last element is a scalar-tail element after the last full
     # float4/double2 pack -- the float4 OOB risk compute-sanitizer memcheck catches
-    # (RESEARCH Pitfall 4). A few explicit (1, n) examples, not the cartesian grid.
+    # A few explicit (1, n) examples, not the cartesian grid.
     x, y, z = _operands((1, n), dtype, n_operands)
     got = call(x, y, z)
     ref = oracle(x, y, z)
@@ -711,7 +711,7 @@ def test_gpu_mixed_residency_is_type_error():
 def test_fused_helper_smoke():
     """The single toleranced path is importable and passes a trivial identity.
 
-    Kept from the Wave-0 scaffold: a non-gated everywhere-pass so the file stays
+    A non-gated everywhere-pass so the file stays
     collectable even if every kernel were stripped.
     """
     x = np.zeros((2, 2), np.float64)
