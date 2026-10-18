@@ -106,6 +106,9 @@ def _measure(threads: int, n: int, reps: int, warmup: int) -> dict:
         OMP_PROC_BIND="close",
         OMP_PLACES="cores",
     )
+    # PEREGRINE_NUM_THREADS outranks OMP_NUM_THREADS, so an inherited value
+    # would run every point at one count.
+    env.pop("PEREGRINE_NUM_THREADS", None)
     p = subprocess.run(
         [sys.executable, "-c", _CHILD, str(n), str(reps), str(warmup), _tests_dir()],
         env=env,
