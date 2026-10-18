@@ -3,6 +3,7 @@
 #include "cpu/aligned_alloc.hpp"
 #include "cpu/microkernel.hpp"
 #include "cpu/pack.hpp"
+#include "cpu/threads.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -213,13 +214,10 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
         // throw std::bad_alloc, and a throw must never cross the omp region below
         // (UB -> std::terminate). Inside the region each thread reads its own
         // buffer by omp_get_thread_num(), so no allocation happens on the
-        // unwinding path. omp_get_max_threads() is the upper bound the region can
-        // use; the non-OpenMP build needs exactly one.
-#if defined(_OPENMP)
-        const int num_threads = omp_get_max_threads();
-#else
-        const int num_threads = 1;
-#endif
+        // unwinding path. The region asks for exactly this team, so it is the
+        // upper bound; call_threads() is 1 on the non-OpenMP build.
+        const int num_threads = call_threads();
+        const unsigned csr = mxcsr();
         std::vector<aligned_buf<float>> ap_pool;
         ap_pool.reserve(static_cast<size_t>(num_threads));
         for (int t = 0; t < num_threads; ++t) {
@@ -234,9 +232,10 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 
                 const int64_t num_ic = (m + MC - 1) / MC;
 #if defined(_OPENMP)
-#pragma omp parallel
+#pragma omp parallel num_threads(num_threads) if(num_threads > 1)
 #endif
                 {
+                    const mxcsr_scope fp(csr);
 #if defined(_OPENMP)
                     float* Ap = ap_pool[static_cast<size_t>(omp_get_thread_num())].p;
 #else
@@ -289,11 +288,8 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 
         // Per-thread Ap pool, allocated here so std::bad_alloc unwinds to the
         // binding (MemoryError) instead of terminating from inside the region.
-#if defined(_OPENMP)
-        const int num_threads = omp_get_max_threads();
-#else
-        const int num_threads = 1;
-#endif
+        const int num_threads = call_threads();
+        const unsigned csr = mxcsr();
         std::vector<aligned_buf<double>> ap_pool;
         ap_pool.reserve(static_cast<size_t>(num_threads));
         for (int t = 0; t < num_threads; ++t) {
@@ -322,9 +318,10 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
                 // the kernel still builds and runs single-threaded without an
                 // OpenMP runtime.
 #if defined(_OPENMP)
-#pragma omp parallel
+#pragma omp parallel num_threads(num_threads) if(num_threads > 1)
 #endif
                 {
+                    const mxcsr_scope fp(csr);
 #if defined(_OPENMP)
                     double* Ap = ap_pool[static_cast<size_t>(omp_get_thread_num())].p;
 #else
