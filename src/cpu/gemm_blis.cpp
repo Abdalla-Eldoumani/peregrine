@@ -19,35 +19,29 @@ namespace pg::cpu {
 
 namespace {
 
-// Sweep winner on the reference machine (i7-10750H, 6 threads pinned):
-// MC=96 KC=320 NC=2048. Ap = 96x320x8 = 240KB fits the 256K L2; Bp panel =
-// 320x8x8 = 20KB sits in the 32K L1d; NC=2048 is a single jc block at every
-// bench size. Chosen on the noise-robust median-of-min GFLOP/s across a
-// randomized-order, cooldown-separated f64 n=1024 run (background CPU contention
-// on the machine inflated the coefficient of variation, so the spike-resistant
-// floor decided, not the raw median). Measured f64 n=1024 floors, GF/s:
-//   mc96 kc320 nc2048 = 55.4 (median floor) / 83.9 (best min) -- winner
-//   mc72 kc256 nc2048 = 52.3 / 80.0
-//   mc48 kc256 nc2048 = 47.9 / 92.5   mc48 kc192 nc2048 = 41.2 / 78.0
-//   mc72 kc256 nc4080 = 39.2 (the prior {72,256,4080} default) / 64.6
-// Runtime-settable so a sweep walks the MC{48,72,96,144} x KC{192,256,320} x
-// NC{2048,4080} grid in one process; re-sweep when the machine or toolchain moves.
+// Per-dtype blocking, starting from BLIS's Haswell configuration (MR 6; NR 8 f64
+// and 16 f32; MC 72 f64 and 168 f32; KC 256; NC 4080) until a sweep on this
+// machine replaces it. The cache budget it meets on an i7-10750H (32 KiB L1d,
+// 256 KiB L2 per core): the A and B micro-panels, MR x KC plus KC x NR, are
+// 12 + 16 = 28 KiB for f64 and 6 + 16 = 22 KiB for f32, inside L1d; the MC x KC
+// A block is 144 KiB for f64 and 168 KiB for f32, inside L2.
 //
 // std::atomic so the sweep hook can publish a new triple while a kernel reads
 // it: blocking is trivially copyable (three int64_t), so the whole struct moves
 // in one atomic store/load and no reader ever sees a torn (mc-new, nc-old) pair.
 // On a 24-byte struct this is not lock-free, but it is correct and off any hot
 // path (the kernel loads it once per call, never per tile).
-std::atomic<blocking> g_blocking{blocking{96, 320, 2048}};
+std::atomic<blocking> g_blocking_f64{blocking{72, 256, 4080}};
+std::atomic<blocking> g_blocking_f32{blocking{168, 256, 4080}};
 
 } // namespace
 
-void store_blocking(blocking b) noexcept {
-    g_blocking.store(b, std::memory_order_relaxed);
+void store_blocking(blocking b, bool f32) noexcept {
+    (f32 ? g_blocking_f32 : g_blocking_f64).store(b, std::memory_order_relaxed);
 }
 
-blocking load_blocking() noexcept {
-    return g_blocking.load(std::memory_order_relaxed);
+blocking load_blocking(bool f32) noexcept {
+    return (f32 ? g_blocking_f32 : g_blocking_f64).load(std::memory_order_relaxed);
 }
 
 namespace {
@@ -76,28 +70,13 @@ struct aligned_buf {
 constexpr int64_t MR = 6;
 constexpr int64_t NR = 8;
 
-// The f32 register-tile shape, chosen by measurement at n=512: 8x16 beat 6x16,
-// so the f32 path runs microkernel_f32_8x16 with MR_F32=8, NR_F32=16. Both shapes
-// were built and benched single-threaded at n=512 on the reference machine
-// (i7-10750H, OMP_WAIT_POLICY=ACTIVE). Background CPU contention held the
-// coefficient of variation above the 5% gate, so the spike-resistant best-min
-// floor over repeated cooldown-separated runs decides, not the raw median (the
-// same noise-handling used for the f64 sweep). Measured f32 n=512 best-min floor
-// / top-3-mean floor, GF/s, two independent rounds:
-//   8x16 = 57.5 / 57.0 (round 2), 55.1 (round 1 best-min) -- winner
-//   6x16 = 53.2 / 52.9 (round 2), 53.6 (round 1 best-min) -- loser
-// The register-budget argument predicted the opposite (8x16 needs 16 ymm
-// accumulators, the whole file, so B is reloaded each k-step instead of held in
-// a register the way 6x16's 12-accumulator budget allows). Measurement overruled
-// it: 8x16's higher arithmetic density (16 FMAs per k-step) amortizes the B
-// reloads and wins by ~8% on this core's port layout -- decide f32 shape by
-// measuring, not by counting registers. To reproduce the loser, define
-// PG_F32_SHAPE_6x16 and rebuild. Re-measure on a quiet machine before treating
-// either number as absolute throughput.
-#if defined(PG_F32_SHAPE_6x16)
-constexpr int64_t MR_F32 = 6;
-#else
+// The f32 register tile is 6x16, the 12-accumulator budget of the f64 6x8 that
+// keeps the k loop spill-free. PG_F32_SHAPE_8x16 rebuilds with the older 8x16
+// kernel (16 accumulators, spills) so the two can be measured against each other.
+#if defined(PG_F32_SHAPE_8x16)
 constexpr int64_t MR_F32 = 8;
+#else
+constexpr int64_t MR_F32 = 6;
 #endif
 constexpr int64_t NR_F32 = 16;
 
@@ -139,11 +118,11 @@ void pack_b_f32(float* bp, const float* b, int64_t pc, int64_t jc, int64_t kc, i
     }
 }
 
-inline void microkernel_f32(const float* ap, const float* bp, float* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr) {
-#if defined(PG_F32_SHAPE_6x16)
-    microkernel_f32_6x16(ap, bp, c, kc, ldc, mr, nr);
+inline void microkernel_f32(const float* ap, const float* bp, float* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first) {
+#if defined(PG_F32_SHAPE_8x16)
+    microkernel_f32_8x16(ap, bp, c, kc, ldc, mr, nr, first);
 #else
-    microkernel_f32_8x16(ap, bp, c, kc, ldc, mr, nr);
+    microkernel_f32_6x16(ap, bp, c, kc, ldc, mr, nr, first);
 #endif
 }
 
@@ -181,18 +160,20 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     if (m == 0 || n == 0) {
         return;
     }
-    std::memset(c, 0, static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T));
-    if (k == 0) {
-        return; // NumPy semantics: (m, 0) @ (0, n) is an m x n zero matrix
-    }
-
-    if (std::max(m, std::max(k, n)) <= SMALL_MAX_DIM) {
-        gemm_small<T>(a, b, c, m, k, n);
+    // The packed path never zeroes C: its first k panel stores the tile outright.
+    // A k == 0 product (NumPy: an m x n zero matrix) and the small path, which
+    // accumulates into C, still start from zeros.
+    const bool small = std::max(m, std::max(k, n)) <= SMALL_MAX_DIM;
+    if (k == 0 || small) {
+        std::memset(c, 0, static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T));
+        if (k != 0) {
+            gemm_small<T>(a, b, c, m, k, n);
+        }
         return;
     }
 
     // Both dtypes now have a packed five-loop path: f64 runs the 6x8 microkernel,
-    // f32 runs the measured winning shape at n=512 (MR_F32 x 16). The two paths share
+    // f32 runs the 6x16 microkernel (MR_F32 x 16). The two paths share
     // the loop structure, the runtime blocking, and the OpenMP region; only the
     // pack layout and the microkernel callee differ by dtype, dispatched here at
     // compile time so neither path carries a runtime dtype branch in its hot loop.
@@ -200,7 +181,7 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
         // Snapshot the blocking once, before the GIL-free loops: a concurrent
         // _set_gemm_blocking publishes a whole new triple atomically, so MC/KC/NC
         // below are mutually consistent and fixed for the duration of this call.
-        const blocking blk = load_blocking();
+        const blocking blk = load_blocking(true);
         const int64_t MC = blk.mc;
         const int64_t KC = blk.kc;
         const int64_t NC = blk.nc;
@@ -255,7 +236,7 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
                                 const int64_t mr = std::min(MR_F32, mc - ir);
                                 const float* apanel = Ap + (ir / MR_F32) * MR_F32 * kc;
                                 float* ctile = c + (ic + ir) * n + (jc + jr);
-                                microkernel_f32(apanel, bpanel, ctile, kc, n, mr, nr);
+                                microkernel_f32(apanel, bpanel, ctile, kc, n, mr, nr, pc == 0);
                             }
                         }
                     }
@@ -266,7 +247,7 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
         return;
     } else {
         // Snapshot the blocking once, before the GIL-free loops (see the f32 arm).
-        const blocking blk = load_blocking();
+        const blocking blk = load_blocking(false);
         const int64_t MC = blk.mc;
         const int64_t KC = blk.kc;
         const int64_t NC = blk.nc;
@@ -341,7 +322,7 @@ void gemm_blis(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
                                 const int64_t mr = std::min(MR, mc - ir);
                                 const double* apanel = Ap + (ir / MR) * MR * kc;
                                 double* ctile = c + (ic + ir) * n + (jc + jr);
-                                microkernel_f64_6x8(apanel, bpanel, ctile, kc, n, mr, nr);
+                                microkernel_f64_6x8(apanel, bpanel, ctile, kc, n, mr, nr, pc == 0);
                             }
                         }
                     }
