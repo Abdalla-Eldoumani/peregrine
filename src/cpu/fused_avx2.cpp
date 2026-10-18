@@ -1,4 +1,5 @@
 #include "cpu/fused.hpp"
+#include "cpu/threads.hpp"
 
 #include <cmath>
 #include <immintrin.h>
@@ -60,33 +61,31 @@ inline T relu_nan_safe_scalar(T sx) {
 
 } // namespace
 
-template <typename T>
-void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b) {
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = a * x[i] + b * y[i];
-    }
-}
-
 template <>
 void fused_axpby<float>(const float* x, const float* y, float* out, int64_t n, float a, float b) {
     const __m256 va = _mm256_set1_ps(a);
     const __m256 vb = _mm256_set1_ps(b);
     const int64_t blocked = n & ~int64_t{7};
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < blocked; i += 8) {
-        const __m256 vx = _mm256_loadu_ps(x + i);
-        const __m256 vy = _mm256_loadu_ps(y + i);
-        // a*x and b*y each rounded, then summed (rounded again): two roundings,
-        // matching the unfused NumPy expression. NOT contracted -- an fmadd of
-        // b*y + (a*x) would fuse b*y into the add and round once, diverging from
-        // the scalar tail and the naive kernel bit-for-bit (~16% of f32 cases).
-        const __m256 r = _mm256_add_ps(_mm256_mul_ps(va, vx), _mm256_mul_ps(vb, vy));
-        _mm256_storeu_ps(out + i, r);
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < blocked; i += 8) {
+            const __m256 vx = _mm256_loadu_ps(x + i);
+            const __m256 vy = _mm256_loadu_ps(y + i);
+            // a*x and b*y each rounded, then summed (rounded again): two roundings,
+            // matching the unfused NumPy expression. NOT contracted -- an fmadd of
+            // b*y + (a*x) would fuse b*y into the add and round once, diverging from
+            // the scalar tail and the naive kernel bit-for-bit (~16% of f32 cases).
+            const __m256 r = _mm256_add_ps(_mm256_mul_ps(va, vx), _mm256_mul_ps(vb, vy));
+            _mm256_storeu_ps(out + i, r);
+        }
     }
     for (int64_t i = blocked; i < n; ++i) {
         out[i] = a * x[i] + b * y[i];
@@ -98,46 +97,52 @@ void fused_axpby<double>(const double* x, const double* y, double* out, int64_t 
     const __m256d va = _mm256_set1_pd(a);
     const __m256d vb = _mm256_set1_pd(b);
     const int64_t blocked = n & ~int64_t{3};
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < blocked; i += 4) {
-        const __m256d vx = _mm256_loadu_pd(x + i);
-        const __m256d vy = _mm256_loadu_pd(y + i);
-        // Two roundings (a*x and b*y rounded, then summed), not a fused
-        // contraction -- same arithmetic as the f32 body and the scalar tail.
-        const __m256d r = _mm256_add_pd(_mm256_mul_pd(va, vx), _mm256_mul_pd(vb, vy));
-        _mm256_storeu_pd(out + i, r);
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < blocked; i += 4) {
+            const __m256d vx = _mm256_loadu_pd(x + i);
+            const __m256d vy = _mm256_loadu_pd(y + i);
+            // Two roundings (a*x and b*y rounded, then summed), not a fused
+            // contraction -- same arithmetic as the f32 body and the scalar tail.
+            const __m256d r = _mm256_add_pd(_mm256_mul_pd(va, vx), _mm256_mul_pd(vb, vy));
+            _mm256_storeu_pd(out + i, r);
+        }
     }
     for (int64_t i = blocked; i < n; ++i) {
         out[i] = a * x[i] + b * y[i];
     }
 }
 
-template <typename T>
-void fused_fma3(const T* x, const T* y, const T* z, T* out, int64_t n) {
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = std::fma(x[i], y[i], z[i]);
-    }
-}
-
 template <>
 void fused_fma3<float>(const float* x, const float* y, const float* z, float* out, int64_t n) {
     const int64_t blocked = n & ~int64_t{7};
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < blocked; i += 8) {
-        const __m256 vx = _mm256_loadu_ps(x + i);
-        const __m256 vy = _mm256_loadu_ps(y + i);
-        const __m256 vz = _mm256_loadu_ps(z + i);
-        // The one op that is a SINGLE fused multiply-add per element: one
-        // rounding, the documented feature (more accurate than x*y then +z).
-        const __m256 r = _mm256_fmadd_ps(vx, vy, vz);
-        _mm256_storeu_ps(out + i, r);
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < blocked; i += 8) {
+            const __m256 vx = _mm256_loadu_ps(x + i);
+            const __m256 vy = _mm256_loadu_ps(y + i);
+            const __m256 vz = _mm256_loadu_ps(z + i);
+            // The one op that is a SINGLE fused multiply-add per element: one
+            // rounding, the documented feature (more accurate than x*y then +z).
+            const __m256 r = _mm256_fmadd_ps(vx, vy, vz);
+            _mm256_storeu_ps(out + i, r);
+        }
     }
     for (int64_t i = blocked; i < n; ++i) {
         out[i] = std::fma(x[i], y[i], z[i]);
@@ -147,28 +152,26 @@ void fused_fma3<float>(const float* x, const float* y, const float* z, float* ou
 template <>
 void fused_fma3<double>(const double* x, const double* y, const double* z, double* out, int64_t n) {
     const int64_t blocked = n & ~int64_t{3};
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < blocked; i += 4) {
-        const __m256d vx = _mm256_loadu_pd(x + i);
-        const __m256d vy = _mm256_loadu_pd(y + i);
-        const __m256d vz = _mm256_loadu_pd(z + i);
-        const __m256d r = _mm256_fmadd_pd(vx, vy, vz);
-        _mm256_storeu_pd(out + i, r);
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < blocked; i += 4) {
+            const __m256d vx = _mm256_loadu_pd(x + i);
+            const __m256d vy = _mm256_loadu_pd(y + i);
+            const __m256d vz = _mm256_loadu_pd(z + i);
+            const __m256d r = _mm256_fmadd_pd(vx, vy, vz);
+            _mm256_storeu_pd(out + i, r);
+        }
     }
     for (int64_t i = blocked; i < n; ++i) {
         out[i] = std::fma(x[i], y[i], z[i]);
-    }
-}
-
-template <typename T>
-void fused_scaled_relu(const T* x, T* out, int64_t n, T scale) {
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = relu_nan_safe_scalar<T>(scale * x[i]);
     }
 }
 
@@ -176,12 +179,20 @@ template <>
 void fused_scaled_relu<float>(const float* x, float* out, int64_t n, float scale) {
     const __m256 vscale = _mm256_set1_ps(scale);
     const int64_t blocked = n & ~int64_t{7};
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < blocked; i += 8) {
-        const __m256 v = _mm256_mul_ps(vscale, _mm256_loadu_ps(x + i));
-        _mm256_storeu_ps(out + i, relu_nan_safe_ps(v));
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < blocked; i += 8) {
+            const __m256 v = _mm256_mul_ps(vscale, _mm256_loadu_ps(x + i));
+            _mm256_storeu_ps(out + i, relu_nan_safe_ps(v));
+        }
     }
     for (int64_t i = blocked; i < n; ++i) {
         out[i] = relu_nan_safe_scalar<float>(scale * x[i]);
@@ -192,12 +203,20 @@ template <>
 void fused_scaled_relu<double>(const double* x, double* out, int64_t n, double scale) {
     const __m256d vscale = _mm256_set1_pd(scale);
     const int64_t blocked = n & ~int64_t{3};
+    const int nt = call_threads();
+    const unsigned csr = mxcsr();
 #if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
+#pragma omp parallel num_threads(nt) if(nt > 1)
 #endif
-    for (int64_t i = 0; i < blocked; i += 4) {
-        const __m256d v = _mm256_mul_pd(vscale, _mm256_loadu_pd(x + i));
-        _mm256_storeu_pd(out + i, relu_nan_safe_pd(v));
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < blocked; i += 4) {
+            const __m256d v = _mm256_mul_pd(vscale, _mm256_loadu_pd(x + i));
+            _mm256_storeu_pd(out + i, relu_nan_safe_pd(v));
+        }
     }
     for (int64_t i = blocked; i < n; ++i) {
         out[i] = relu_nan_safe_scalar<double>(scale * x[i]);
