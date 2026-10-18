@@ -130,6 +130,8 @@ __all__ = [
     "scaled_relu",
     "calibrate",
     "set_backend",
+    "set_num_threads",
+    "get_num_threads",
     "to_device",
     "from_device",
     "Array",
@@ -477,11 +479,11 @@ def set_backend(name: str) -> None:
     host->device staging copy), and raises immediately if no usable CUDA device is
     present, so the failure surfaces here at the set rather than later mid-matmul.
 
-    This is one of only two functions that change global state (the other is
-    calibrate). It sets a process-wide module global and forgets the calibration
-    the auto router loaded, so the next auto dispatch reads the cache again; it
-    does not build a CUDA context, read the calibration cache, or run any
-    measurement itself, so it is cheap.
+    This is one of three functions that change global state (with calibrate and
+    set_num_threads). It sets a process-wide module global and forgets the
+    calibration the auto router loaded, so the next auto dispatch reads the cache
+    again; it does not build a CUDA context, read the calibration cache, or run
+    any measurement itself, so it is cheap.
 
     Parameters
     ----------
@@ -528,6 +530,72 @@ def set_backend(name: str) -> None:
     _backend = name
     _routing_calibration = _UNSET
     _push_routing_facts(False)
+
+
+def set_num_threads(n: int) -> None:
+    """Set how many CPU threads each later call may use.
+
+    The setting is process-wide: it applies to every later call from any Python
+    thread, and replaces the value chosen at import (see get_num_threads). A call
+    uses at most ``n`` threads, fewer when OpenMP's own limit on the calling
+    thread is lower (OMP_NUM_THREADS or threadpoolctl can lower it), and fewer
+    for work too small to split. Results are bitwise identical for any thread
+    count, so the setting changes speed only.
+
+    Parameters
+    ----------
+    n : int
+        A positive number of threads. Values above the logical CPU count are
+        accepted; each call is still capped by OpenMP's limit.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If ``n`` is not a positive int (a bool is not accepted); the message is
+        ``"set_num_threads: n must be a positive int, got <value>"``.
+
+    Examples
+    --------
+    >>> import peregrine as pg
+    >>> previous = pg.get_num_threads()
+    >>> pg.set_num_threads(2)
+    >>> pg.get_num_threads()
+    2
+    >>> pg.set_num_threads(previous)
+    """
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError(f"set_num_threads: n must be a positive int, got {n!r}")
+    # The native setting is a C int; a larger request is capped per call anyway.
+    _core._set_num_threads(min(int(n), 2**31 - 1))
+
+
+def get_num_threads() -> int:
+    """Return the CPU thread setting.
+
+    This is the value set_num_threads stored or, before any call to it, the
+    value chosen at import: PEREGRINE_NUM_THREADS when it holds a positive int,
+    else OMP_NUM_THREADS when it does (its first entry, if it lists one per
+    nesting level), else the number of physical cores in the process affinity
+    mask. Any other environment value is ignored. The setting is an upper bound
+    per call, not the count a given call runs: OpenMP's limit on the calling
+    thread also caps it, and small work runs on fewer threads.
+
+    Returns
+    -------
+    int
+        The thread setting, at least 1.
+
+    Examples
+    --------
+    >>> import peregrine as pg
+    >>> pg.get_num_threads() >= 1
+    True
+    """
+    return _core._get_num_threads()
 
 
 def to_device(a) -> Array:
