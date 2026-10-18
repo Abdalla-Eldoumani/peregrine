@@ -52,7 +52,7 @@ def _results_path(*parts: str) -> str:
 def plot_gflops_vs_n(out_path: str) -> str:
     """GFLOP/s vs n per backend: CPU f64, GPU device-resident f32, NumPy CPU f64.
 
-    CPU floor GFLOP/s comes from the cpu02 f64 cases (gflop / peregrine.min_s),
+    CPU floor GFLOP/s comes from the f64 refbox cases (gflop / peregrine.min_s),
     NumPy floor from the same cases (gflop / numpy.min_s), and the GPU
     device-resident warm GFLOP/s from the committed gpu matrix without-transfer
     warm series. Every value is read from JSON; the colors are the fixed series
@@ -62,7 +62,7 @@ def plot_gflops_vs_n(out_path: str) -> str:
     chart is skipped with a clear reason rather than crashing a partial-results
     run, mirroring the crossover chart's os.path.exists skip).
     """
-    cpu_path = _results_path("cpu02_f64_refbox.json")
+    cpu_path = _results_path("refbox_matmul_f64_v300_vs_openblas.json")
     gpu_path = _results_path("refbox_gpu_matrix.json")
     if not (os.path.exists(cpu_path) and os.path.exists(gpu_path)):
         return None
@@ -122,25 +122,25 @@ def plot_speedup_bars(out_path: str) -> str:
     mirroring the crossover chart's os.path.exists skip).
     """
     paths = {
-        "cpu02": _results_path("cpu02_f64_refbox.json"),
-        "cpu06": _results_path("cpu06_f32_refbox.json"),
+        "f64": _results_path("refbox_matmul_f64_v300_vs_openblas.json"),
+        "small": _results_path("refbox_small_matmul_f32_v300.json"),
         "gpu": _results_path("refbox_gpu_matrix.json"),
-        "fuse_cpu": _results_path("fuse05_cpu_f32_refbox.json"),
-        "fuse_gpu": _results_path("fuse05_gpu_f32_refbox.json"),
+        "fuse_cpu": _results_path("refbox_fused_chain_cpu_f32_v300.json"),
+        "fuse_gpu": _results_path("refbox_fused_chain_gpu_f32_v300.json"),
     }
     if not all(os.path.exists(p) for p in paths.values()):
         return None
-    cpu02 = report.load_series(paths["cpu02"])
-    cpu06 = report.load_series(paths["cpu06"])
+    f64 = report.load_series(paths["f64"])
+    small = report.load_series(paths["small"])
     gpu = report.load_series(paths["gpu"])
     fuse_cpu = report.load_series(paths["fuse_cpu"])
     fuse_gpu = report.load_series(paths["fuse_gpu"])
 
-    cpu02_2048 = report._case_by_n(cpu02["cases"], 2048)
-    cpu02_floor = (
-        cpu02_2048["numpy"]["min_s"] / cpu02_2048["peregrine"]["min_s"]
+    f64_2048 = report._case_by_n(f64["cases"], 2048)
+    f64_floor = (
+        f64_2048["numpy"]["min_s"] / f64_2048["peregrine"]["min_s"]
     )
-    cpu06_64 = report._case_by_n(cpu06["cases"], 64)["speedup_vs_numpy"]
+    small_64 = report._case_by_n(small["cases"], 64)["speedup_vs_numpy"]
     gpu08 = report._gpu08_ratio(gpu)
     transfer_small = report._case_by_n(
         [c for c in gpu["with_transfer_cases"] if c["phase"] == "warm"], 256
@@ -157,8 +157,8 @@ def plot_speedup_bars(out_path: str) -> str:
         "Fused\nGPU",
     ]
     values = [
-        cpu02_floor,
-        cpu06_64,
+        f64_floor,
+        small_64,
         gpu08,
         transfer_small,
         fuse_cpu_floor,
