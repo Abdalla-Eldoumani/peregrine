@@ -58,6 +58,7 @@ import shutil
 import subprocess
 
 import numpy as np
+import pytest
 from hypothesis import settings
 
 # A CUDA-enabled _core links cublas64_12.dll / cublasLt64_12.dll, which live in
@@ -122,6 +123,17 @@ def requires_cuda():
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: long-running property spikes")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_routing_state():
+    # The package memoizes the device verdict, the machine signature, and the
+    # loaded calibration for the process. Tests point PEREGRINE_CACHE_DIR at a
+    # new directory and stub the device per test, so each test must start from
+    # nothing. Autouse fixtures set up first and tear down last, so this runs
+    # after monkeypatch has restored every patched attribute.
+    yield
+    pg._reset_routing_state()
 
 
 def _gpu_manifest():
