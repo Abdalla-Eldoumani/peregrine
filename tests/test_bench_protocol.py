@@ -656,6 +656,20 @@ def test_driver_unsupported_and_skipped(monkeypatch):
     assert res["status"] == "skipped"
 
 
+def test_assert_threads_with_setter():
+    # OpenMP's own limit stays at its default (every logical CPU) while the
+    # setter pins peregrine, so the check must accept a limit above n.
+    previous = pg.get_num_threads()
+    try:
+        for n in (1, 2):
+            with bench_matmul.pinned_threads(n) as observed:
+                assert observed["peregrine"] == n
+                assert observed["source"] == "pg.set_num_threads"
+                assert pg.get_num_threads() == n
+    finally:
+        pg.set_num_threads(previous)
+
+
 def test_assert_threads_mismatch(monkeypatch):
     monkeypatch.delattr(pg, "set_num_threads", raising=False)
     monkeypatch.setattr(bench_matmul, "_START_OMP_NUM_THREADS", "999")
