@@ -50,9 +50,13 @@ set(PG_AVX2_SOURCES
 )
 
 if (MSVC)
-  # /openmp:llvm because the legacy /openmp runtime is OpenMP 2.0 and rejects
-  # modern pragmas. No /fp:fast: it changes NaN and Inf semantics and the
-  # library promises NumPy-matching results.
+  # OpenMP comes from find_package(OpenMP), which gives MSVC's /openmp and links
+  # vcomp140.dll from the redistributable Visual C++ runtime. /openmp:llvm is
+  # never used: its libomp140 DLL is not redistributable, so a wheel would either
+  # fail to import without Visual Studio or ship a file it may not ship. The
+  # code sticks to OpenMP 2.0 constructs, which is all /openmp accepts. No
+  # /fp:fast: it changes NaN and Inf semantics and the library promises
+  # NumPy-matching results.
   #
   # Fenced behind COMPILE_LANGUAGE:CXX so these MSVC host flags reach only the
   # .cpp TUs. nvcc rejects a raw /permissive- on its own command line ("a single
@@ -61,7 +65,7 @@ if (MSVC)
   # target the generator expression is true for every TU, so the OFF build sees
   # byte-identical flags.
   target_compile_options(_core PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:/O2;/openmp:llvm;/permissive-;/W4>)
+    $<$<COMPILE_LANGUAGE:CXX>:/O2;/permissive-;/W4>)
   set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
   # No -ffast-math for the same reason. CXX-fenced for the same nvcc reason as
