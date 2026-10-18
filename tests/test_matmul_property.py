@@ -148,7 +148,7 @@ def _special_value_operands(draw):
     # positions in either operand; the bounded base magnitudes mean every
     # non-finite output traces back to an injection. The dtype draw fences
     # float32 propagation separately: per-dtype kernel divergence is the
-    # legacy failure class, and Phase 3 gives float32 its own microkernel
+    # legacy failure class, and float32 has its own microkernel
     dtype = draw(_DTYPE)
     m = draw(st.integers(1, 32))
     k = draw(st.integers(1, 32))
