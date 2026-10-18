@@ -71,13 +71,8 @@ constexpr int64_t MR = 6;
 constexpr int64_t NR = 8;
 
 // The f32 register tile is 6x16, the 12-accumulator budget of the f64 6x8 that
-// keeps the k loop spill-free. PG_F32_SHAPE_8x16 rebuilds with the older 8x16
-// kernel (16 accumulators, spills) so the two can be measured against each other.
-#if defined(PG_F32_SHAPE_8x16)
-constexpr int64_t MR_F32 = 8;
-#else
+// keeps the k loop spill-free.
 constexpr int64_t MR_F32 = 6;
-#endif
 constexpr int64_t NR_F32 = 16;
 
 // f32 panel packers, local to this TU because pack.cpp's pack_a/pack_b are
@@ -119,11 +114,7 @@ void pack_b_f32(float* bp, const float* b, int64_t pc, int64_t jc, int64_t kc, i
 }
 
 inline void microkernel_f32(const float* ap, const float* bp, float* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first) {
-#if defined(PG_F32_SHAPE_8x16)
-    microkernel_f32_8x16(ap, bp, c, kc, ldc, mr, nr, first);
-#else
     microkernel_f32_6x16(ap, bp, c, kc, ldc, mr, nr, first);
-#endif
 }
 
 // Below this max dimension the pack buffers and the thread spawn cost more than
