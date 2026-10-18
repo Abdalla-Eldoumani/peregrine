@@ -829,12 +829,16 @@ def assert_threads(n: int) -> dict:
     if not blas or any(t != n for t in blas):
         raise RuntimeError(f"BLAS pools run {blas} threads, expected {n}")
     if hasattr(pg, "get_num_threads"):
-        pg_threads = int(pg.get_num_threads())
+        # A call runs min(setting, OpenMP's limit) threads, so OpenMP's limit
+        # only has to admit n.
+        pg_threads = min([int(pg.get_num_threads()), *omp])
+        mismatch = pg_threads != n
     elif omp:
         pg_threads = omp[0]
+        mismatch = pg_threads != n or any(t != n for t in omp)
     else:
         raise RuntimeError("no OpenMP pool is loaded, so peregrine's thread count cannot be verified")
-    if pg_threads != n or any(t != n for t in omp):
+    if mismatch:
         raise RuntimeError(f"peregrine runs {pg_threads} threads (OpenMP pools {omp}), expected {n}")
     return {"blas": blas, "openmp": omp, "peregrine": pg_threads, "source": source}
 
