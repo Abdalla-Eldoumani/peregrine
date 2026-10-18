@@ -34,7 +34,7 @@ void fused_scaled_relu(const T* x, T* out, int64_t n, T scale);
 
 // float and double of the three ops above are EXPLICIT SPECIALIZATIONS (the AVX2
 // bodies in fused_avx2.cpp), not implicit instantiations of the primary template
-// (whose body is the generic scalar fallback that only the AVX2 TU's tail reuses).
+// (which has no definition, so no other T can be instantiated by accident).
 // These specialization declarations MUST precede the extern-template instantiation
 // declarations below: an explicit specialization has to be declared before the
 // first use that would otherwise instantiate the primary template
