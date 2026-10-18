@@ -241,7 +241,7 @@ def _mixed_residency_msg(op: str) -> str:
 # CPU, so the warn-once contract holds: a long-running session that hits a
 # recurring CUDA error warns a single time, not on every call. Module-level (not
 # per-call) so the "for this session" wording is literally true. The lock makes
-# the check-then-set atomic (WR-05): the library drops the GIL around kernels so
+# the check-then-set atomic: the library drops the GIL around kernels so
 # callers thread around it, and `if not _cuda_fallback_warned: _cuda_fallback_warned = True`
 # is two bytecode ops -- a thread switch between them under concurrent device
 # failures would let two threads both warn, breaking the literal once-per-session
@@ -476,7 +476,7 @@ def _matmul_cpu_fallback(a, b):
 
 
 def _matmul_gpu_staged(a, b):
-    # Route a HOST array pair to the GPU by staging through the existing Phase-4
+    # Route a HOST array pair to the GPU by staging through the existing device
     # entries: H2D both operands (to_device, synced at the boundary), the device
     # matmul(Array, Array), then D2H the result (from_device, synced) back to a
     # host ndarray. Minimal-risk by reuse -- no new native code, no new sanitizer
@@ -651,7 +651,7 @@ def matmul(a, b, *, out=None):
             # failure -- the forced choice still degrades rather than crashing mid
             # matmul, since set_backend already validated availability at the set.
             global _cuda_fallback_warned
-            # Atomic check-then-set under the lock (WR-05) so exactly one thread
+            # Atomic check-then-set under the lock so exactly one thread
             # ever sees the flag as unset and wins the warning, even when several
             # threads hit a device failure at once. warnings.warn runs OUTSIDE the
             # lock: it can invoke arbitrary user warning filters, and holding a
@@ -670,7 +670,7 @@ def matmul(a, b, *, out=None):
                 )
             return _matmul_cpu_fallback(a, b)
 
-    # Fast path (CPU-06): when both operands are already 2-D C-contiguous
+    # Fast path: when both operands are already 2-D C-contiguous
     # ndarrays of the same accepted float dtype, np.asarray, np.result_type, and
     # np.ascontiguousarray are all no-ops that only cost time, so skip the whole
     # chain and hand the kernel the arrays as-is. At n=8 the skipped helpers are
@@ -693,7 +693,7 @@ def matmul(a, b, *, out=None):
         and b.flags.c_contiguous
     ):
         # The pair is already a normalized host ndarray pair, so route it on the
-        # module-global backend (Phase 5). _host_backend_for is "cpu" in one cheap
+        # module-global backend. _host_backend_for is "cpu" in one cheap
         # comparison when _backend is "cpu" OR when auto sees no usable device --
         # the OFF build and any no-GPU machine pay only that test and fall straight
         # into the existing CPU kernel call, so the fast path stays a no-overhead
@@ -947,8 +947,8 @@ def axpby(x, y, *, a=1.0, b=1.0):
 
     The scalars ``a`` and ``b`` are keyword-only. The two arrays must have the
     same shape: v1 does not broadcast, so a shape mismatch raises ValueError.
-    The return type follows operand residency (host arrays give a host ndarray);
-    the device-resident path lands in a later plan.
+    The return type follows operand residency: host arrays give a host ndarray,
+    pg.Array operands give a pg.Array.
 
     Parameters
     ----------
@@ -985,7 +985,7 @@ def axpby(x, y, *, a=1.0, b=1.0):
            [-24., -32.]])
     """
     if _fused_residency((x, y), "axpby") == "device":
-        # Device-resident path (06-04): both operands are pg.Array, so the native
+        # Device-resident path: both operands are pg.Array, so the native
         # axpby Array overload runs the grid-stride kernel device-in/device-out and
         # returns an pg.Array. nanobind dispatches on the operand type (Array vs
         # ndarray), so the same _axpby_native binds the device overload here and the
@@ -1050,7 +1050,7 @@ def fma3(x, y, z):
            [22., 33.]])
     """
     if _fused_residency((x, y, z), "fma3") == "device":
-        # Device-resident path (06-04): all three operands are pg.Array, so the
+        # Device-resident path: all three operands are pg.Array, so the
         # native fma3 Array overload runs the device kernel and returns an
         # pg.Array (same nanobind type-dispatch as axpby). No host->GPU staging.
         return _fma3_native(x, y, z)
@@ -1106,7 +1106,7 @@ def scaled_relu(x, *, scale=1.0):
            [9., 0.]])
     """
     if _fused_residency((x,), "scaled_relu") == "device":
-        # Device-resident path (06-04): the operand is an pg.Array, so the native
+        # Device-resident path: the operand is an pg.Array, so the native
         # scaled_relu Array overload runs the device kernel (NaN-propagating, like
         # the CPU path) and returns an pg.Array. No host->GPU staging.
         return _scaled_relu_native(x, float(scale))
