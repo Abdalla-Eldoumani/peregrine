@@ -159,10 +159,11 @@ def _prepare(x, name: str, op: str = "matmul") -> np.ndarray:
 
 
 def _normalize(arr: np.ndarray, common: np.dtype) -> np.ndarray:
-    # ascontiguousarray is a no-op for arrays that already qualify, which is
-    # the zero-copy fast path. Strided views pay one copy here until the
-    # native kernels grow stride support.
-    return np.ascontiguousarray(arr, dtype=common)
+    # require is a no-op for arrays that already qualify, which is the
+    # zero-copy fast path. Strided views pay one copy here until the native
+    # kernels grow stride support, and so do unaligned ones: the kernels load
+    # whole elements, and a misaligned element load is undefined behavior.
+    return np.require(arr, dtype=common, requirements=("C", "A"))
 
 
 def _resolve_dtype(arr: np.ndarray, op: str) -> np.dtype:
@@ -888,6 +889,8 @@ def matmul(a, b, *, out=None):
         and a.dtype in _ACCEPTED
         and a.flags.c_contiguous
         and b.flags.c_contiguous
+        and a.flags.aligned
+        and b.flags.aligned
     ):
         # The pair is already a normalized host ndarray pair, so route it on the
         # module-global backend. _host_backend_for is "cpu" in one cheap
