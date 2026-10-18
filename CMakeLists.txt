@@ -8,7 +8,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-find_package(Python 3.12 COMPONENTS Interpreter Development.Module REQUIRED)
+# The SABI component is what lets nanobind's STABLE_ABI take effect: without it
+# nanobind silently builds a version-specific module, which an abi3-tagged wheel
+# then ships to interpreters that cannot import it. scikit-build-core sets
+# SKBUILD_SABI_COMPONENT from wheel.py-api.
+find_package(Python 3.12 COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 
 # nanobind is resolved from the build venv that scikit-build-core creates
 execute_process(
