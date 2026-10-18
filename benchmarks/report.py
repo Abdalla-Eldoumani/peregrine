@@ -10,15 +10,15 @@ cannot drift.
 bench-protocol rule 16: the results section MUST carry the regimes where NumPy
 or OpenBLAS wins or ties. float64 mid-size parity is the stated target, not a
 win, so a table with no loss row is the red flag the protocol exists to catch.
-The loss rows here are CPU-02 (f64 floor below OpenBLAS), CPU-05 (thread scaling
-below the 4x ideal), and CPU-06 (the small-matrix path losing to NumPy).
+The loss rows here are the f64 floor below OpenBLAS, the thread scaling
+below the 4x ideal, and the small-matrix path losing to NumPy.
 
 The four result shapes the renderer branches on (the schema differs per file):
 - matmul / gpu matrix: top-level ``cases`` (CPU pairs, each with nested
   ``peregrine`` / ``numpy`` timing dicts, plus per-row ``speedup_floor`` and
   ``speedup_vs_numpy`` derived from that per-rep timing) plus ``gpu_cases``
   (device-resident, each carrying ``ratio_vs_numpy_cpu_f32``) and optional
-  ``with_transfer_cases``. The CPU-02 n=2048 parity headline is recomputed from
+  ``with_transfer_cases``. The f64 n=2048 parity headline is recomputed from
   the per-rep ``cases`` of the fresh matmul f64 sweep, not from any hand-entered
   summary scalar.
 - fused: top-level ``cpu_cases`` / ``gpu_cases`` with precomputed
@@ -52,8 +52,8 @@ def _case_is_verified(case: dict) -> bool:
     # rule 11 acceptance, accommodating the two committed CPU-case shapes:
     #   1. The bench_matmul / gpu / fused / scaling shape carries an explicit
     #      per-case ``verified`` boolean (True to publish).
-    #   2. The paired-timing shape (cpu02_f64_refbox / cpu06_f32_refbox)
-    #      records each case as a paired ``peregrine`` + ``numpy`` timing dict
+    #   2. The paired-timing shape (refbox_matmul_f64_v300_vs_openblas /
+    #      refbox_small_matmul_f32_v300) records each case as a paired ``peregrine`` + ``numpy`` timing dict
     #      with NO per-case ``verified`` flag; the per-rep verification ran
     #      against assert_matmul_close (the bench writes no unverified series: no
     #      result with verified false ever reaches a results file), and the
@@ -81,8 +81,8 @@ def load_series(path: str) -> dict:
     Two committed CPU-case shapes exist (see ``_case_is_verified``): the
     bench_matmul / gpu / fused / scaling shape with an explicit per-case
     ``verified`` boolean, and the paired-timing shape
-    (cpu02_f64_refbox / cpu06_f32_refbox) whose paired ``peregrine`` + ``numpy``
-    timing case is verified-per-rep by construction with no per-case flag. Both
+    (refbox_matmul_f64_v300_vs_openblas / refbox_small_matmul_f32_v300) whose
+    paired ``peregrine`` + ``numpy`` timing case is verified-per-rep by construction with no per-case flag. Both
     are accepted; an EXPLICIT ``verified: False`` is rejected in either shape.
 
     json.load ONLY (Security V5): a results file is untrusted data on disk;
@@ -131,12 +131,12 @@ def _fmt(value: float, places: int = 2) -> str:
 
 
 def render_matmul_f64_table(data: dict, sweep: dict) -> str:
-    """The f64 matmul floor table (CPU-02). A LOSS regime (rule 16).
+    """The f64 matmul floor table. A LOSS regime (rule 16).
 
     The per-size floor ratio is ``numpy.min_s / peregrine.min_s`` from each
     ``cases`` entry (the floor, not the median: AV noise inflates the median).
 
-    The headline n=2048 parity figure comes from ``sweep`` -- the fresh 07-02
+    The headline n=2048 parity figure comes from ``sweep`` -- the fresh
     matmul f64 sweep (refbox_matmul_f64.json), which carries full per-rep timing
     behind every row (``peregrine.min_s`` / ``numpy.min_s`` over 30 reps,
     ``verified: true``). Both the floor ratio (``speedup_floor``, the noise-robust
@@ -176,7 +176,7 @@ def render_matmul_f64_table(data: dict, sweep: dict) -> str:
 
 
 def render_small_matrix_table(data: dict) -> str:
-    """The small-matrix f32 table (CPU-06). A LOSS regime (rule 16).
+    """The small-matrix f32 table. A LOSS regime (rule 16).
 
     ``speedup_vs_numpy`` per ``cases`` entry is end-to-end Python time
     (numpy_median / pg_median). Below 1.0 at every size: the in-tree small path
@@ -197,7 +197,7 @@ def render_small_matrix_table(data: dict) -> str:
 
 
 def render_scaling_line(data: dict) -> str:
-    """The thread-scaling line (CPU-05). A LOSS regime vs the 4x ideal (rule 16).
+    """The thread-scaling line. A LOSS regime vs the 4x ideal (rule 16).
 
     ``ratio_6_vs_1_floor`` is the floor speedup from 1 to 6 threads, well below a
     linear 6x and below the 4x the four physical-core plateau would suggest: the
@@ -213,10 +213,10 @@ def render_scaling_line(data: dict) -> str:
 
 
 def _gpu08_ratio(data: dict) -> float:
-    """The GPU-08 device-resident f32 headline ratio from the committed matrix.
+    """The device-resident f32 headline ratio from the committed matrix.
 
     Reads ``gpu_cases[i].ratio_vs_numpy_cpu_f32`` for the largest warm
-    without-transfer case (n=2048, the GPU-08 measurement size), from the
+    without-transfer case (n=2048, the quoted measurement size), from the
     COMMITTED results/refbox_gpu_matrix.json. Not a literal, and not
     results/local/gpu08.json (gitignored, absent on a fresh clone):
     reading the local file would orphan this number on a clone.
@@ -231,9 +231,9 @@ def _gpu08_ratio(data: dict) -> float:
 
 
 def render_gpu_table(data: dict) -> str:
-    """The GPU device-resident + with-transfer table (GPU-08). The win + a loss.
+    """The GPU device-resident + with-transfer table. The win + a loss.
 
-    Without-transfer warm is the device-resident headline (GPU-08, ~23x NumPy
+    Without-transfer warm is the device-resident headline (~23x NumPy
     CPU f32 at n=2048). The with-transfer warm rows are the dispatch-cost story:
     the small sizes lose to the host round-trip (n=256 ~0.35x), which is why the
     auto policy keeps small host arrays on the CPU. CuPy is absent on this
@@ -281,7 +281,7 @@ def render_gpu_table(data: dict) -> str:
 
 
 def render_fused_table(cpu_data: dict, gpu_data: dict) -> str:
-    """The fused 3-op chain table (FUSE-05). Both wins.
+    """The fused 3-op chain table. Both wins.
 
     The CPU floor speedup (``cpu_cases[0].speedup_floor``, ~3.2x) and the GPU
     device-resident ratio (``gpu_cases[0].ratio_vs_numpy_cpu_f32``, ~71x NumPy
@@ -372,13 +372,13 @@ def render_report() -> str:
     fresh clone, a partial-results run) degrades that one section to a printed
     skip line so the rest of the report still renders.
     """
-    cpu02 = _load_optional("cpu02_f64_refbox.json")
+    cpu02 = _load_optional("refbox_matmul_f64_v300_vs_openblas.json")
     matmul_f64 = _load_optional("refbox_matmul_f64.json")
-    cpu06 = _load_optional("cpu06_f32_refbox.json")
+    cpu06 = _load_optional("refbox_small_matmul_f32_v300.json")
     scaling = _load_optional("tuning", "scaling_refbox.json")
     gpu_matrix = _load_optional("refbox_gpu_matrix.json")
-    fuse_cpu = _load_optional("fuse05_cpu_f32_refbox.json")
-    fuse_gpu = _load_optional("fuse05_gpu_f32_refbox.json")
+    fuse_cpu = _load_optional("refbox_fused_chain_cpu_f32_v300.json")
+    fuse_gpu = _load_optional("refbox_fused_chain_gpu_f32_v300.json")
     sweep = _load_optional("tuning", "sweep_refbox.json")
 
     def _skip(name: str) -> str:
@@ -388,13 +388,15 @@ def render_report() -> str:
     if cpu02 is not None and matmul_f64 is not None:
         sections.append(render_matmul_f64_table(cpu02, matmul_f64))
     else:
-        sections.append(_skip("cpu02_f64_refbox.json / refbox_matmul_f64.json"))
+        sections.append(
+            _skip("refbox_matmul_f64_v300_vs_openblas.json / refbox_matmul_f64.json")
+        )
 
     sections.append("## Small-matrix float32 (CPU)")
     sections.append(
         render_small_matrix_table(cpu06)
         if cpu06 is not None
-        else _skip("cpu06_f32_refbox.json")
+        else _skip("refbox_small_matmul_f32_v300.json")
     )
 
     sections.append("## Thread scaling (CPU)")
@@ -416,7 +418,10 @@ def render_report() -> str:
         sections.append(render_fused_table(fuse_cpu, fuse_gpu))
     else:
         sections.append(
-            _skip("fuse05_cpu_f32_refbox.json / fuse05_gpu_f32_refbox.json")
+            _skip(
+                "refbox_fused_chain_cpu_f32_v300.json"
+                " / refbox_fused_chain_gpu_f32_v300.json"
+            )
         )
 
     sections.append("## Autotuned blocking")
