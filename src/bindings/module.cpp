@@ -10,6 +10,7 @@
 #include "core/common.hpp"
 #include "cpu/feature_detect.hpp"
 #include "cpu/gemm_blis.hpp"
+#include "cpu/threads.hpp"
 #include "dispatch/dispatch.hpp"
 
 namespace nb = nanobind;
@@ -762,6 +763,27 @@ NB_MODULE(_core, m) {
         d["nc"] = b.nc;
         return d;
     });
+
+    // The thread setting behind pg.set_num_threads and pg.get_num_threads, which
+    // own validation. Read once here so the setting reflects the environment at
+    // import, as OpenMP's own reading of OMP_NUM_THREADS does.
+    pg::cpu::get_num_threads();
+    m.def("_set_num_threads", [](int n) { pg::cpu::set_num_threads(n); }, nb::arg("n"));
+    m.def("_get_num_threads", [] { return pg::cpu::get_num_threads(); });
+
+    // Test hooks: team_size's arithmetic on the calling thread, and the calling
+    // thread's MXCSR (returns the previous value) so a test can run a call
+    // under FTZ/DAZ and restore the register afterwards.
+    m.def("_team_size",
+          [](double work, double serial_below, double per_thread, int64_t max_units) {
+              return pg::cpu::team_size(work, serial_below, per_thread, max_units);
+          },
+          nb::arg("work"), nb::arg("serial_below"), nb::arg("per_thread"), nb::arg("max_units"));
+    m.def("_set_mxcsr", [](unsigned csr) {
+        const unsigned previous = pg::cpu::mxcsr();
+        pg::cpu::set_mxcsr(csr);
+        return previous;
+    }, nb::arg("csr"));
 
     // The PRIVATE compile-time build signal. Underscore-private: the public
     // predicate is the wrapper's has_cuda(), which composes this build flag AND a
