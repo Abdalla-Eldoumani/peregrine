@@ -86,8 +86,8 @@ GPU_AUTO = tuple((n, n, n) for n in (128, 256, 512, 1024, 2048, 4096)) + ((1, 40
 # 1M, 4M, 16M and 32M elements.
 GPU_ELEMS = ((1024, 1024), (2048, 2048), (4096, 4096), (4096, 8192))
 GPU_OPS = ("gpu_matmul", "to_device", "from_device", "gpu_chain")
-GROUPS = ("quick", "matmul-square", "matmul-rect", "matmul-layout", "transpose",
-          "reduce", "fused", "gemm-1t", "gpu")
+GROUPS = ("quick", "overhead", "matmul-square", "matmul-rect", "matmul-layout",
+          "transpose", "reduce", "fused", "gemm-1t", "gpu")
 
 
 @dataclass(frozen=True)
@@ -147,6 +147,18 @@ def select(groups: list[str], seeds: list[int], cuda: bool) -> list[Cell]:
             if cuda:
                 for n in (256, 2048):
                     add("matmul", "float32", (n, n, n), variant="auto")
+        elif group == "overhead":
+            # Per-call cost: sizes where the work itself is a few nanoseconds.
+            for dt in DTYPES:
+                for n in (1, 2, 4, 8):
+                    add("matmul", dt, (n, n, n))
+                add("transpose", dt, (8, 8))
+                for op in ("sum", "mean"):
+                    for axis in AXES:
+                        add(op, dt, (8, 8), variant=axis)
+                for op in FUSED_OPS:
+                    for v in ("alloc", "out"):
+                        add(op, dt, (8, 8), variant=v)
         elif group == "matmul-square":
             for dt in DTYPES:
                 for n in SQUARE:
