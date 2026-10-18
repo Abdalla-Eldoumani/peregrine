@@ -56,6 +56,7 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
 
 import numpy as np
 import pytest
@@ -76,6 +77,12 @@ if os.name == "nt":
             os.add_dll_directory(_cuda_bin)
         except OSError:
             pass
+
+# The suite never routes on the developer's own calibration: a cache written by
+# pg.calibrate() sends large float32 host products to the GPU on a CUDA build,
+# which would make results depend on the machine's state. Tests that need a
+# calibration write one into their own directory; subprocesses inherit this.
+os.environ.setdefault("PEREGRINE_CACHE_DIR", tempfile.mkdtemp(prefix="pg-test-cache-"))
 
 import peregrine as pg
 
