@@ -750,19 +750,20 @@ NB_MODULE(_core, m) {
     // each element's k accumulation), so they must never be reached on a result path.
     // The triple is published in one atomic store (store_blocking) rather than
     // field-by-field: a kernel reads blocking after dropping the GIL, so a torn
-    // write would let it size a buffer for one MC and loop for another.
-    m.def("_set_gemm_blocking", [](int64_t mc, int64_t kc, int64_t nc) {
-        pg::cpu::store_blocking(pg::cpu::blocking{mc, kc, nc});
-    });
+    // write would let it size a buffer for one MC and loop for another. Each dtype
+    // has its own triple; f32=True addresses the float32 one.
+    m.def("_set_gemm_blocking", [](int64_t mc, int64_t kc, int64_t nc, bool f32) {
+        pg::cpu::store_blocking(pg::cpu::blocking{mc, kc, nc}, f32);
+    }, nb::arg("mc"), nb::arg("kc"), nb::arg("nc"), nb::arg("f32") = false);
 
-    m.def("_get_gemm_blocking", [] {
-        const pg::cpu::blocking b = pg::cpu::load_blocking();
+    m.def("_get_gemm_blocking", [](bool f32) {
+        const pg::cpu::blocking b = pg::cpu::load_blocking(f32);
         nb::dict d;
         d["mc"] = b.mc;
         d["kc"] = b.kc;
         d["nc"] = b.nc;
         return d;
-    });
+    }, nb::arg("f32") = false);
 
     // The thread setting behind pg.set_num_threads and pg.get_num_threads, which
     // own validation. Read once here so the setting reflects the environment at
