@@ -518,20 +518,6 @@ def _proto_argv(proto: Protocol, smoke: bool) -> list[str]:
     return a
 
 
-_PRIORITY = "normal"
-
-
-def _raise_priority() -> str:
-    # Both contenders share the process, so the class favors neither; it keeps
-    # normal-priority background threads from preempting the timed loop.
-    if os.name != "nt":
-        return "normal"
-    import ctypes
-
-    k32 = ctypes.windll.kernel32
-    return "high" if k32.SetPriorityClass(k32.GetCurrentProcess(), 0x80) else "normal"
-
-
 _AFFINITY = None
 
 
@@ -584,7 +570,6 @@ def fresh_process_runner(smoke: bool):
                     "--cell", json.dumps(cell.spec()),
                     "--out", out, "--fresh-child",
                     *_proto_argv(proto, smoke),
-                    *(["--normal-priority"] if _PRIORITY == "normal" else []),
                     *(["--all-logical-cpus"] if _AFFINITY is None else []),
                 ]
                 # The child inherits the environment so its OpenMP runtime
@@ -781,8 +766,6 @@ def _parse(argv):
     p.add_argument("--batch-target-us", type=float, default=100000.0)
     p.add_argument("--all-logical-cpus", action="store_true",
                    help="do not restrict the process to one logical CPU per physical core")
-    p.add_argument("--normal-priority", action="store_true",
-                   help="leave the process at normal priority (default on Windows: HIGH for every contender alike)")
     p.add_argument("--rewarm-ms", type=float, default=None,
                    help="untimed running of each contender before sampling, after every switch (default 200)")
     p.add_argument("--cooldown-s", type=float, default=30.0, help="between series and before each CV rerun")
@@ -849,8 +832,7 @@ def _line(r: dict) -> str:
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     args = _parse(argv)
-    global _PRIORITY, _AFFINITY
-    _PRIORITY = "normal" if args.normal_priority else _raise_priority()
+    global _AFFINITY
     _AFFINITY = None if args.all_logical_cpus else _confine_to_physical_cores()
     proto, cooldown = _protocol(args)
     clock = PdhClock()
@@ -887,7 +869,7 @@ def main(argv=None) -> int:
     manifest = protocol_manifest(
         argv=["bench_suite.py", *argv], series_seed=seed, clock=clock,
         extra={"smoke": args.smoke, "protocol": dataclasses.asdict(proto), "series_cooldown_s": cooldown,
-               "priority_class": _PRIORITY, "affinity_mask": _AFFINITY},
+               "affinity_mask": _AFFINITY},
     )
     result = {"manifest": manifest, "cells": []}
     fresh = None if args.fresh_child else fresh_process_runner(args.smoke)
