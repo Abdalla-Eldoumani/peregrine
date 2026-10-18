@@ -28,6 +28,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -723,6 +724,7 @@ def _parse(argv):
     p.add_argument("--verify-mode", choices=["last", "all"], default="last",
                    help="check each batch's last call (default) or keep and check every call")
     p.add_argument("--series-seed", type=int, default=None)
+    p.add_argument("--filter", default=None, help="keep only cells whose id matches this regex")
     p.add_argument("--smoke", action="store_true", help="few samples, no cooldowns; output is never evidence")
     p.add_argument("--probe-spin", action="store_true")
     p.add_argument("--cell", default=None, help=argparse.SUPPRESS)
@@ -796,6 +798,8 @@ def main(argv=None) -> int:
         return 0
 
     cells = [Cell.from_spec(json.loads(args.cell))] if args.cell else select(args.group, args.seeds, cuda)
+    if args.filter:
+        cells = [c for c in cells if re.search(args.filter, c.id)]
     try:
         for t in sorted({c.threads for c in cells}):
             with pinned_threads(t):
