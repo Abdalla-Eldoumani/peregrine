@@ -697,8 +697,8 @@ def _host_backend_for(a_arr, b_arr) -> str:
         if _routing_calibration is _UNSET:
             _install_routing_calibration(None)
         return "cpu"
-    # A device is present: let the pure policy decide per measured (dtype, n)
-    # crossover, paying the H2D+D2H round trip for a host pair. f64 never reaches
+    # A device is present: let the pure policy decide on the product's work and
+    # the bytes its host pair moves each way. f64 never reaches
     # the GPU -- the policy hardcodes the FP64 trap, so the wrapper does not
     # special-case it here.
     calibration = _routing_calibration
