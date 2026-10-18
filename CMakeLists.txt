@@ -19,10 +19,19 @@ execute_process(
   COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
   OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE nanobind_ROOT)
 find_package(nanobind CONFIG REQUIRED)
+
+# NumPy headers for the fast entries, from the same interpreter. FindPython's
+# NumPy component is not used: Python::NumPy links Python::Module, which would
+# bring back the version-specific python3XY library and break the abi3 module.
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" -c "import numpy; print(numpy.get_include())"
+  OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE PG_NUMPY_INCLUDE
+  COMMAND_ERROR_IS_FATAL ANY)
 find_package(OpenMP REQUIRED)
 
 nanobind_add_module(_core STABLE_ABI NB_STATIC
   src/bindings/module.cpp
+  src/bindings/fast_entry.cpp
   src/cpu/feature_detect.cpp
   src/cpu/gemm_naive.cpp
   src/cpu/pack.cpp
@@ -36,6 +45,8 @@ nanobind_add_module(_core STABLE_ABI NB_STATIC
   src/dispatch/dispatch.cpp
 )
 target_include_directories(_core PRIVATE src)
+# SYSTEM keeps the NumPy headers' own /W4 warnings out of the build log.
+target_include_directories(_core SYSTEM PRIVATE "${PG_NUMPY_INCLUDE}")
 target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
 
 # AVX2 codegen is confined to exactly these kernel translation units. The arch
@@ -142,5 +153,20 @@ endif()
 if (PG_BUILD_CEILINGS)
   add_subdirectory(tools/ceilings)
 endif()
+
+# The fast-entry TU targets the NumPy 2.0 C API, matching numpy>=2.0 at run
+# time, and records what the module was built with for _core._build_info().
+set(PG_CONFIG_CXX_FLAGS
+  "$<$<CONFIG:Release>:${CMAKE_CXX_FLAGS_RELEASE}>$<$<CONFIG:Debug>:${CMAKE_CXX_FLAGS_DEBUG}>$<$<CONFIG:RelWithDebInfo>:${CMAKE_CXX_FLAGS_RELWITHDEBINFO}>$<$<CONFIG:MinSizeRel>:${CMAKE_CXX_FLAGS_MINSIZEREL}>")
+set_source_files_properties(src/bindings/fast_entry.cpp PROPERTIES COMPILE_DEFINITIONS
+  "NPY_TARGET_VERSION=NPY_2_0_API_VERSION;NPY_NO_DEPRECATED_API=NPY_2_0_API_VERSION;PG_BUILD_COMPILER=\"${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\";PG_BUILD_CXX_FLAGS=\"${CMAKE_CXX_FLAGS} ${PG_CONFIG_CXX_FLAGS} $<JOIN:$<TARGET_PROPERTY:_core,COMPILE_OPTIONS>, >\"")
+# The target's own definitions cannot be read from a definition on one of its
+# sources (CMake rejects the self reference), so they reach the TU through a
+# generated header instead.
+file(GENERATE
+  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/build_info/$<CONFIG>/pg_build_definitions.h"
+  CONTENT "#define PG_BUILD_DEFINITIONS \"$<JOIN:$<TARGET_PROPERTY:_core,COMPILE_DEFINITIONS>, >\"\n"
+  TARGET _core)
+target_include_directories(_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/build_info/$<CONFIG>")
 
 install(TARGETS _core LIBRARY DESTINATION peregrine)
