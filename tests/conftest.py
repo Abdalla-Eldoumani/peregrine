@@ -67,7 +67,7 @@ from hypothesis import settings
 # collection instead of skipping cleanly. Best-effort and Windows-only: on the
 # CPU-only build _core has no CUDA dependency so this changes nothing, and a
 # missing CUDA_PATH simply skips. The production package wires its own import-
-# time discovery when has_cuda() lands in 04-05; this is test-harness setup.
+# time discovery; this is test-harness setup.
 if os.name == "nt":
     _cuda_bin = os.path.join(os.environ.get("CUDA_PATH", ""), "bin")
     if _cuda_bin.strip(os.sep) and os.path.isdir(_cuda_bin):
@@ -108,7 +108,7 @@ def requires_cuda():
     present, so the CUDA suite runs on the GPU build and skips with a stated
     reason on a CPU-only build or a machine without a device. Every CUDA test
     consumes this through the module-level skip below so CPU-only and the WSL/GCC
-    clone stay green. As of 04-05 this defers to the public pg.has_cuda()
+    clone stay green. This defers to the public pg.has_cuda()
     runtime chain (build flag, driver load, device count, compute capability
     >= 7.0) -- the same predicate, now owned by the package instead of composed
     by hand here; the build-flag arm keeps a distinct reason for a CPU-only build.
