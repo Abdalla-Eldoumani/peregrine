@@ -354,7 +354,7 @@ def _time_cpu(n: int, dtype) -> float:
     """Return the CPU GEMM time at size ``n`` through the native kernel."""
     a = _seeded_square(n, dtype)
     b = _seeded_square(n, dtype)
-    return _min_time(lambda: pg._matmul_native(a, b), _reps_for(n), _WARMUP)
+    return _min_time(lambda: pg._matmul_cpu(a, b), _reps_for(n), _WARMUP)
 
 
 def _gpu_warm(xa, xb, min_seconds: float, max_seconds: float) -> None:
@@ -603,7 +603,7 @@ def calibrate(force: bool = False, budget_seconds: float = 120) -> dict:
 
         cached = _load_cache(path, signature)
         if cached is not None:
-            pg._routing_calibration = cached
+            pg._install_routing_calibration(cached)
             return cached
 
     start = time.perf_counter()
@@ -637,5 +637,5 @@ def calibrate(force: bool = False, budget_seconds: float = 120) -> dict:
         payload["transfer"] = transfer
 
     _write_cache_atomic(path, payload)
-    pg._routing_calibration = payload
+    pg._install_routing_calibration(payload)
     return payload
