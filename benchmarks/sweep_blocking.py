@@ -1,4 +1,4 @@
-"""MC/KC/NC blocking sweep for the f64 BLIS kernel (CPU-04).
+"""MC/KC/NC blocking sweep for the f64 BLIS kernel.
 
 The blocking constants are loop bounds, not unroll factors, so the native
 _set_gemm_blocking hook walks the whole grid in one process; a compile-time
@@ -10,12 +10,12 @@ Two methodology points specific to a blocking sweep:
 1. OMP_NUM_THREADS / OMP_PROC_BIND / OMP_PLACES are set at the top of this file
    BEFORE peregrine is imported. The OpenMP runtime reads them once at its
    initialization, so setting them after the first parallel region measures
-   unpinned noise (RESEARCH Pitfall 8). The defaults pin 6 threads (the physical
+   unpinned noise. The defaults pin 6 threads (the physical
    core count) to cores; override with the flags to measure SMT or fewer threads.
 2. KC repartitions each output element's k accumulation, so results differ
    bitwise across KC values. Every grid point is therefore verified through
    assert_matmul_close (the single sanctioned toleranced path), never bitwise;
-   a bitwise reference would read a correct kernel as broken (RESEARCH Pitfall 4).
+   a bitwise reference would read a correct kernel as broken.
 
 Usage:
     python benchmarks/sweep_blocking.py --save benchmarks/results/tuning/sweep_refbox.json
@@ -30,7 +30,7 @@ import os
 import statistics
 import time
 
-# bench-protocol rule 8 / RESEARCH Pitfall 8: pin threads in the environment
+# bench-protocol rule 8: pin threads in the environment
 # BEFORE the first import that can touch the OpenMP runtime. setdefault so an
 # operator who exported a different OMP_NUM_THREADS to test another thread count
 # is honored rather than overridden.
