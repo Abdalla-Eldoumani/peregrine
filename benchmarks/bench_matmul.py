@@ -925,7 +925,12 @@ def protocol_manifest(*, argv: list[str], series_seed: int | None, clock, extra=
             "power_plan": info["power_profile"],
             "compiler": build.get("compiler", "unknown"),
             "compiler_flags": build.get("flags", "unknown"),
-            "openmp_runtime": os.path.basename(omp[0]["filepath"]) if omp and omp[0].get("filepath") else "unknown",
+            # threadpoolctl names the loaded runtime when it recognizes it;
+            # otherwise the build's _OPENMP value is the best record there is.
+            "openmp_runtime": (
+                os.path.basename(omp[0]["filepath"]) if omp and omp[0].get("filepath")
+                else f"_OPENMP={build['openmp']}" if build.get("openmp") else "unknown"
+            ),
             "openblas_version": blas[0].get("version") if blas else "unknown",
             "blas_core_type": blas[0].get("architecture") if blas else "unknown",
             "blas_threads": blas[0].get("num_threads") if blas else None,
