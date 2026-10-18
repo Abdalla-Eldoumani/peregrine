@@ -3,7 +3,7 @@
 bench-protocol rule 7 wants cold and warm as separate labeled series, and the
 dispatch-cost story needs the host round-trip a user actually pays, not only the
 device-resident slice. Only the device-resident "without-transfer" slice exists
-today (bench_matmul._gpu_series, the GPU-08 measurement); this file adds the
+today (bench_matmul._gpu_series, the device-resident GEMM); this file adds the
 cold/warm labeling and the with-transfer host round-trip, and saves the four
 series to a results JSON the README and plots draw from.
 
@@ -13,7 +13,7 @@ The two regimes are timed by DIFFERENT clocks, on purpose:
    so this measures device work, never a wall-clock around an async launch (rule
    12). This regime IS bench_matmul._gpu_series verbatim -- reused, not
    re-derived, so the per-size record carries the _gpu_series keys exactly and
-   07-03 consumes it as gpu_cases by construction.
+   report.py consumes it as gpu_cases by construction.
 2. with-transfer (host round-trip): wall-clocked via the CV-gated _bench. The
    round-trip crosses Python/native/CUDA three times and from_device owns the
    D2H sync, so the round-trip is SYNCHRONOUS and perf_counter is the honest
@@ -63,12 +63,12 @@ _CUPY_AVAILABLE = False
 
 
 def _without_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
-    # The device-resident regime (GPU-08): operands live on the device, the timed
+    # The device-resident regime: operands live on the device, the timed
     # region is the GEMM only, both cold and warm event-timed via
     # _cuda_time_matmul. This IS bench_matmul._gpu_series: reuse it so each record
     # carries the _gpu_series keys VERBATIM (n, gflop, cold_ms, median_ms warm,
     # gflops, cold_gflops, numpy_cpu_f32_gflops, ratio_vs_numpy_cpu_f32, reps,
-    # warmup, verified). That dict is exactly the gpu_cases shape 07-03 reads, so
+    # warmup, verified). That dict is exactly the gpu_cases shape report.py reads, so
     # do NOT re-derive or rename it here. The has_cuda() gate lives inside
     # _gpu_series, which returns [] on the OFF build before reaching
     # _cuda_time_matmul; the redundant guard here keeps this function honest about
@@ -114,7 +114,7 @@ def _with_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict
         # reference. f32 is judged against the f64 ground truth assert_matmul_close
         # recomputes, exactly like the CPU suite -- no inline rtol. Bind the
         # device handles to locals and drop them after the verify so they do not
-        # straggle to interpreter finalization (the 06-04 nanobind-leak lesson).
+        # straggle to interpreter finalization (the nanobind-leak lesson).
         xa = pg.to_device(a)
         xb = pg.to_device(b)
         got = pg.from_device(pg.matmul(xa, xb))
@@ -208,7 +208,7 @@ def _with_transfer_series(sizes: list[int], reps: int, warmup: int) -> list[dict
 
 def run(sizes: list[int], reps: int, warmup: int) -> dict:
     # The four labeled series under their two regime keys. The without-transfer
-    # regime is saved under gpu_cases (the GPU-08 source 07-03 reads as its
+    # regime is saved under gpu_cases (the source report.py reads as its
     # consumer contract); the with-transfer regime is its own key. Both omit
     # cleanly on a CPU-only build (each series function returns []). The
     # methodology block records the cupy-absent denominator and the timing
@@ -237,7 +237,7 @@ def run(sizes: list[int], reps: int, warmup: int) -> dict:
     }
     gpu_cases = _without_transfer_series(sizes, reps, warmup)
     if gpu_cases:
-        # The without-transfer regime under gpu_cases: the GPU-08 source 07-03
+        # The without-transfer regime under gpu_cases: the device-resident source report.py
         # consumes, carrying the _gpu_series shape verbatim plus the cold/warm
         # label.
         results["gpu_cases"] = gpu_cases
