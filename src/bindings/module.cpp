@@ -6,6 +6,7 @@
 #include <new>
 #include <type_traits>
 
+#include "bindings/fast_entry.hpp"
 #include "core/common.hpp"
 #include "cpu/feature_detect.hpp"
 #include "cpu/gemm_blis.hpp"
@@ -102,186 +103,148 @@ void fused_scaled_relu_device(const T* x, T* out, int64_t n, T scale);
 
 namespace {
 
-// Zero-copy in, owned allocation out. The capsule frees the result buffer when
-// the returned ndarray is collected on the Python side.
+// Host operands arrive as zero-copy views and every host result is written into
+// a caller-supplied ndarray the wrapper allocated with np.empty (or the user
+// passed as out=), so NumPy owns all host result memory and no capsule is
+// involved. The wrapper validates first; the extents are re-checked here so a
+// direct _core call can never write past the caller's buffer. Every array
+// argument is registered noconvert: nanobind's second overload pass would
+// otherwise astype() a mismatched array into a temporary, silently computing in
+// another dtype or into a copy the caller never sees.
 template <typename T>
-nb::ndarray<nb::numpy, T, nb::ndim<2>> matmul_typed(
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a,
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& b) {
+using host_in = nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+template <typename T>
+using host_out = nb::ndarray<T, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+template <typename T>
+using host_out1 = nb::ndarray<T, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 
+std::string shape_str(int64_t r, int64_t c) {
+    return "(" + std::to_string(r) + ", " + std::to_string(c) + ")";
+}
+
+template <typename A>
+std::string shape_str(const A& x) {
+    return shape_str(static_cast<int64_t>(x.shape(0)),
+                     static_cast<int64_t>(x.shape(1)));
+}
+
+template <typename T>
+void check_out(const char* op, const host_out<T>& out, int64_t m, int64_t n) {
+    if (static_cast<int64_t>(out.shape(0)) != m ||
+        static_cast<int64_t>(out.shape(1)) != n) {
+        throw pg::shape_error(std::string(op) +
+                              ": out must be a writeable C-contiguous array of shape " +
+                              shape_str(m, n) + ", got shape " + shape_str(out));
+    }
+}
+
+template <typename T>
+void check_same_shape(const char* op, const host_in<T>& x, const host_in<T>& y) {
+    if (x.shape(0) != y.shape(0) || x.shape(1) != y.shape(1)) {
+        throw pg::shape_error(std::string(op) +
+                              ": operands must have the same shape, got " +
+                              shape_str(x) + " and " + shape_str(y));
+    }
+}
+
+template <typename T>
+void matmul_into(const host_in<T>& a, const host_in<T>& b, const host_out<T>& out) {
     const pg::gemm_dims d = pg::check_matmul_dims(
         static_cast<int64_t>(a.shape(0)), static_cast<int64_t>(a.shape(1)),
         static_cast<int64_t>(b.shape(0)), static_cast<int64_t>(b.shape(1)));
-
-    T* out = new T[static_cast<size_t>(d.m) * static_cast<size_t>(d.n)];
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
-
-    {
-        // The kernel never touches Python objects, so the GIL drops for the
-        // whole compute. This is what lets callers thread around the library.
-        nb::gil_scoped_release release;
-        pg::dispatch::matmul<T>(a.data(), b.data(), out, d.m, d.k, d.n);
-    }
-
-    const size_t shape[2] = {static_cast<size_t>(d.m), static_cast<size_t>(d.n)};
-    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+    check_out("matmul", out, d.m, d.n);
+    // The kernel never touches Python objects, so the GIL drops for the whole
+    // compute. This is what lets callers thread around the library.
+    nb::gil_scoped_release release;
+    pg::dispatch::matmul<T>(a.data(), b.data(), out.data(), d.m, d.k, d.n);
 }
 
-// Zero-copy in, owned (n, m) copy out: the same capsule pattern as matmul with
-// the output extents swapped. transpose deliberately returns an owned buffer,
-// not a view, so a caller can never alias the input through the result.
 template <typename T>
-nb::ndarray<nb::numpy, T, nb::ndim<2>> transpose_typed(
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a) {
-
+void transpose_into(const host_in<T>& a, const host_out<T>& out) {
     const int64_t m = static_cast<int64_t>(a.shape(0));
     const int64_t n = static_cast<int64_t>(a.shape(1));
-
-    T* out = new T[static_cast<size_t>(m) * static_cast<size_t>(n)];
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
-
-    {
-        nb::gil_scoped_release release;
-        pg::dispatch::transpose<T>(a.data(), out, m, n);
-    }
-
-    const size_t shape[2] = {static_cast<size_t>(n), static_cast<size_t>(m)};
-    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+    check_out("transpose", out, n, m);
+    nb::gil_scoped_release release;
+    pg::dispatch::transpose<T>(a.data(), out.data(), m, n);
 }
 
 // Full reduction: returns the scalar in the input dtype. nanobind marshals it
 // to a Python float; the wrapper casts it back to the result dtype (f32 round
-// trips losslessly through a double-precision Python float). No allocation, so
-// no capsule, but the GIL still drops around the kernel for consistency and to
-// keep a large reduction from blocking other host threads.
+// trips losslessly through a double-precision Python float). The GIL still
+// drops so a large reduction does not block other host threads.
 template <typename T>
-T sum_all_typed(
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a) {
-
+T sum_all_typed(const host_in<T>& a) {
     const int64_t m = static_cast<int64_t>(a.shape(0));
     const int64_t n = static_cast<int64_t>(a.shape(1));
-
-    T result;
-    {
-        nb::gil_scoped_release release;
-        result = pg::dispatch::sum_all<T>(a.data(), m, n);
-    }
-    return result;
+    nb::gil_scoped_release release;
+    return pg::dispatch::sum_all<T>(a.data(), m, n);
 }
 
-// Axis reduction into an owned 1-D buffer: length n for axis 0 (reduce over
-// rows), length m for axis 1 (reduce over columns). The wrapper validates axis
-// is 0 or 1 before calling, so the binding trusts it and the int crosses
-// plainly; None-handling and the axis error wording live in the wrapper.
+// axis 0 reduces over rows into a length-n vector, axis 1 over columns into a
+// length-m vector.
 template <typename T>
-nb::ndarray<nb::numpy, T, nb::ndim<1>> sum_axis_typed(
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a,
-    int axis) {
-
+void sum_axis_into(const host_in<T>& a, int axis, const host_out1<T>& out) {
     const int64_t m = static_cast<int64_t>(a.shape(0));
     const int64_t n = static_cast<int64_t>(a.shape(1));
+    if (axis != 0 && axis != 1) {
+        throw pg::shape_error("sum: axis " + std::to_string(axis) +
+                              " is out of bounds for 2-dimensional input");
+    }
     const int64_t len = (axis == 0) ? n : m;
-
-    T* out = new T[static_cast<size_t>(len)];
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
-
-    {
-        nb::gil_scoped_release release;
-        pg::dispatch::sum_axis<T>(a.data(), out, m, n, axis);
+    if (static_cast<int64_t>(out.shape(0)) != len) {
+        throw pg::shape_error("sum: out must be a writeable C-contiguous array of shape (" +
+                              std::to_string(len) + ",), got shape (" +
+                              std::to_string(out.shape(0)) + ",)");
     }
-
-    const size_t shape[1] = {static_cast<size_t>(len)};
-    return nb::ndarray<nb::numpy, T, nb::ndim<1>>(out, 1, shape, owner);
+    nb::gil_scoped_release release;
+    pg::dispatch::sum_axis<T>(a.data(), out.data(), m, n, axis);
 }
 
-// Fused elementwise: capsule-owned output after the overflow guard, GIL dropped
-// around the kernel. The wrapper sends only validated, same-shape, same-dtype,
-// C-contiguous host operands here, so each binding trusts shape and validates
-// only contiguity/dtype via the nanobind view type (as sum_axis_typed trusts the
-// validated axis). checked_bytes runs before every new T[]: an int64 m*n*sizeof(T)
-// product that overflows would otherwise size a truncated buffer the full-extent
-// kernel write then overruns (a heap overflow) -- it throws shape_error
-// (-> ValueError) on overflow or a negative extent first. n is the flat element
-// count m*n; all index math is int64_t.
-
-// scaled_relu(x, scale): one array + one scalar. maximum(scale*x, 0) elementwise,
-// NaN-propagating (the kernel owns the np.maximum-matching idiom).
+// The fused kernels compute each out[i] from the inputs at the same index i
+// only, reading before writing within every vector block and scalar step, so
+// out may be exactly an input (same pointer, same extent) for an in-place
+// update. Any other overlap would read elements another block already wrote;
+// the wrapper rejects it. Scalars cross as double and narrow to T here: a
+// float scalar argument would make nanobind's first pass reject any double not
+// exactly representable in float32, and its second pass would then convert the
+// arrays to float64, returning a float64 result for float32 operands.
 template <typename T>
-nb::ndarray<nb::numpy, T, nb::ndim<2>> scaled_relu_typed(
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& x,
-    T scale) {
-
+void axpby_into(const host_in<T>& x, const host_in<T>& y, double a, double b,
+                const host_out<T>& out) {
+    check_same_shape("axpby", x, y);
     const int64_t m = static_cast<int64_t>(x.shape(0));
     const int64_t n = static_cast<int64_t>(x.shape(1));
-    pg::checked_bytes(m, n, static_cast<int64_t>(sizeof(T)));
-
-    T* out = new T[static_cast<size_t>(m) * static_cast<size_t>(n)];
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
-
-    {
-        nb::gil_scoped_release release;
-        pg::dispatch::fused_scaled_relu<T>(x.data(), out, m * n, scale);
-    }
-
-    const size_t shape[2] = {static_cast<size_t>(m), static_cast<size_t>(n)};
-    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+    check_out("axpby", out, m, n);
+    nb::gil_scoped_release release;
+    pg::dispatch::fused_axpby<T>(x.data(), y.data(), out.data(), m * n,
+                                 static_cast<T>(a), static_cast<T>(b));
 }
 
-// axpby(x, y, a, b): two same-shape arrays + two scalars. a*x + b*y elementwise.
-// The two inputs share the wrapper-guaranteed shape, so the binding takes the
-// extents from x and does NOT call check_matmul_dims (there are no inner
-// dimensions to conform; the same-shape rule is enforced in the wrapper).
 template <typename T>
-nb::ndarray<nb::numpy, T, nb::ndim<2>> axpby_typed(
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& x,
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& y,
-    T a, T b) {
-
+void fma3_into(const host_in<T>& x, const host_in<T>& y, const host_in<T>& z,
+               const host_out<T>& out) {
+    check_same_shape("fma3", x, y);
+    check_same_shape("fma3", x, z);
     const int64_t m = static_cast<int64_t>(x.shape(0));
     const int64_t n = static_cast<int64_t>(x.shape(1));
-    pg::checked_bytes(m, n, static_cast<int64_t>(sizeof(T)));
-
-    T* out = new T[static_cast<size_t>(m) * static_cast<size_t>(n)];
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
-
-    {
-        nb::gil_scoped_release release;
-        pg::dispatch::fused_axpby<T>(x.data(), y.data(), out, m * n, a, b);
-    }
-
-    const size_t shape[2] = {static_cast<size_t>(m), static_cast<size_t>(n)};
-    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+    check_out("fma3", out, m, n);
+    nb::gil_scoped_release release;
+    pg::dispatch::fused_fma3<T>(x.data(), y.data(), z.data(), out.data(), m * n);
 }
 
-// fma3(x, y, z): three same-shape arrays. x*y + z elementwise in a single
-// rounding (the kernel's std::fma / _mm256_fmadd), more accurate than the
-// two-rounding unfused expression. All three share the wrapper-guaranteed shape,
-// so the binding takes the extents from x.
 template <typename T>
-nb::ndarray<nb::numpy, T, nb::ndim<2>> fma3_typed(
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& x,
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& y,
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& z) {
-
+void scaled_relu_into(const host_in<T>& x, double scale, const host_out<T>& out) {
     const int64_t m = static_cast<int64_t>(x.shape(0));
     const int64_t n = static_cast<int64_t>(x.shape(1));
-    pg::checked_bytes(m, n, static_cast<int64_t>(sizeof(T)));
-
-    T* out = new T[static_cast<size_t>(m) * static_cast<size_t>(n)];
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
-
-    {
-        nb::gil_scoped_release release;
-        pg::dispatch::fused_fma3<T>(x.data(), y.data(), z.data(), out, m * n);
-    }
-
-    const size_t shape[2] = {static_cast<size_t>(m), static_cast<size_t>(n)};
-    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+    check_out("scaled_relu", out, m, n);
+    nb::gil_scoped_release release;
+    pg::dispatch::fused_scaled_relu<T>(x.data(), out.data(), m * n,
+                                       static_cast<T>(scale));
 }
 
 #if defined(PG_HAS_CUDA)
-// Host-pointer device GEMM for the GPU correctness suite: same zero-copy-in,
-// capsule-owned-out shape as matmul_typed, but the kernel is the cuBLAS device
+// Host-pointer device GEMM for the GPU correctness suite: zero-copy in,
+// capsule-owned out, and the kernel is the cuBLAS device
 // GEMM which stages the host operands to the device, computes, and copies back.
 // Underscore-private and CUDA-build-only: the public device path is matmul on
 // pg.Array; this exists so f32/f64 GPU correctness can be proven against the same
@@ -730,39 +693,44 @@ float time_fused_chain_entry(const Array& x, const Array& y, const Array& z,
 
 NB_MODULE(_core, m) {
     m.doc() = "peregrine native core";
+    if (pg::bindings::add_fast_entries(m.ptr()) < 0) {
+        throw nb::python_error();
+    }
 
-    m.def("matmul", &matmul_typed<double>, nb::arg("a"), nb::arg("b"));
-    m.def("matmul", &matmul_typed<float>, nb::arg("a"), nb::arg("b"));
+    // Host entries, double before float in every set: the first matching
+    // overload wins, and a float64 array must never bind the float32 overload
+    // (a silent narrowing). noconvert on every array argument keeps nanobind
+    // from converting a mismatched array instead of rejecting it.
+    const auto arr = [](const char* name) { return nb::arg(name).noconvert(); };
 
-    // double before float in every set: the first matching overload wins, and a
-    // float64 array must never bind the float32 overload (a silent narrowing).
-    m.def("transpose", &transpose_typed<double>, nb::arg("a"));
-    m.def("transpose", &transpose_typed<float>, nb::arg("a"));
+    m.def("matmul_into", &matmul_into<double>, arr("a"), arr("b"), arr("out"));
+    m.def("matmul_into", &matmul_into<float>, arr("a"), arr("b"), arr("out"));
 
-    m.def("sum_all", &sum_all_typed<double>, nb::arg("a"));
-    m.def("sum_all", &sum_all_typed<float>, nb::arg("a"));
+    m.def("transpose_into", &transpose_into<double>, arr("a"), arr("out"));
+    m.def("transpose_into", &transpose_into<float>, arr("a"), arr("out"));
 
-    m.def("sum_axis", &sum_axis_typed<double>, nb::arg("a"), nb::arg("axis"));
-    m.def("sum_axis", &sum_axis_typed<float>, nb::arg("a"), nb::arg("axis"));
+    m.def("sum_all", &sum_all_typed<double>, arr("a"));
+    m.def("sum_all", &sum_all_typed<float>, arr("a"));
 
-    // Fused elementwise, double before float in every set: a float64 array must
-    // never bind the float32 overload (a silent narrowing). The wrapper sends
-    // only validated same-shape same-dtype host operands; these CPU overloads
-    // carry the host fused path. The device-resident Array overloads are
-    // registered further below. No new exception translator: checked_bytes throws
-    // shape_error, which the existing translator maps to ValueError.
-    m.def("axpby", &axpby_typed<double>, nb::arg("x"), nb::arg("y"), nb::arg("a"),
-          nb::arg("b"));
-    m.def("axpby", &axpby_typed<float>, nb::arg("x"), nb::arg("y"), nb::arg("a"),
-          nb::arg("b"));
+    m.def("sum_axis_into", &sum_axis_into<double>, arr("a"), nb::arg("axis"),
+          arr("out"));
+    m.def("sum_axis_into", &sum_axis_into<float>, arr("a"), nb::arg("axis"),
+          arr("out"));
 
-    m.def("fma3", &fma3_typed<double>, nb::arg("x"), nb::arg("y"), nb::arg("z"));
-    m.def("fma3", &fma3_typed<float>, nb::arg("x"), nb::arg("y"), nb::arg("z"));
+    m.def("axpby_into", &axpby_into<double>, arr("x"), arr("y"), nb::arg("a"),
+          nb::arg("b"), arr("out"));
+    m.def("axpby_into", &axpby_into<float>, arr("x"), arr("y"), nb::arg("a"),
+          nb::arg("b"), arr("out"));
 
-    m.def("scaled_relu", &scaled_relu_typed<double>, nb::arg("x"),
-          nb::arg("scale"));
-    m.def("scaled_relu", &scaled_relu_typed<float>, nb::arg("x"),
-          nb::arg("scale"));
+    m.def("fma3_into", &fma3_into<double>, arr("x"), arr("y"), arr("z"),
+          arr("out"));
+    m.def("fma3_into", &fma3_into<float>, arr("x"), arr("y"), arr("z"),
+          arr("out"));
+
+    m.def("scaled_relu_into", &scaled_relu_into<double>, arr("x"),
+          nb::arg("scale"), arr("out"));
+    m.def("scaled_relu_into", &scaled_relu_into<float>, arr("x"),
+          nb::arg("scale"), arr("out"));
 
     m.def("cpu_features", [] {
         const auto& f = pg::cpu::detect();
@@ -910,11 +878,10 @@ NB_MODULE(_core, m) {
         nb::arg("x"));
 
     // The REQUIRED device-resident matmul: matmul(Array, Array) -> Array,
-    // device-in/device-out, dtype-dispatched. Registered as a matmul overload
-    // AFTER the host ndarray overloads, so a host pair still binds the CPU path
-    // and a device pair binds this one. The wrapper consumes this for the
-    // device-resident routing; a test round-trips it against the CPU result
-    // through assert_matmul_close.
+    // device-in/device-out, dtype-dispatched. Host pairs go through
+    // matmul_into instead. The wrapper consumes this for the device-resident
+    // routing; a test round-trips it against the CPU result through
+    // assert_matmul_close.
     m.def("matmul", &matmul_device, nb::arg("a"), nb::arg("b"));
 
     // The cudaEvent-timed device-matmul timer (the primitive the bench consumes).
@@ -926,10 +893,9 @@ NB_MODULE(_core, m) {
     m.def("_cuda_time_matmul", &time_matmul_entry, nb::arg("x"), nb::arg("y"),
           nb::arg("reps"), nb::arg("warmups"));
 
-    // The device-resident fused ops, registered as Array overloads AFTER the host
-    // ndarray overloads above (axpby/fma3/scaled_relu) so a host operand binds the
-    // CPU path and a pg.Array operand binds these. device-in/device-out ->
-    // pg.Array. The wrapper routes here only when every operand is a pg.Array
+    // The device-resident fused ops; host operands go through the *_into entries
+    // above. device-in/device-out -> pg.Array. The wrapper routes here only when
+    // every operand is a pg.Array
     // (the device residency branch); single-stream, no cross-stream fence (the v1
     // device-resident-only design). a, b, scale arrive as Python floats (double);
     // the f32 path narrows them, like the CPU axpby/scaled_relu.
