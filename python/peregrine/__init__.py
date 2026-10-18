@@ -7,6 +7,7 @@ promotion, contiguity normalization, and clear errors.
 
 from __future__ import annotations
 
+import functools
 import os
 import threading
 import warnings
@@ -246,7 +247,9 @@ def _mixed_residency_msg(op: str) -> str:
 # is two bytecode ops -- a thread switch between them under concurrent device
 # failures would let two threads both warn, breaking the literal once-per-session
 # claim. The lock is uncontended on the normal path (transfers/GEMM are the hot
-# work, not fallback), so it costs nothing measurable.
+# work, not fallback), so it costs nothing measurable. The auto router reads the
+# flag too and stops staging host work to the device once it is set, so a device
+# that failed once is not handed every later product only to fail again.
 _cuda_fallback_lock = threading.Lock()
 _cuda_fallback_warned = False
 
@@ -265,6 +268,13 @@ _backend = os.environ.get("PEREGRINE_BACKEND", "auto")
 if _backend not in policy.BACKENDS:
     _backend = "auto"
 
+# The calibration the auto router uses, loaded on the first auto dispatch that
+# could reach a GPU and kept for the session, so later dispatches do no file
+# system work. None is a real value here ("no usable cache"), hence the
+# separate not-loaded-yet sentinel. calibrate() replaces it with what it wrote.
+_UNSET = object()
+_routing_calibration = _UNSET
+
 
 def _cuda_error_name(exc: Exception) -> str:
     """Extract the cuda error name from a native cuda_error message.
@@ -280,6 +290,7 @@ def _cuda_error_name(exc: Exception) -> str:
     return msg.split(" at ", 1)[0].strip() or msg
 
 
+@functools.cache
 def _cuda_unavailable_reason() -> str:
     """Return why the cuda backend is unavailable, or "" when it is usable.
 
@@ -287,6 +298,8 @@ def _cuda_unavailable_reason() -> str:
     ``cuda backend requested but <reason>`` RuntimeError: "no build", "no
     device", "driver too old". Composed from the build flag and the cheap device
     probe (no context build, no driver load beyond the probe's own count query).
+    Memoized per process: every auto dispatch and every transfer asks, and the
+    answer cannot change while the process runs. _reset_routing_state() clears it.
     """
     if not _has_cuda_build():
         return "no build"
@@ -323,11 +336,25 @@ def has_cuda() -> bool:
     >>> isinstance(pg.has_cuda(), bool)
     True
     """
-    # The probe runs lazily, on call, never at import: it queries the device
-    # count and compute capability but does not build the context (no streams,
-    # handles, or mempool), so importing peregrine pays nothing for it and the
-    # <50ms import budget holds.
+    # The probe runs lazily, on the first call, never at import: it queries the
+    # device count and compute capability but does not build the context (no
+    # streams, handles, or mempool), so importing peregrine pays nothing for it
+    # and the <50ms import budget holds. Later calls reuse the first answer.
     return _cuda_unavailable_reason() == ""
+
+
+def _reset_routing_state() -> None:
+    # Drops every per-process routing memo so the next dispatch re-derives it.
+    # Tests point PEREGRINE_CACHE_DIR somewhere new per test and stub the device,
+    # and a memo from the previous test would otherwise route this one.
+    # The warn-once fallback flag stays set: it records a real device failure,
+    # and clearing it would let a failing device take auto-routed work again.
+    global _routing_calibration
+    _routing_calibration = _UNSET
+    _cuda_unavailable_reason.cache_clear()
+    from .calibrate import _machine_signature
+
+    _machine_signature.cache_clear()
 
 
 def set_backend(name: str) -> None:
@@ -343,9 +370,10 @@ def set_backend(name: str) -> None:
     present, so the failure surfaces here at the set rather than later mid-matmul.
 
     This is one of only two functions that change global state (the other is
-    calibrate). It sets a process-wide module global; it does not build a CUDA
-    context, read the calibration cache, or run any measurement, so it is cheap
-    and the cache read still happens lazily on the first dispatch.
+    calibrate). It sets a process-wide module global and forgets the calibration
+    the auto router loaded, so the next auto dispatch reads the cache again; it
+    does not build a CUDA context, read the calibration cache, or run any
+    measurement itself, so it is cheap.
 
     Parameters
     ----------
@@ -388,8 +416,9 @@ def set_backend(name: str) -> None:
         reason = _cuda_unavailable_reason()
         if reason:
             raise RuntimeError(f"cuda backend requested but {reason}")
-    global _backend
+    global _backend, _routing_calibration
     _backend = name
+    _routing_calibration = _UNSET
 
 
 def to_device(a) -> Array:
@@ -532,17 +561,29 @@ def _host_backend_for(a_arr, b_arr) -> str:
     if _backend == "cpu":
         return "cpu"
     if _backend == "cuda":
+        # PEREGRINE_BACKEND=cuda is read at import, where raising would make the
+        # package unimportable, so the device check set_backend("cuda") makes
+        # happens here instead, with the same message.
+        reason = _cuda_unavailable_reason()
+        if reason:
+            raise RuntimeError(f"cuda backend requested but {reason}")
         return "cuda"
-    # auto
-    if not has_cuda():
+    # auto. After a device failure this session has already been told the work
+    # falls back to the cpu, so the device gets no more auto-routed work.
+    if _cuda_fallback_warned or not has_cuda():
         return "cpu"
-    # A device is present: read the calibration cache lazily (first such dispatch)
-    # and let the pure policy decide per measured (dtype, n) crossover, paying the
-    # H2D+D2H round trip for a host pair. f64 never reaches the GPU -- the policy
-    # hardcodes the FP64 trap, so the wrapper does not special-case it here.
-    from .calibrate import _machine_signature
+    # A device is present: let the pure policy decide per measured (dtype, n)
+    # crossover, paying the H2D+D2H round trip for a host pair. f64 never reaches
+    # the GPU -- the policy hardcodes the FP64 trap, so the wrapper does not
+    # special-case it here.
+    global _routing_calibration
+    calibration = _routing_calibration
+    if calibration is _UNSET:
+        from .calibrate import _machine_signature
 
-    calibration = policy._load_cache(policy._cache_path(), _machine_signature())
+        signature = _machine_signature()
+        calibration = policy._load_cache(policy._cache_path(signature), signature)
+        _routing_calibration = calibration
     dtype = a_arr.dtype.name
     m, k = a_arr.shape
     n = b_arr.shape[1]
