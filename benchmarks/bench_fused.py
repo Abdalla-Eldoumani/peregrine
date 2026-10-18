@@ -1,4 +1,4 @@
-"""FUSE-05: the 3-op fused chain at 8M float32, >= 2x NumPy on the floor.
+"""The 3-op fused chain at 8M float32, >= 2x NumPy on the floor.
 
 The chain is scaled_relu(fma3(axpby(x, y, a, b), z)) -- one fused pass per op
 where NumPy materializes a temporary at every step. At a memory-bound size the
@@ -15,10 +15,10 @@ Methodology, in order of importance (the bench-protocol skill is the law):
    background antivirus on this machine preempts an OpenMP worker at the
    fork/join barrier and drags the median/max of every multi-threaded CPU timing
    (verified up to 670 ms on a 3 ms kernel); the floor is the noise-free best
-   case and the honest statistic, exactly as Phases 3-5 quote it. CV is reported
-   as a readout only -- it WILL exceed 5% here; Phase 7 owns the CV gate.
+   case and the honest statistic, as every CPU number here is quoted. CV is reported
+   as a readout only -- it WILL exceed 5% here and is not gated in this script.
 3. The GPU number is device-resident and cudaEvent-timed via _cuda_time_fused
-   (the 3-operand chain timer from plan 04): operands live on the device, the
+   (the 3-operand chain timer): operands live on the device, the
    timed region is the chain only (no H2D/D2H), so it measures device work and is
    immune to the CPU/AV noise.
 4. The CPU and GPU series time the IDENTICAL chain composition (the same three
@@ -110,12 +110,12 @@ def _make_operands(elems: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def _cpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
-    # The CPU FUSE-05 series, quoted on the FLOOR. Both the fused chain and the
+    # The CPU chain series, quoted on the FLOOR. Both the fused chain and the
     # NumPy chain are timed through _bench; the speedup is numpy_min / pg_min (the
     # floor ratio), NOT a median ratio -- the AV-vs-OpenMP noise makes the median
     # meaningless on this machine. Verified ONCE per size before timing via
     # assert_fused_close against the unfused NumPy chain; a verified-false series
-    # is never recorded. Run this on the OFF build (CONTEXT): no _cuda_time_fused
+    # is never recorded. Run this on the OFF build: no _cuda_time_fused
     # reference is reachable here, so the script imports and runs CPU-only clean.
     series = []
     for elems in sizes:
@@ -142,9 +142,9 @@ def _cpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
             "constants": {"a": A, "b": B, "scale": SCALE},
             "peregrine": pg_t,
             "numpy": numpy_t,
-            # The quoted FUSE-05 CPU number: the floor (min) ratio. The median
+            # The quoted CPU chain number: the floor (min) ratio. The median
             # ratio is recorded too, but only as a noise readout -- it is NOT the
-            # claim (Pitfall 2: the median is dragged by AV-vs-OpenMP preemption).
+            # claim (the median is dragged by AV-vs-OpenMP preemption).
             "speedup_floor": speedup_floor,
             "speedup_median_readout": numpy_t["median_s"] / pg_t["median_s"],
             "statistic": "floor(min)",
@@ -170,13 +170,13 @@ def _cpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
 
 
 def _gpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
-    # The device-resident GPU FUSE-05 series, cudaEvent-timed. Gated on
+    # The device-resident GPU chain series, cudaEvent-timed. Gated on
     # has_cuda() so a CPU-only build (or a machine without a usable device) omits
     # it and NO pg._core._cuda_time_fused reference is ever reached on the OFF
     # build -- that entry does not exist there. This mirrors bench_matmul._gpu_series,
     # which returns [] before touching _cuda_time_matmul. Inside the gate: operands
     # are device-resident (to_device ONCE, outside any timed region), verified ONCE
-    # before timing, then the chain is event-timed transfer-free via the plan-04
+    # before timing, then the chain is event-timed transfer-free via the
     # 3-operand chain timer. Same chain + same constants as the CPU series above.
     if not pg.has_cuda():
         return []
@@ -199,14 +199,14 @@ def _gpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
         got = pg.from_device(dout)
         assert_fused_close(got, _numpy_chain(x, y, z))
         # Release the device handles the verify pass created before timing so they
-        # do not straggle to interpreter finalization (the 06-04 nanobind-leak
+        # do not straggle to interpreter finalization (the nanobind-leak
         # lesson: bind device Arrays to locals and drop them deterministically).
         del dt, dout, got
 
         # The timed region is the device chain only (no transfer). _cuda_time_fused
         # runs warmups then reps of axpby->fma3->scaled_relu on compute-stream
         # scratch inside a cudaEvent pair and returns warm ms PER REP for the whole
-        # chain. Device-side timing is immune to the CPU/AV noise (RESEARCH).
+        # chain. Device-side timing is immune to the CPU/AV noise.
         warm_ms = pg._core._cuda_time_fused(xd, yd, zd, reps, warmup)
         # Cold: a single event-timed chain before the clocks warm.
         cold_ms = pg._core._cuda_time_fused(xd, yd, zd, 1, 0)
@@ -249,7 +249,7 @@ def _gpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
         # Release the operand device handles before the next size's to_device so a
         # multi-size sweep does not hold three prior-iteration buffers (and the
         # final iteration's operands do not straggle to interpreter finalization,
-        # the 06-04 nanobind leaked-instance warning the verify temporaries above
+        # the nanobind leaked-instance warning the verify temporaries above
         # are already dropped to avoid).
         del xd, yd, zd
     return series
@@ -258,12 +258,12 @@ def _gpu_chain_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
 def run(sizes: list[int], reps: int, warmup: int) -> dict:
     results = {
         "manifest": _machine_manifest(),
-        "benchmark": "fuse-05",
+        "benchmark": "fused-chain",
         "chain": "scaled_relu(fma3(axpby(x,y,a,b),z))",
         "constants": {"a": A, "b": B, "scale": SCALE},
         "cpu_cases": _cpu_chain_series(sizes, reps, warmup),
     }
-    # The device-resident GPU chain series (the FUSE-05 GPU number) runs over the
+    # The device-resident GPU chain series (the quoted GPU chain number) runs over the
     # same sizes, event-timed and transfer-free; omitted cleanly on a CPU-only
     # build or a machine without a usable device. Reported under its own key so the
     # CPU floor cases are never conflated with device-resident GPU numbers.
@@ -275,7 +275,7 @@ def run(sizes: list[int], reps: int, warmup: int) -> dict:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
-    # FUSE-05 is the 8M-f32 chain; the size grid defaults to that one point but
+    # The quoted chain is 8M f32; the size grid defaults to that one point but
     # accepts more for exploration. Sizes are element counts (the chain is 1-D in
     # spirit; _make_operands factors each into a near-square 2-D array).
     p.add_argument("--sizes", type=int, nargs="+", default=[8_000_000])
