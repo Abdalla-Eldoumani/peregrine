@@ -138,19 +138,19 @@ def test_report_render_round_trip():
     ratio = scaling["ratio_6_vs_1_floor"]
     assert f"{ratio:.2f}" in report_text
 
-    # The small-matrix f32 losses from cpu06_f32_refbox.json cases speedup_vs_numpy.
+    # The small-matrix f32 losses: speedup_vs_numpy of every small-matmul case.
     cpu06 = json.load(
-        open(os.path.join(report.RESULTS_DIR, "cpu06_f32_refbox.json"))
+        open(os.path.join(report.RESULTS_DIR, "refbox_small_matmul_f32_v300.json"))
     )
     for case in cpu06["cases"]:
         assert f"{case['speedup_vs_numpy']:.2f}" in report_text
 
     # The fused CPU and GPU chain speedups from the fused JSON.
     fuse_cpu = json.load(
-        open(os.path.join(report.RESULTS_DIR, "fuse05_cpu_f32_refbox.json"))
+        open(os.path.join(report.RESULTS_DIR, "refbox_fused_chain_cpu_f32_v300.json"))
     )
     fuse_gpu = json.load(
-        open(os.path.join(report.RESULTS_DIR, "fuse05_gpu_f32_refbox.json"))
+        open(os.path.join(report.RESULTS_DIR, "refbox_fused_chain_gpu_f32_v300.json"))
     )
     assert f"{fuse_cpu['cpu_cases'][0]['speedup_floor']:.2f}" in report_text
     assert (
@@ -365,7 +365,7 @@ def test_readme_hygiene_helper():
     planning_tok = "." + "plan" + "ning"
     doc_tok = _C.upper() + "." + "md"
     assert readme_hygiene("plain technical prose with no internal path") == []
-    assert planning_tok in readme_hygiene(f"see {planning_tok}/STATE.md for details")
+    assert planning_tok in readme_hygiene(f"see {planning_tok}/" + "STATE" + ".md for details")
     assert doc_tok in readme_hygiene(f"the rule is in {doc_tok}")
 
 
@@ -415,16 +415,16 @@ def test_readme_round_trip_closure():
         open(os.path.join(report.RESULTS_DIR, "tuning", "scaling_refbox.json"))
     )
     cpu06 = json.load(
-        open(os.path.join(report.RESULTS_DIR, "cpu06_f32_refbox.json"))
+        open(os.path.join(report.RESULTS_DIR, "refbox_small_matmul_f32_v300.json"))
     )
     gpu = json.load(
         open(os.path.join(report.RESULTS_DIR, "refbox_gpu_matrix.json"))
     )
     fuse_cpu = json.load(
-        open(os.path.join(report.RESULTS_DIR, "fuse05_cpu_f32_refbox.json"))
+        open(os.path.join(report.RESULTS_DIR, "refbox_fused_chain_cpu_f32_v300.json"))
     )
     fuse_gpu = json.load(
-        open(os.path.join(report.RESULTS_DIR, "fuse05_gpu_f32_refbox.json"))
+        open(os.path.join(report.RESULTS_DIR, "refbox_fused_chain_gpu_f32_v300.json"))
     )
 
     n2048 = next(c for c in matmul_f64["cases"] if c["n"] == 2048)
@@ -451,7 +451,7 @@ def test_readme_has_required_sections():
     assert "PG_ENABLE_CUDA=ON" in text  # the CUDA build install
     assert "pip install -e ." in text  # the CPU-only default install
     assert "CUDA Toolkit 12.8" in text  # the CUDA version note
-    # The quickstart surface (every public op the plan names).
+    # The quickstart surface (every public op the README documents).
     for op in (
         "matmul",
         "transpose",
