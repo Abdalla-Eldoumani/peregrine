@@ -95,6 +95,22 @@ def test_zero_copy_strided_inputs_take_copy_path():
         assert_matmul_close(pg.matmul(view, b), view @ b, view, b)
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_unaligned_inputs_take_copy_path(dtype):
+    # A C-contiguous array at an odd byte offset is still unaligned, and the
+    # kernels must never load a misaligned element.
+    rng = np.random.default_rng(0)
+    item = np.dtype(dtype).itemsize
+    raw = np.frombuffer(bytearray(8 * 8 * item + 1), dtype=np.uint8)
+    a = raw[1:].view(dtype).reshape(8, 8)
+    a[...] = rng.standard_normal((8, 8))
+    assert a.flags.c_contiguous and not a.flags.aligned
+    normalized = pg._normalize(a, a.dtype)
+    assert normalized.flags.aligned and normalized.flags.c_contiguous
+    b = rng.standard_normal((8, 8)).astype(dtype)
+    assert_matmul_close(pg.matmul(a, b), a @ b, a, b)
+
+
 def test_zero_sized_promotes_dtype():
     a = np.zeros((0, 4), dtype=np.int64)
     b = np.zeros((4, 3), dtype=np.int64)
