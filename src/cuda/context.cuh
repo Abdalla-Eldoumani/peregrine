@@ -55,10 +55,12 @@ Context& context();
 // Cheap device-presence probe that does NOT build the full Context. has_cuda and
 // the requires_cuda test gate must answer "is a usable device here" without paying
 // stream/handle/pool creation, so this is separate from context() on purpose: it
-// runs cudaGetDeviceCount and reads compute capability, nothing
-// more. Returns the CUDA-free verdict POD (present + cc + reason). present is
-// true only when the driver loads, a device exists, and its compute capability
-// is >= 7.0; reason names the failure otherwise.
+// runs cudaGetDeviceCount and reads compute capability, plus the device name for
+// a usable device. The verdict is computed on the first call and returned as-is
+// after that, so callers may probe on every operation. Returns the CUDA-free
+// verdict POD (present + cc + name + reason). present is true only when the
+// driver loads, a device exists, and its compute capability is >= 7.0; reason
+// names the failure otherwise.
 cuda_device_info device_probe();
 
 // Forces context() construction and reports the bound device. This is the entry
