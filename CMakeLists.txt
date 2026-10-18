@@ -3,6 +3,7 @@ project(peregrine LANGUAGES CXX)
 
 option(PG_ENABLE_CUDA "Build the CUDA backend (requires CUDA Toolkit 12.8)" OFF)
 option(PG_BUILD_CEILINGS "Build the dev-only hardware ceiling tool" OFF)
+option(PG_KERNEL_LISTINGS "Write assembly listings for the AVX2 kernel sources into the build tree" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,7 +30,9 @@ execute_process(
   COMMAND_ERROR_IS_FATAL ANY)
 find_package(OpenMP REQUIRED)
 
-nanobind_add_module(_core STABLE_ABI NB_STATIC
+# NOMINSIZE: without it nanobind adds /Os in Release on MSVC, and favoring size
+# turns off MSVC's auto-vectorization of the scalar twins (gemm_small, reduce).
+nanobind_add_module(_core STABLE_ABI NB_STATIC NOMINSIZE
   src/bindings/module.cpp
   src/bindings/fast_entry.cpp
   src/cpu/feature_detect.cpp
@@ -67,6 +70,22 @@ set(PG_AVX2_SOURCES
   src/cpu/fused_avx2.cpp
 )
 
+# The kernel codegen gate reads these listings: the inner k-loop must show no
+# stack spills or reloads and the expected FMA count. The flags only add an
+# output file, so the object code matches a build with the option OFF.
+set(pg_listing_opts "")
+if (PG_KERNEL_LISTINGS)
+  if (MSVC)
+    # /FAs writes <source>.asm, with the source lines interleaved, next to each
+    # object (the target's intermediate directory under the VS generator).
+    set(pg_listing_opts /FAs)
+  else()
+    # -S alone stops before the object and breaks the link; -save-temps=obj
+    # keeps <source>.s and .ii next to each object and still builds the module.
+    set(pg_listing_opts -save-temps=obj -fverbose-asm)
+  endif()
+endif()
+
 if (MSVC)
   # OpenMP comes from find_package(OpenMP), which gives MSVC's /openmp and links
   # vcomp140.dll from the redistributable Visual C++ runtime. /openmp:llvm is
@@ -84,13 +103,15 @@ if (MSVC)
   # byte-identical flags.
   target_compile_options(_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:/O2;/permissive-;/W4>)
-  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+  set(pg_avx2_opts /arch:AVX2 ${pg_listing_opts})
+  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "${pg_avx2_opts}")
 else()
   # No -ffast-math for the same reason. CXX-fenced for the same nvcc reason as
   # the MSVC branch (and a no-op difference on the CUDA-OFF Linux/CI build).
   target_compile_options(_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O3;-Wall;-Wextra>)
-  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+  set(pg_avx2_opts -mavx2 -mfma ${pg_listing_opts})
+  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "${pg_avx2_opts}")
 
   # libatomic on GCC/Clang. The MC/KC/NC sweep hook publishes its triple through
   # a std::atomic<blocking> (gemm_blis.cpp); blocking is three int64 (24 bytes),
