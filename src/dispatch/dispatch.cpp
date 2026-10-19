@@ -3,6 +3,8 @@
 #include "cpu/fused.hpp"
 #include "cpu/gemm_blis.hpp"
 #include "cpu/gemm_naive.hpp"
+#include "cpu/gemm_skinny.hpp"
+#include "cpu/gemm_small.hpp"
 #include "cpu/reduce.hpp"
 #include "cpu/transpose.hpp"
 
@@ -33,16 +35,26 @@ void fused_scaled_relu(const T* x, T* out, int64_t n, T scale);
 
 namespace pg::dispatch {
 
-// Below this max dimension the pack buffers and the thread start cost more than
-// they save, so the direct pass wins. 96 is a measurement-validated default, not
-// a calibrated threshold.
+// Below this max dimension packing and a team cost more than they save, so the
+// register-tiled direct kernel wins (1.3-5x the packed path's time at n = 16 to
+// 96, single-call diagnostics); it still wins at 128-160 on one thread, but the
+// threaded packed path overtakes it near 160, so 96 holds until measured.
 constexpr int64_t SMALL_MAX_DIM = 96;
+// A product with an output dimension or k this thin is bound by reading the
+// long operand, so the skinny kernels stream it instead of packing it.
+constexpr int64_t SKINNY_MAX_DIM = 4;
 
 gemm_path choose_gemm_path(int64_t m, int64_t k, int64_t n, bool avx2_fma) noexcept {
     if (!avx2_fma) {
         return gemm_path::naive;
     }
-    return std::max(m, std::max(k, n)) <= SMALL_MAX_DIM ? gemm_path::small : gemm_path::packed;
+    if (std::max(m, std::max(k, n)) <= SMALL_MAX_DIM) {
+        return gemm_path::small;
+    }
+    if (std::min(m, n) <= SKINNY_MAX_DIM || k <= SKINNY_MAX_DIM) {
+        return gemm_path::skinny;
+    }
+    return gemm_path::packed;
 }
 
 template <typename T>
@@ -72,7 +84,10 @@ void matmul(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, in
         cpu::gemm_blis<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
         return;
     case gemm_path::small:
-        cpu::gemm_blis_small<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+        cpu::gemm_small<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+        return;
+    case gemm_path::skinny:
+        cpu::gemm_skinny<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
         return;
     case gemm_path::naive:
         break;
