@@ -2,6 +2,7 @@
 
 #include "cuda/check.cuh"
 #include "cuda/context.cuh"
+#include "cuda/transfer.cuh"
 
 #include <cstdint>
 
@@ -78,19 +79,19 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // and the m==0/n==0 cases produce no output elements to compute; (0,k)@(k,n)
     // has zero rows. The k==0 case is an m x n matrix of exact zeros (NumPy
     // semantics): the caller's C buffer is device memory, so zero it on the
-    // compute stream rather than memset on host.
+    // context stream rather than memset on host.
     if (m == 0 || n == 0) {
         return;
     }
     if (k == 0) {
         PG_CUDA_CHECK(cudaMemsetAsync(
             c, 0, static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T),
-            context().compute));
+            context().stream));
         return;
     }
 
     // Borrow the singleton's handle and stream: no per-call cublasCreate. The
-    // handle is already bound to the compute stream and
+    // handle is already bound to the context stream and
     // already carries the math mode decided once at init from PEREGRINE_ALLOW_TF32
     // (DEFAULT_MATH off by default). We do NOT call cublasSetMathMode per GEMM:
     // the mode is fixed for the session so it cannot drift into a result that
@@ -145,16 +146,19 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     }
 
     Context& ctx = context();
-    const cudaStream_t stream = ctx.compute;
+    const cudaStream_t stream = ctx.stream;
 
     const size_t a_bytes = static_cast<size_t>(m) * static_cast<size_t>(k) * sizeof(T);
     const size_t b_bytes = static_cast<size_t>(k) * static_cast<size_t>(n) * sizeof(T);
     const size_t c_bytes = static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T);
 
+    // One pre-flight for the three buffers together: they are live at once.
+    preflight(static_cast<int64_t>(a_bytes + b_bytes + c_bytes));
+
     // Stream-ordered allocation from the context mempool (release threshold
     // UINT64_MAX), so repeated calls reuse buffers instead of re-allocating from
     // the OS. All three buffers, the copies, the compute, and the free are
-    // ordered on the one compute stream, so no cross-stream event is needed. A
+    // ordered on the one context stream, so no cross-stream event is needed. A
     // zero-k input still allocates dA/dB (size 0 is a valid cudaMallocAsync) and
     // dC, then gemm zero-fills dC. Each buffer is owned by device_buf so a throw
     // from any CHECK below (a copy or the inner gemm surfacing an async/cuBLAS
@@ -182,30 +186,13 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
 
     gemm<T>(da_p, db_p, dc_p, m, k, n);
 
-    // The destination `c` is the caller's pageable new T[] buffer (module.cpp
-    // gemm_host_typed), so this cudaMemcpyAsync D2H is NOT truly asynchronous:
-    // into pageable host memory the driver inserts a synchronous staging copy
-    // through its own bounce buffer. It is correct, just not overlapped; a pinned
-    // host buffer would be needed to make D2H genuinely async, which this
-    // correctness entry does not bother with -- the simple pageable copy is the
-    // right tradeoff here.
+    // `c` is a page-locked pool buffer (the full-rate DMA) or the caller's out
+    // array (pageable, staged by the driver); either way the copy is queued.
     PG_CUDA_CHECK(cudaMemcpyAsync(c, dc_p, c_bytes, cudaMemcpyDeviceToHost, stream));
 
-    // The D2H copy feeds the caller's host buffer, so sync before returning: the
-    // "every D2H feeding a host-visible return syncs first" rule. The device_buf
-    // owners free da/db/dc on scope exit (after this sync); cudaFreeAsync is
-    // stream-ordered behind the copy, so the result is safely in c once the
-    // stream drains, and the frees ride the same stream ordering.
-    //
-    // ORDERING CONTRACT: the copy, the three frees, and this sync are correct ONLY
-    // because everything in gemm_host runs on the ONE compute stream -- the
-    // free-after-copy and copy-before-return orderings are pure stream ordering,
-    // with no event/fence. If this function is ever migrated to stage on
-    // ctx.transfer, the cross-stream ordering between the transfer-stream copy and
-    // the compute-stream GEMM must be fenced exactly as matmul_device does
-    // (sync_transfer before the GEMM, sync_compute after) -- otherwise it silently
-    // becomes a use-before-ready race. Do not move the staging to another stream
-    // without adding those fences.
+    // The host fence: c is complete, and any asynchronous error from the work
+    // above surfaces here, while the caller still holds the host operands. The
+    // device_buf frees queue behind the copy on scope exit.
     PG_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
@@ -229,11 +216,11 @@ float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
     }
 
     Context& ctx = context();
-    const cudaStream_t stream = ctx.compute;
+    const cudaStream_t stream = ctx.stream;
     const size_t c_bytes =
         static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T);
 
-    // One output buffer from the context mempool on the compute stream, reused
+    // One output buffer from the context mempool on the context stream, reused
     // across every warmup and timed rep (the inputs do not change, so the GEMM
     // overwrites C each iteration -- beta is 0 in gemm). Allocated once so no
     // allocation lands inside the timed region. The device_buf and cuda_event
@@ -252,7 +239,7 @@ float time_matmul(const T* a, const T* b, int64_t m, int64_t k, int64_t n,
 
     // Warm the clocks: the first GEMM on a cold GPU pays clock ramp and any lazy
     // cuBLAS init, so timing it would overstate the cost (warm before timing,
-    // report warm). These run on the compute stream and are not bracketed by the
+    // report warm). These run on the context stream and are not bracketed by the
     // events.
     for (int i = 0; i < warmups; ++i) {
         gemm<T>(a, b, dc_p, m, k, n);
