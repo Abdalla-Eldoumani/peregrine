@@ -783,6 +783,12 @@ def _parse(argv):
     p.add_argument("--rewarm-ms", type=float, default=None,
                    help="untimed running of each contender before sampling, after every switch (default 200)")
     p.add_argument("--cooldown-s", type=float, default=30.0, help="between series and before each CV rerun")
+    # Fewer strikes and a shorter fresh-process cooldown make a quick check
+    # finish on a noisy machine; the published matrix keeps the defaults.
+    p.add_argument("--max-strikes", type=int, default=3,
+                   help="CV-gate attempts before the fresh-process last chance (default 3)")
+    p.add_argument("--fresh-cooldown-s", type=float, default=120.0,
+                   help="cooldown before the fresh-process last chance (default 120)")
     p.add_argument("--cell-cooldown-s", type=float, default=10.0,
                    help="after any cell that ran 10 s or more, within a series")
     p.add_argument("--no-cooldown", action="store_true")
@@ -815,11 +821,11 @@ def _protocol(args) -> tuple[Protocol, float]:
         switch_gap_s=gap_ms / 1e3,
         rewarm_s=(args.rewarm_ms if args.rewarm_ms is not None else (0.0 if args.smoke else 200.0)) / 1e3,
         strike_cooldown_s=cooldown,
-        fresh_cooldown_s=0.0 if quiet else 120.0,
+        fresh_cooldown_s=0.0 if quiet else args.fresh_cooldown_s,
         clock_floor=args.clock_floor,
         clock_ceiling=args.clock_ceiling,
         verify_mode=args.verify_mode,
-        max_strikes=1 if args.fresh_child else 3,
+        max_strikes=1 if args.fresh_child else args.max_strikes,
     )
     return proto, cooldown
 
