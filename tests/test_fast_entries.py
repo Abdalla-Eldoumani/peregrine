@@ -392,6 +392,21 @@ def _is_operand(x, num):
     )
 
 
+def _is_matmul_operand(x, num):
+    # matmul alone also takes F order (transposed views among it): its kernels
+    # read strides and give every layout the same bits
+    return (
+        type(x) is np.ndarray
+        and x.ndim == 2
+        and x.dtype.num == num
+        and x.dtype.isnative
+        and x.flags.aligned
+        and (x.flags.c_contiguous or x.flags.f_contiguous)
+        and x.shape[0] > 0
+        and x.shape[1] > 0
+    )
+
+
 def _is_out(o, num, shape):
     return (
         type(o) is np.ndarray
@@ -433,7 +448,7 @@ def accepts(op, args):
     num = x.dtype.num
     if op == "matmul":
         a, b, out = args
-        if not (_is_operand(a, num) and _is_operand(b, num) and b.shape[0] == a.shape[1]):
+        if not (_is_matmul_operand(a, num) and _is_matmul_operand(b, num) and b.shape[0] == a.shape[1]):
             return False
         return out is None or (
             _is_out(out, num, (a.shape[0], b.shape[1]))
@@ -523,6 +538,21 @@ def test_input_kind(op, kind, operand, accepted):
     pg.set_backend("cpu")
     try:
         assert (NATIVE[op](*_native_args(op, arrays, kwargs, out)) is not NotImplemented) == accepted
+        _check(spec, "cpu")
+    finally:
+        pg.set_backend("auto")
+
+
+@pytest.mark.parametrize("op", list(OPS))
+@pytest.mark.parametrize("layout", ["F", "T"])
+def test_f_order_is_taken_by_matmul_alone(op, layout):
+    spec = _spec(op, (4, 3), layout=layout)
+    arrays, kwargs, out = _build(spec)
+    assert arrays[0].flags.f_contiguous and not arrays[0].flags.c_contiguous
+    pg.set_backend("cpu")
+    try:
+        taken = NATIVE[op](*_native_args(op, arrays, kwargs, out)) is not NotImplemented
+        assert taken == (op == "matmul")
         _check(spec, "cpu")
     finally:
         pg.set_backend("auto")
