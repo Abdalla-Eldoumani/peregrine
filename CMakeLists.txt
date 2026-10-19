@@ -35,6 +35,7 @@ find_package(OpenMP REQUIRED)
 nanobind_add_module(_core STABLE_ABI NB_STATIC NOMINSIZE
   src/bindings/module.cpp
   src/bindings/fast_entry.cpp
+  src/bindings/output_cache.cpp
   src/cpu/feature_detect.cpp
   src/cpu/topology.cpp
   src/cpu/threads.cpp
