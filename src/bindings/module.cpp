@@ -10,6 +10,8 @@
 #include "core/common.hpp"
 #include "cpu/feature_detect.hpp"
 #include "cpu/gemm_blis.hpp"
+#include "cpu/gemm_skinny.hpp"
+#include "cpu/gemm_small.hpp"
 #include "cpu/threads.hpp"
 #include "dispatch/dispatch.hpp"
 
@@ -250,6 +252,27 @@ void scaled_relu_into(const host_in<T>& x, double scale, const host_out<T>& out)
     nb::gil_scoped_release release;
     pg::dispatch::fused_scaled_relu<T>(x.data(), out.data(), m * n,
                                        static_cast<T>(scale));
+}
+
+// Test and measurement hooks for the small and skinny GEMM kernels, which read
+// operands in place through any element strides. Without the twin flag the
+// AVX2 kernel runs when the CPU has it and the scalar twin otherwise, as
+// dispatch chooses, so a forced fallback never reaches AVX2 code.
+template <typename T>
+using strided_in = nb::ndarray<const T, nb::ndim<2>, nb::device::cpu>;
+
+template <typename T, bool Skinny, bool Twin>
+void gemm_hook(const strided_in<T>& a, const strided_in<T>& b, const host_out<T>& out) {
+    const pg::gemm_dims d = pg::check_matmul_dims(
+        static_cast<int64_t>(a.shape(0)), static_cast<int64_t>(a.shape(1)),
+        static_cast<int64_t>(b.shape(0)), static_cast<int64_t>(b.shape(1)));
+    check_out("matmul", out, d.m, d.n);
+    const auto& f = pg::cpu::detect();
+    const bool avx2 = !Twin && f.avx2 && f.fma;
+    const auto kernel = Skinny ? (avx2 ? &pg::cpu::gemm_skinny<T> : &pg::cpu::gemm_skinny_naive<T>)
+                               : (avx2 ? &pg::cpu::gemm_small<T> : &pg::cpu::gemm_small_naive<T>);
+    nb::gil_scoped_release release;
+    kernel(a.data(), a.stride(0), a.stride(1), b.data(), b.stride(0), b.stride(1), out.data(), d.m, d.k, d.n);
 }
 
 #if defined(PG_HAS_CUDA)
@@ -794,6 +817,15 @@ NB_MODULE(_core, m) {
         pg::cpu::set_mxcsr(csr);
         return previous;
     }, nb::arg("csr"));
+
+    m.def("_gemm_small", &gemm_hook<double, false, false>, arr("a"), arr("b"), arr("out"));
+    m.def("_gemm_small", &gemm_hook<float, false, false>, arr("a"), arr("b"), arr("out"));
+    m.def("_gemm_small_naive", &gemm_hook<double, false, true>, arr("a"), arr("b"), arr("out"));
+    m.def("_gemm_small_naive", &gemm_hook<float, false, true>, arr("a"), arr("b"), arr("out"));
+    m.def("_gemm_skinny", &gemm_hook<double, true, false>, arr("a"), arr("b"), arr("out"));
+    m.def("_gemm_skinny", &gemm_hook<float, true, false>, arr("a"), arr("b"), arr("out"));
+    m.def("_gemm_skinny_naive", &gemm_hook<double, true, true>, arr("a"), arr("b"), arr("out"));
+    m.def("_gemm_skinny_naive", &gemm_hook<float, true, true>, arr("a"), arr("b"), arr("out"));
 
     // The PRIVATE compile-time build signal. Underscore-private: the public
     // predicate is the wrapper's has_cuda(), which composes this build flag AND a
