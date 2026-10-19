@@ -73,6 +73,57 @@ class TestTranspose:
         assert got.dtype == np.float64
         np.testing.assert_array_equal(got, a.T.astype(np.float64))
 
+    # The transpose moves bits and never computes, so it is held to the bytes
+    # of np.ascontiguousarray(a.T), on random bit patterns (signaling NaN
+    # payloads, -0.0, subnormals) as well as on normal values.
+    @staticmethod
+    def _operand(rng, shape, dtype, bits):
+        if not bits:
+            return rng.standard_normal(shape).astype(dtype)
+        u = np.uint32 if dtype == np.float32 else np.uint64
+        return rng.integers(0, np.iinfo(u).max, shape, dtype=u, endpoint=True).view(dtype)
+
+    @pytest.fixture
+    def threads(self):
+        previous = pg.get_num_threads()
+        yield pg.set_num_threads
+        pg.set_num_threads(previous)
+
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_every_small_shape_bitwise(self, dtype, n_threads, threads):
+        # Every m and n remainder of the 2W x W tiles (16 x 8 f32, 8 x 4 f64).
+        threads(n_threads)
+        rng = np.random.default_rng(7)
+        bad = []
+        for m in range(1, 34):
+            for n in range(1, 34):
+                a = self._operand(rng, (m, n), dtype, bits=(m + n) % 2 == 1)
+                if pg.transpose(a).tobytes() != np.ascontiguousarray(a.T).tobytes():
+                    bad.append((m, n))
+        assert bad == []
+
+    # Legacy-killer squares, odd large shapes on both sides of the tiles, single
+    # rows and columns, and outputs past 12 MiB whose rows are whole 64-byte
+    # lines (the streaming-store path), with and without a column remainder.
+    @pytest.mark.parametrize(
+        "shape",
+        [(n, n) for n in LEGACY_KILLER_SIZES]
+        + [(333, 750), (3000, 2000), (4097, 63), (63, 4097), (1, 100000), (100000, 1),
+           (2048, 2049), (2048, 1001)],
+        ids=str,
+    )
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_large_and_odd_shapes_bitwise(self, dtype, n_threads, shape, threads):
+        threads(n_threads)
+        rng = np.random.default_rng(list(shape))
+        for bits in (False, True):
+            a = self._operand(rng, shape, dtype, bits)
+            got = pg.transpose(a)
+            assert got.flags.c_contiguous and got.flags.owndata
+            assert got.tobytes() == np.ascontiguousarray(a.T).tobytes()
+
 
 class TestReductions:
     @pytest.mark.parametrize("n", SIZES)
