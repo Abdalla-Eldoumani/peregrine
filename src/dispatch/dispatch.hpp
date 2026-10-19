@@ -3,14 +3,35 @@
 
 namespace pg::dispatch {
 
-// Every op routes through here. v1 has one backend (cpu naive); the packed
-// CPU kernels, the CUDA backend, and the calibrated crossover table all land
-// behind this same entry point so the binding layer never changes.
+// Every op routes through here, so the binding layer never changes when a
+// kernel does.
+//
+// Host matmul reads A and B through element strides: element (i, p) of A is
+// a[i * rs_a + p * cs_a] and (p, j) of B is b[p * rs_b + j * cs_b], any sign or
+// zero, so transposed, F-ordered, sliced, and reversed operands need no copy.
+// C is C-contiguous with ldc = n and is overwritten. Every path gives the same
+// bits for every layout of the same values.
 template <typename T>
-void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
+void matmul(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b,
+            T* c, int64_t m, int64_t k, int64_t n);
 
-extern template void matmul<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
-extern template void matmul<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
+extern template void matmul<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t,
+                                   float*, int64_t, int64_t, int64_t);
+extern template void matmul<double>(const double*, int64_t, int64_t, const double*, int64_t, int64_t,
+                                    double*, int64_t, int64_t, int64_t);
+
+// C-contiguous operands.
+template <typename T>
+inline void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
+    matmul<T>(a, k, 1, b, n, 1, c, m, k, n);
+}
+
+// The host matmul paths. The choice is a pure function of the shape and the
+// CPU features, never of the layout or the thread count, because each path
+// rounds differently and a layout- or thread-dependent choice would change the
+// bits.
+enum class gemm_path { naive, small, packed };
+gemm_path choose_gemm_path(int64_t m, int64_t k, int64_t n, bool avx2_fma) noexcept;
 
 #if defined(PG_HAS_CUDA)
 // Device-resident GEMM routing. a, b, c are DEVICE pointers; the binding's
