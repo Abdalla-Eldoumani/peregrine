@@ -421,6 +421,28 @@ def test_f32_device_routes_to_gpu():
 
 
 @gpu
+def test_staged_host_operands_in_any_layout():
+    # A host float32 pair staged to the device is uploaded in C order whatever
+    # its layout, so F-ordered, transposed, and reversed operands give the bits
+    # of the same values in C order, as on the CPU.
+    rng = np.random.default_rng(20260618)
+    a = rng.standard_normal((29, 37)).astype(np.float32)
+    b = rng.standard_normal((37, 41)).astype(np.float32)
+    pg.set_backend("cuda")
+    try:
+        ref = pg.matmul(a, b)
+        assert isinstance(ref, np.ndarray)
+        for x, y in [
+            (np.asfortranarray(a), b),
+            (a, np.ascontiguousarray(b.T).T),
+            (np.ascontiguousarray(a[::-1])[::-1], np.ascontiguousarray(b[:, ::-1])[:, ::-1]),
+        ]:
+            assert pg.matmul(x, y).tobytes() == ref.tobytes()
+    finally:
+        pg.set_backend("auto")
+
+
+@gpu
 def test_f64_never_auto_routes():
     # Hard exclusion (the FP64 trap): a HOST f64 matmul returns an ndarray
     # computed on the CPU and never silently lands on the GPU (GA106 FP64 is 1/64
