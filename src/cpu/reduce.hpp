@@ -36,10 +36,14 @@ void sum_axis(const T* a, T* out, int64_t m, int64_t n, int axis, bool avx2, boo
 // Leaf kernels, one set per instruction set. sum_rows: out[r] is the pairwise
 // sum of the n elements at x + r * n, for r < rows. sum_block: acc[j] is the
 // sequential sum from +0.0 of x[i * ld + j] over i < rows, for j < w.
+// sum_block_stream is the same sum for arrays read from DRAM (it prefetches
+// rows ahead); sum_block_naive is the twin of both.
 template <typename T>
 void sum_rows_avx2(const T* x, int64_t n, int64_t rows, T* out);
 template <typename T>
 void sum_block_avx2(const T* x, int64_t ld, int64_t rows, int64_t w, T* acc);
+template <typename T>
+void sum_block_stream_avx2(const T* x, int64_t ld, int64_t rows, int64_t w, T* acc);
 template <typename T>
 void sum_rows_naive(const T* x, int64_t n, int64_t rows, T* out);
 template <typename T>
@@ -53,6 +57,8 @@ extern template void sum_rows_avx2<float>(const float*, int64_t, int64_t, float*
 extern template void sum_rows_avx2<double>(const double*, int64_t, int64_t, double*);
 extern template void sum_block_avx2<float>(const float*, int64_t, int64_t, int64_t, float*);
 extern template void sum_block_avx2<double>(const double*, int64_t, int64_t, int64_t, double*);
+extern template void sum_block_stream_avx2<float>(const float*, int64_t, int64_t, int64_t, float*);
+extern template void sum_block_stream_avx2<double>(const double*, int64_t, int64_t, int64_t, double*);
 extern template void sum_rows_naive<float>(const float*, int64_t, int64_t, float*);
 extern template void sum_rows_naive<double>(const double*, int64_t, int64_t, double*);
 extern template void sum_block_naive<float>(const float*, int64_t, int64_t, int64_t, float*);
