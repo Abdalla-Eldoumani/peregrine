@@ -40,7 +40,7 @@ constexpr int kMinCcMajor = 7;
 // without touching the static Context during deinit.
 cublasLtHandle_t g_cublaslt = nullptr;
 cublasHandle_t g_cublas = nullptr;
-cudaStream_t g_stream = nullptr;
+cudaStream_t g_streams[3] = {nullptr, nullptr, nullptr};
 
 __global__ void trap_kernel() {
     __trap();
@@ -78,9 +78,11 @@ void teardown() {
         cublasDestroy(g_cublas);
         g_cublas = nullptr;
     }
-    if (g_stream != nullptr) {
-        cudaStreamDestroy(g_stream);
-        g_stream = nullptr;
+    for (cudaStream_t& s : g_streams) {
+        if (s != nullptr) {
+            cudaStreamDestroy(s);
+            s = nullptr;
+        }
     }
 }
 
@@ -123,8 +125,12 @@ Context build_context() {
 
     // One plain blocking stream for everything. Two streams made every device op
     // wait on the host twice to order an allocation or copy on one against the
-    // GEMM on the other; the priority/non-blocking knobs buy nothing here.
+    // GEMM on the other; the priority/non-blocking knobs buy nothing here. The
+    // side streams serve the staged GEMM alone, which orders them against this one
+    // with events rather than host waits.
     PG_CUDA_CHECK(cudaStreamCreate(&ctx.stream));
+    PG_CUDA_CHECK(cudaStreamCreate(&ctx.upload_stream));
+    PG_CUDA_CHECK(cudaStreamCreate(&ctx.download_stream));
     ctx.free_cap = read_free_cap();
 
     // The device default mempool with the release threshold raised to UINT64_MAX:
@@ -166,7 +172,9 @@ Context build_context() {
     // CUDA runtime's own static teardown in the common case; in the racy case
     // teardown swallows cudaErrorCudartUnloading. Registered here, inside the
     // once-built static init, so it is registered exactly once.
-    g_stream = ctx.stream;
+    g_streams[0] = ctx.stream;
+    g_streams[1] = ctx.upload_stream;
+    g_streams[2] = ctx.download_stream;
     g_cublas = ctx.cublas;
     g_cublaslt = ctx.cublaslt;
     std::atexit(teardown);
