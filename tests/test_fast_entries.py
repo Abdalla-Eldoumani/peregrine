@@ -640,10 +640,10 @@ def test_pushes_follow_the_router(tmp_path, monkeypatch):
     assert pushed[-1] == ("auto", True, True, policy.f32_cpu_flops_bound(result))
 
     # after the warn-once fallback the device takes no more auto work
-    def _failing_upload(x):
+    def _failing_staged(*args):
         raise RuntimeError("cudaErrorLaunchFailure at fake.cu:1")
 
-    monkeypatch.setattr(pg, "_to_device_native", _failing_upload, raising=False)
+    monkeypatch.setattr(pg, "_gemm_host_native", _failing_staged, raising=False)
     with pytest.warns(RuntimeWarning, match="falling back to cpu"):
         pg._matmul_gpu_staged(a, a)
     assert pushed[-1] == ("auto", True, False, math.inf)
@@ -674,9 +674,7 @@ def _calibrations():
 
 
 def _host(cal, m, k, n):
-    return policy.choose_backend(
-        "float32", m, k, n, residency="host", calibration=cal, backend="auto"
-    )
+    return policy.choose_backend("float32", m, k, n, calibration=cal, backend="auto")
 
 
 @given(data=st.data())
