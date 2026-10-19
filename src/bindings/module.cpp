@@ -3,6 +3,7 @@
 #include <nanobind/stl/string.h>
 
 #include <atomic>
+#include <memory>
 #include <new>
 #include <type_traits>
 
@@ -36,16 +37,18 @@ namespace pg::cuda {
 // core/common.hpp, plain pointers and int64), so the forward declarations alone
 // are enough to call across the TU boundary.
 cuda_device_info context_device_info();
+void teardown();
+void inject_fault();
 
-// gemm_host: host-pointer GEMM convenience (allocates device buffers, copies up,
-// runs the device gemm, copies the result back, syncs). This entry exists so the
-// correctness suite has a callable host->device->host path. Templated in
-// src/cuda; the explicit float/double instantiations there satisfy these.
+// gemm_host: the staged GEMM for host operands (pre-flight, device buffers,
+// copies up, the device gemm, the copy back, and the host fence, on one stream).
+// Templated in src/cuda; the explicit float/double instantiations there satisfy
+// these.
 template <typename T>
 void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 
 // gemm: the PURE device-pointer GEMM. a, b, c are DEVICE pointers; it runs cuBLAS
-// on the compute stream and never touches host memory or syncs. The
+// on the context stream and never touches host memory or syncs. The
 // device-resident matmul(Array, Array) entry below reaches it through
 // pg::dispatch::matmul_device (the routing tier), never by calling it here, so
 // the f64-never-AUTO-routes exclusion lives in dispatch where it is unit-testable.
@@ -276,34 +279,50 @@ void gemm_hook(const strided_in<T>& a, const strided_in<T>& b, const host_out<T>
 }
 
 #if defined(PG_HAS_CUDA)
-// Host-pointer device GEMM for the GPU correctness suite: zero-copy in,
-// capsule-owned out, and the kernel is the cuBLAS device
-// GEMM which stages the host operands to the device, computes, and copies back.
-// Underscore-private and CUDA-build-only: the public device path is matmul on
-// pg.Array; this exists so f32/f64 GPU correctness can be proven against the same
-// assert_matmul_close tolerance contract the CPU path uses.
-template <typename T>
-nb::ndarray<nb::numpy, T, nb::ndim<2>> gemm_host_typed(
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a,
-    const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& b) {
+// A device result copied to the host, as a NumPy array over a buffer lent by
+// the page-locked pool (or its pageable fallback). The capsule ends the loan when
+// NumPy drops the last reference, so NumPy never frees memory it did not
+// allocate. fill writes all rows*cols elements and fences before returning.
+template <typename T, typename Fill>
+nb::ndarray<nb::numpy, T, nb::ndim<2>> host_result(int64_t rows, int64_t cols, Fill fill) {
+    const int64_t bytes = pg::checked_bytes(rows, cols, static_cast<int64_t>(sizeof(T)));
+    pg::cuda::host_buffer hb{};
+    {
+        // A first use of a buffer size page-locks it, which takes milliseconds.
+        nb::gil_scoped_release release;
+        hb = pg::cuda::acquire_host(bytes);
+    }
+    nb::capsule owner(hb.loan, &pg::cuda::release_host);
+    {
+        nb::gil_scoped_release release;
+        fill(static_cast<T*>(hb.data));
+    }
+    const size_t shape[2] = {static_cast<size_t>(rows), static_cast<size_t>(cols)};
+    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(hb.data, 2, shape, owner);
+}
 
+// The staged GEMM for a host pair the wrapper routes to the GPU: one native
+// crossing for the upload, the product, the download, and the fence.
+template <typename T>
+nb::ndarray<nb::numpy, T, nb::ndim<2>> gemm_host_typed(const host_in<T>& a, const host_in<T>& b) {
     const pg::gemm_dims d = pg::check_matmul_dims(
         static_cast<int64_t>(a.shape(0)), static_cast<int64_t>(a.shape(1)),
         static_cast<int64_t>(b.shape(0)), static_cast<int64_t>(b.shape(1)));
+    return host_result<T>(d.m, d.n, [&](T* c) {
+        pg::cuda::gemm_host<T>(a.data(), b.data(), c, d.m, d.k, d.n);
+    });
+}
 
-    T* out = new T[static_cast<size_t>(d.m) * static_cast<size_t>(d.n)];
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
-
-    {
-        // Drop the GIL around the staging + launch + sync, as for the CPU
-        // kernel: gemm_host touches no Python object and syncs the stream before
-        // it returns, so the result is fully in out by the time we reacquire.
-        nb::gil_scoped_release release;
-        pg::cuda::gemm_host<T>(a.data(), b.data(), out, d.m, d.k, d.n);
-    }
-
-    const size_t shape[2] = {static_cast<size_t>(d.m), static_cast<size_t>(d.n)};
-    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+// The same into the caller's out (matmul out=): the download lands in out
+// directly, saving a host copy.
+template <typename T>
+void gemm_host_into(const host_in<T>& a, const host_in<T>& b, const host_out<T>& out) {
+    const pg::gemm_dims d = pg::check_matmul_dims(
+        static_cast<int64_t>(a.shape(0)), static_cast<int64_t>(a.shape(1)),
+        static_cast<int64_t>(b.shape(0)), static_cast<int64_t>(b.shape(1)));
+    check_out("matmul", out, d.m, d.n);
+    nb::gil_scoped_release release;
+    pg::cuda::gemm_host<T>(a.data(), b.data(), out.data(), d.m, d.k, d.n);
 }
 
 // pg.Array: the device-resident array. It owns a DeviceBuffer (device pointer +
@@ -327,9 +346,9 @@ struct Array {
         // is the ONLY place a device buffer owned by an Array is freed.
         if (buf.ptr != nullptr) {
             // ~Array runs during Python GC, INCLUDING interpreter finalization
-            // after the atexit teardown destroyed the context streams. An Array
+            // after the atexit teardown destroyed the context stream. An Array
             // held in a module global (or an inline temporary the GC keeps alive
-            // past module finalization) reaches here on a dead transfer stream.
+            // past module finalization) reaches here on a dead stream.
             // free_device is teardown-tolerant for exactly that case: it
             // skips the free once teardown has run and otherwise inspects the
             // return code by hand, never throwing. So this stays a plain call --
@@ -347,39 +366,62 @@ nb::dlpack::dtype array_dtype(pg::cuda::DType dt) {
     return dt == pg::cuda::DType::f64 ? nb::dtype<double>() : nb::dtype<float>();
 }
 
-// Build the dlpack-exporting ndarray view over an Array's device buffer. The
-// returned nb::ndarray<nb::array_api, ...> carries the CUDA device type and id,
-// and its owner is the Array Python object itself (passed as `self`): nanobind
-// holds a reference to it for as long as the exported dltensor/capsule lives, so
-// the device buffer cannot be freed under a consumer (cupy/torch) that imported
-// it -- ~Array runs only after both the Array and every dlpack view are gone.
-// The deleter therefore does NOT free the buffer (that is ~Array's sole job);
-// the owner reference is purely keep-alive. numpy cannot consume a CUDA dltensor
-// (it has no device memory), so this export is for device-aware consumers; the
-// host path is from_device's explicit synced D2H copy.
-nb::ndarray<nb::array_api> array_dlpack_view(nb::handle self, const Array& arr) {
+[[noreturn]] void throw_py(PyObject* type, const char* msg) {
+    PyErr_SetString(type, msg);
+    throw nb::python_error();
+}
+
+// Array.__dlpack__ per the array API: a bare "dltensor" capsule over the device
+// buffer, whose owner is the Array itself, so the buffer outlives the Array for
+// as long as a consumer holds the capsule. Unless the consumer passes stream=-1
+// (it orders the work itself), the host waits for the context stream first, so
+// whatever stream the consumer reads on sees the finished buffer; waiting covers
+// every consumer stream, so no handle is ever interpreted. From there the
+// consumer owns the ordering. max_version is accepted and the legacy capsule
+// returned, which the protocol allows. numpy cannot consume a CUDA dltensor; the
+// host path is from_device.
+nb::ndarray<> array_dlpack(nb::handle self, nb::handle stream, nb::handle max_version,
+                           nb::handle dl_device, nb::handle copy) {
+    (void)max_version;
+    if (!copy.is_none() && nb::cast<bool>(copy)) {
+        throw_py(PyExc_BufferError, "__dlpack__: copy=True is not supported, pg.Array exports "
+                                     "its device buffer without copying");
+    }
+    if (!dl_device.is_none() &&
+        !dl_device.equal(nb::make_tuple(static_cast<int>(nb::device::cuda::value), 0))) {
+        throw_py(PyExc_BufferError, "__dlpack__: pg.Array lives on cuda device 0 and cannot be "
+                                     "exported to another device");
+    }
+    bool wait = true;
+    if (!stream.is_none()) {
+        if (!PyLong_Check(stream.ptr()) || PyBool_Check(stream.ptr())) {
+            throw_py(PyExc_TypeError, "__dlpack__: stream must be None or an int");
+        }
+        const long long s = nb::cast<long long>(stream);
+        if (s == 0 || s < -1) {
+            // 0 is ambiguous for CUDA (legacy or per-thread default) and is
+            // disallowed by the protocol; other negatives mean nothing there.
+            throw_py(PyExc_ValueError, "__dlpack__: stream must be -1, 1, 2, or a stream handle");
+        }
+        wait = s != -1;
+    }
+    const Array& arr = nb::cast<const Array&>(self);
+    if (wait) {
+        nb::gil_scoped_release release;
+        pg::cuda::sync();
+    }
     const size_t shape[2] = {static_cast<size_t>(arr.buf.rows),
                              static_cast<size_t>(arr.buf.cols)};
-    return nb::ndarray<nb::array_api>(
-        arr.buf.ptr, 2, shape, /*owner=*/self, /*strides=*/nullptr,
-        array_dtype(arr.buf.dtype), nb::device::cuda::value, /*device_id=*/0);
+    return nb::ndarray<>(arr.buf.ptr, 2, shape, /*owner=*/self, /*strides=*/nullptr,
+                         array_dtype(arr.buf.dtype), nb::device::cuda::value,
+                         /*device_id=*/0);
 }
 
 // to_device: copy a host ndarray up to a fresh device buffer and wrap it in an
 // pg.Array. Accepts both f32 and f64 (to_device is just memory; the
 // f64-never-auto-routes rule is a dispatch concern, not a to_device rejection).
-// alloc_device pre-flights cudaMemGetInfo; copy_h2d runs on the
-// transfer stream. The H2D is async on the transfer stream, but cuBLAS runs on
-// the SEPARATE compute stream and the two streams are unordered -- so the buffer
-// must be fully resident before it is handed back, or a later GEMM on compute
-// can read an operand whose H2D copy has not landed (a cross-stream
-// use-before-ready race: compute-sanitizer --track-stream-ordered-races all
-// reports it as use-before-alloc and the GEMM returns garbage under
-// instrumentation). sync_transfer() after the copy makes the operand ready
-// before any compute-stream op can touch it, symmetric to from_device's
-// D2H-before-return sync. A pure H2D (no compute consumer) would not strictly
-// need it, but to_device's whole purpose is to feed the device GEMM, so the
-// fence belongs here at the residency boundary.
+// No host wait: every later use of the buffer is queued behind the copy on the
+// same stream, and copy_h2d returns only once the source may change.
 template <typename T>
 Array* to_device_typed(
     const nb::ndarray<const T, nb::ndim<2>, nb::c_contig, nb::device::cpu>& a) {
@@ -395,54 +437,31 @@ Array* to_device_typed(
         pg::checked_bytes(rows, cols, static_cast<int64_t>(sizeof(T)));
 
     pg::cuda::DeviceBuffer buf{nullptr, rows, cols, dt};
+    std::unique_ptr<Array> result;
     {
-        // Drop the GIL around the allocation + copy + sync: alloc_device,
-        // copy_h2d, and sync_transfer touch no Python object. a.data() stays
-        // valid -- nanobind holds the ndarray alive across the call -- and the
-        // copy reads from it on the transfer stream.
+        // a.data() stays valid: nanobind holds the ndarray alive across the call.
         nb::gil_scoped_release release;
         buf.ptr = pg::cuda::alloc_device(bytes);
+        // Owned at once, so a copy or launch that throws frees the buffer.
+        result = std::make_unique<Array>(buf);
         pg::cuda::copy_h2d(buf.ptr, a.data(), bytes);
-        // Fence the transfer stream so the operand is fully resident before the
-        // returned Array can be read by a GEMM on the unordered compute stream.
-        pg::cuda::sync_transfer();
     }
-    return new Array(buf);
+    return result.release();
 }
 
-// from_device: copy a pg.Array's device buffer back to a FRESH host ndarray.
-// numpy has no device memory and cannot pull a CUDA dltensor through dlpack, so
-// this does an explicit D2H copy on the transfer stream and -- the hard contract
-// -- SYNCS the transfer stream before the host buffer is returned to Python
-// (async wins live inside a call, never across the API boundary; a D2H result
-// returned before its stream syncs is a data race the caller never sees). The
-// returned ndarray owns a fresh host allocation via a capsule whose deleter
-// frees exactly that allocation.
+// from_device: copy a pg.Array's device buffer back to the host. The copy is
+// queued behind every op that produced the buffer, and the host waits for it
+// before the array exists, so the caller never sees a half-written result and an
+// asynchronous device error raises here (pg::cuda_error -> RuntimeError).
 template <typename T>
 nb::ndarray<nb::numpy, T, nb::ndim<2>> from_device_typed(const Array& arr) {
-    const int64_t rows = arr.buf.rows;
-    const int64_t cols = arr.buf.cols;
-    // Overflow-checked: rows/cols come straight off the Array's buffer
-    // with no bound. Before the fix, an overflowing rows*cols*sizeof(T) product
-    // cast to size_t let new T[] allocate a truncated host buffer while copy_d2h
-    // was told to copy the full bytes -- a heap overflow. checked_bytes throws
-    // shape_error (-> ValueError) on overflow or a negative extent first.
-    const int64_t bytes =
-        pg::checked_bytes(rows, cols, static_cast<int64_t>(sizeof(T)));
-
-    T* out = new T[static_cast<size_t>(rows) * static_cast<size_t>(cols)];
-    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<T*>(p); });
-
-    {
-        nb::gil_scoped_release release;
-        pg::cuda::copy_d2h(out, arr.buf.ptr, bytes);
-        // Sync BEFORE the host buffer crosses back into Python: out is fully
-        // written only after the transfer stream drains.
-        pg::cuda::sync_transfer();
-    }
-
-    const size_t shape[2] = {static_cast<size_t>(rows), static_cast<size_t>(cols)};
-    return nb::ndarray<nb::numpy, T, nb::ndim<2>>(out, 2, shape, owner);
+    // rows/cols come straight off the Array's buffer; host_result's checked_bytes
+    // throws shape_error (-> ValueError) before an overflowing size can reach an
+    // allocation.
+    return host_result<T>(arr.buf.rows, arr.buf.cols, [&](T* dst) {
+        pg::cuda::copy_d2h(dst, arr.buf.ptr, arr.buf.bytes());
+        pg::cuda::sync();
+    });
 }
 
 // The REQUIRED device-resident matmul: (Array, Array) -> Array, device-in/
@@ -452,12 +471,13 @@ nb::ndarray<nb::numpy, T, nb::ndim<2>> from_device_typed(const Array& arr) {
 // staging, no D2H. The result is a fresh pg.Array wrapping the output buffer.
 //
 // Deliberately minimal here: this is the device-in/device-out primitive the
-// wrapper consumes for the f32 device-resident GPU path. The full residency
-// dispatch -- the mixed-residency TypeError, the residency-out return-type
-// selection, the f64-never-auto-routes exclusion, and the warn-once CPU fallback
-// -- is layered on top in the wrapper; this entry must not silently transfer
-// either (it never touches host memory). A dtype/shape mismatch raises
-// (shape_error -> ValueError via the translator) rather than computing garbage.
+// wrapper consumes for the device-resident GPU path. The residency rules (the
+// mixed-residency TypeError, the residency-out return type, the
+// f64-never-auto-routes exclusion) live in the wrapper; this entry must not
+// silently transfer either (it never touches host memory). A dtype/shape
+// mismatch raises (shape_error -> ValueError via the translator) rather than
+// computing garbage. The product is queued, not waited for: the next fence
+// (from_device, __dlpack__) waits for it and reports any error it raised.
 Array* matmul_device(const Array& a, const Array& b) {
     if (a.buf.dtype != b.buf.dtype) {
         throw pg::shape_error(
@@ -474,26 +494,14 @@ Array* matmul_device(const Array& a, const Array& b) {
     const int64_t out_bytes = pg::checked_bytes(d.m, d.n, elem);
 
     pg::cuda::DeviceBuffer out{nullptr, d.m, d.n, dt};
+    std::unique_ptr<Array> result;
     {
-        // Drop the GIL around the alloc + device GEMM + syncs: none touch a
-        // Python object. The ordering is the correctness contract here, NOT an
-        // accident of which stream wins a race:
-        //   - The operands were made resident by to_device's sync_transfer, so
-        //     cuBLAS on the compute stream can read them.
-        //   - The output buffer is allocated on the TRANSFER stream
-        //     (alloc_device), but the GEMM writes it on the COMPUTE stream, and
-        //     the two streams are unordered -- so sync_transfer() fences the
-        //     allocation complete before the GEMM can write the buffer (without
-        //     it, compute-sanitizer --track-stream-ordered-races all flags the
-        //     GEMM's writes as use-before-alloc).
-        //   - sync_compute() after the GEMM fences the result fully written
-        //     before the Array crosses back to Python, the compute-side twin of
-        //     from_device's D2H sync.
+        // The allocation, the operands' uploads, and the GEMM are all on the
+        // context stream, so stream order is the whole ordering contract.
         nb::gil_scoped_release release;
         out.ptr = pg::cuda::alloc_device(out_bytes);
-        // Fence the output allocation (transfer stream) before the GEMM writes it
-        // on the unordered compute stream.
-        pg::cuda::sync_transfer();
+        // Owned at once, so a copy or launch that throws frees the buffer.
+        result = std::make_unique<Array>(out);
         // Route through the dispatch tier, not cuda::gemm directly: the
         // device-resident routing decision (and the f64-never-AUTO-routes rule it
         // documents) belongs in src/dispatch. Both operands are already an
@@ -511,12 +519,8 @@ Array* matmul_device(const Array& a, const Array& b) {
                 static_cast<const float*>(b.buf.ptr),
                 static_cast<float*>(out.ptr), d.m, d.k, d.n);
         }
-        // Fence the GEMM complete: the output buffer is fully written before the
-        // result Array is usable (a from_device on it must see the finished
-        // product, not a half-written buffer).
-        pg::cuda::sync_compute();
     }
-    return new Array(out);
+    return result.release();
 }
 
 // The cudaEvent-timed device matmul: (Array x, Array y, reps, warmups) -> warm
@@ -556,25 +560,11 @@ float time_matmul_entry(const Array& x, const Array& y, int reps, int warmups) {
 
 // The device-resident fused ops: device-in/device-out, pg.Array -> pg.Array.
 // Each mirrors matmul_device's Array overload (validate, checked_bytes,
-// alloc_device, GIL release, route via the dispatch tier) but is SIMPLER: the
-// output buffer is allocated on the COMPUTE stream and the kernel runs on the
-// SAME compute stream, so there is NO transfer->compute cross-stream fence to add
-// (matmul_device fences because it allocs the output on the transfer stream; the
-// fused path stays single-stream by construction, which is exactly why v1 fused
-// is device-resident-only -- it removes the transfer->compute race surface
-// entirely). The wrapper sends only all-pg.Array same-residency operands here; a
-// dtype/shape
+// alloc_device, GIL release, route via the dispatch tier, no host wait). The
+// wrapper sends only all-pg.Array same-residency operands here; a dtype/shape
 // mismatch raises shape_error -> ValueError rather than computing garbage. The
 // same-shape rule (no broadcast) is the wrapper's guarantee, so these validate
 // only dtype + exact rows/cols equality across operands.
-
-// Allocate an output device buffer of the same shape/dtype on the compute stream.
-// alloc_device pre-flights cudaMemGetInfo and allocates from the context mempool;
-// it runs on the transfer stream internally, so the caller fences with
-// sync_transfer before the compute-stream kernel reads/writes it -- the one fence
-// the single-stream fused path needs is the alloc-before-kernel ordering, the same
-// transfer->compute boundary matmul_device fences. checked_bytes guards the int64
-// element-count -> byte-count product first.
 Array* fused_axpby_device_entry(const Array& x, const Array& y, double a,
                                 double b) {
     if (x.buf.dtype != y.buf.dtype) {
@@ -592,13 +582,12 @@ Array* fused_axpby_device_entry(const Array& x, const Array& y, double a,
         pg::checked_bytes(rows, cols, pg::cuda::dtype_size(dt));
 
     pg::cuda::DeviceBuffer out{nullptr, rows, cols, dt};
+    std::unique_ptr<Array> result;
     {
         nb::gil_scoped_release release;
         out.ptr = pg::cuda::alloc_device(out_bytes);
-        // Fence the output allocation (transfer stream) before the kernel writes
-        // it on the compute stream, then run the kernel; sync_compute fences the
-        // result fully written before the Array crosses back to Python.
-        pg::cuda::sync_transfer();
+        // Owned at once, so a copy or launch that throws frees the buffer.
+        result = std::make_unique<Array>(out);
         if (dt == pg::cuda::DType::f64) {
             pg::dispatch::fused_axpby_device<double>(
                 static_cast<const double*>(x.buf.ptr),
@@ -611,9 +600,8 @@ Array* fused_axpby_device_entry(const Array& x, const Array& y, double a,
                 static_cast<float*>(out.ptr), n, static_cast<float>(a),
                 static_cast<float>(b));
         }
-        pg::cuda::sync_compute();
     }
-    return new Array(out);
+    return result.release();
 }
 
 Array* fused_fma3_device_entry(const Array& x, const Array& y, const Array& z) {
@@ -632,10 +620,12 @@ Array* fused_fma3_device_entry(const Array& x, const Array& y, const Array& z) {
         pg::checked_bytes(rows, cols, pg::cuda::dtype_size(dt));
 
     pg::cuda::DeviceBuffer out{nullptr, rows, cols, dt};
+    std::unique_ptr<Array> result;
     {
         nb::gil_scoped_release release;
         out.ptr = pg::cuda::alloc_device(out_bytes);
-        pg::cuda::sync_transfer();
+        // Owned at once, so a copy or launch that throws frees the buffer.
+        result = std::make_unique<Array>(out);
         if (dt == pg::cuda::DType::f64) {
             pg::dispatch::fused_fma3_device<double>(
                 static_cast<const double*>(x.buf.ptr),
@@ -649,9 +639,8 @@ Array* fused_fma3_device_entry(const Array& x, const Array& y, const Array& z) {
                 static_cast<const float*>(z.buf.ptr),
                 static_cast<float*>(out.ptr), n);
         }
-        pg::cuda::sync_compute();
     }
-    return new Array(out);
+    return result.release();
 }
 
 Array* fused_scaled_relu_device_entry(const Array& x, double scale) {
@@ -663,10 +652,12 @@ Array* fused_scaled_relu_device_entry(const Array& x, double scale) {
         pg::checked_bytes(rows, cols, pg::cuda::dtype_size(dt));
 
     pg::cuda::DeviceBuffer out{nullptr, rows, cols, dt};
+    std::unique_ptr<Array> result;
     {
         nb::gil_scoped_release release;
         out.ptr = pg::cuda::alloc_device(out_bytes);
-        pg::cuda::sync_transfer();
+        // Owned at once, so a copy or launch that throws frees the buffer.
+        result = std::make_unique<Array>(out);
         if (dt == pg::cuda::DType::f64) {
             pg::dispatch::fused_scaled_relu_device<double>(
                 static_cast<const double*>(x.buf.ptr),
@@ -676,9 +667,8 @@ Array* fused_scaled_relu_device_entry(const Array& x, double scale) {
                 static_cast<const float*>(x.buf.ptr),
                 static_cast<float*>(out.ptr), n, static_cast<float>(scale));
         }
-        pg::cuda::sync_compute();
     }
-    return new Array(out);
+    return result.release();
 }
 
 // The cudaEvent-timed device fused CHAIN timer (the primitive the bench consumes).
@@ -883,18 +873,41 @@ NB_MODULE(_core, m) {
         return d;
     });
 
-    // double before float, like every other overload set: a float64 array must
-    // never bind the float32 overload (a silent narrowing). Private and
-    // CUDA-only; the public device matmul is exposed via the Array overload of
-    // matmul below, wired into pg.matmul by the wrapper.
-    m.def("_gemm_host", &gemm_host_typed<double>, nb::arg("a"), nb::arg("b"));
-    m.def("_gemm_host", &gemm_host_typed<float>, nb::arg("a"), nb::arg("b"));
+    // The staged GEMM behind pg.matmul's GPU route for host operands, with and
+    // without out. double before float, like every other overload set: a float64
+    // array must never bind the float32 overload (a silent narrowing).
+    m.def("_gemm_host", &gemm_host_typed<double>, arr("a"), arr("b"));
+    m.def("_gemm_host", &gemm_host_typed<float>, arr("a"), arr("b"));
+    m.def("_gemm_host", &gemm_host_into<double>, arr("a"), arr("b"), arr("out"));
+    m.def("_gemm_host", &gemm_host_into<float>, arr("a"), arr("b"), arr("out"));
+
+    // Test and measurement hooks. _cuda_sync is the host fence (it raises the
+    // name of a pending asynchronous error); _cuda_stream_idle reports whether
+    // queued work remains; _pinned_pool_stats reports the page-locked pool;
+    // _cuda_inject_fault queues a trapping kernel and _cuda_teardown runs the exit
+    // teardown early, both for child processes only (the context is unusable after
+    // either).
+    m.def("_cuda_sync", [] {
+        nb::gil_scoped_release release;
+        pg::cuda::sync();
+    });
+    m.def("_cuda_stream_idle", [] { return pg::cuda::stream_idle(); });
+    m.def("_pinned_pool_stats", [] {
+        const pg::cuda::pinned_pool_stats s = pg::cuda::pinned_stats();
+        nb::dict d;
+        d["reserved"] = s.reserved;
+        d["loaned"] = s.loaned;
+        d["cap"] = s.cap;
+        return d;
+    });
+    m.def("_cuda_inject_fault", [] { pg::cuda::inject_fault(); });
+    m.def("_cuda_teardown", [] { pg::cuda::teardown(); });
 
     // pg.Array: the device-resident array handle. Read-only shape (a tuple) and
     // dtype (the numpy dtype), and __dlpack__/__dlpack_device__ reporting a CUDA
     // device. The class owns its device buffer and frees it on GC (~Array); the
-    // dlpack export keeps the Array alive via the owner reference rather than
-    // freeing through a capsule deleter, so a device-aware consumer can hold the
+    // dlpack capsule keeps the Array alive via the owner reference rather than
+    // freeing through its deleter, so a device-aware consumer can hold the
     // exported tensor without a use-after-free.
     nb::class_<Array>(m, "Array")
         .def_prop_ro(
@@ -911,12 +924,12 @@ NB_MODULE(_core, m) {
                     self.buf.dtype == pg::cuda::DType::f64 ? "float64"
                                                             : "float32");
             })
-        .def(
-            "__dlpack__",
-            [](nb::handle self) {
-                const Array& arr = nb::cast<const Array&>(self);
-                return array_dlpack_view(self, arr);
-            })
+        .def("__dlpack__", &array_dlpack, nb::kw_only(), nb::arg("stream") = nb::none(),
+             nb::arg("max_version") = nb::none(), nb::arg("dl_device") = nb::none(),
+             nb::arg("copy") = nb::none(),
+             "Export the device buffer as a DLPack capsule (the array API protocol).\n\n"
+             "Waits for queued device work first unless stream is -1. stream 0 raises\n"
+             "ValueError; copy=True or a dl_device other than (2, 0) raises BufferError.")
         .def("__dlpack_device__", [](const Array&) {
             // (device_type, device_id): kDLCUDA is 2 in the DLPack device enum.
             // Reported directly so a consumer's __dlpack_device__ negotiation
@@ -930,7 +943,7 @@ NB_MODULE(_core, m) {
     m.def("to_device", &to_device_typed<float>, nb::arg("a"));
 
     // from_device(pg.Array) -> ndarray. One entry, dtype-dispatched off the
-    // Array (no host operand to overload on): the D2H copy + transfer-stream sync
+    // Array (no host operand to overload on): the D2H copy and the host fence
     // happen in from_device_typed before the host ndarray is returned.
     m.def(
         "from_device",
@@ -941,12 +954,12 @@ NB_MODULE(_core, m) {
         },
         nb::arg("x"));
 
-    // The REQUIRED device-resident matmul: matmul(Array, Array) -> Array,
-    // device-in/device-out, dtype-dispatched. Host pairs go through
-    // matmul_into instead. The wrapper consumes this for the device-resident
-    // routing; a test round-trips it against the CPU result through
-    // assert_matmul_close.
-    m.def("matmul", &matmul_device, nb::arg("a"), nb::arg("b"));
+    // The device-resident matmul: (Array, Array) -> Array, dtype-dispatched.
+    // The device entries carry private names of their own, never a name a host
+    // overload shares: nanobind tries overloads in order, and a host overload
+    // tried first would import each Array through __dlpack__, a host wait per
+    // operand.
+    m.def("_matmul_device", &matmul_device, nb::arg("a"), nb::arg("b"));
 
     // The cudaEvent-timed device-matmul timer (the primitive the bench consumes).
     // Both operands are device-resident pg.Array, so the timed region is the
@@ -959,15 +972,13 @@ NB_MODULE(_core, m) {
 
     // The device-resident fused ops; host operands go through the *_into entries
     // above. device-in/device-out -> pg.Array. The wrapper routes here only when
-    // every operand is a pg.Array
-    // (the device residency branch); single-stream, no cross-stream fence (the v1
-    // device-resident-only design). a, b, scale arrive as Python floats (double);
+    // every operand is a pg.Array. a, b, scale arrive as Python floats (double);
     // the f32 path narrows them, like the CPU axpby/scaled_relu.
-    m.def("axpby", &fused_axpby_device_entry, nb::arg("x"), nb::arg("y"),
+    m.def("_axpby_device", &fused_axpby_device_entry, nb::arg("x"), nb::arg("y"),
           nb::arg("a"), nb::arg("b"));
-    m.def("fma3", &fused_fma3_device_entry, nb::arg("x"), nb::arg("y"),
+    m.def("_fma3_device", &fused_fma3_device_entry, nb::arg("x"), nb::arg("y"),
           nb::arg("z"));
-    m.def("scaled_relu", &fused_scaled_relu_device_entry, nb::arg("x"),
+    m.def("_scaled_relu_device", &fused_scaled_relu_device_entry, nb::arg("x"),
           nb::arg("scale"));
 
     // The cudaEvent-timed device fused CHAIN timer (the primitive the bench
