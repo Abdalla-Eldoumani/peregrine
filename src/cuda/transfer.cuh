@@ -41,57 +41,58 @@ struct DeviceBuffer {
     int64_t bytes() const { return rows * cols * dtype_size(dtype); }
 };
 
-// Allocate a device buffer of `bytes` from the context mempool (cudaMallocAsync
-// on a context stream, reused via the UINT64_MAX release threshold the context
-// sets on the pool).
-// Pre-flights cudaMemGetInfo against the CURRENT free VRAM and throws
-// pg::cuda_error carrying the cudaErrorMemoryAllocation NAME when the request
-// would exceed free (with a small headroom margin) -- never discovering OOM by
-// failing the allocation, which on a display GPU can wedge the desktop. The
-// returned pointer is owned by the caller and freed with free_device.
+// Refuses a request the device cannot hold, before allocating, by throwing
+// pg::cuda_error named cudaErrorMemoryAllocation (the name a failed allocation
+// carries, so the wrapper treats both alike). Only requests of at least 256 MiB
+// are checked: on WDDM an oversized allocation can spill into system memory
+// through the driver's sysmem fallback instead of failing, and that is where it
+// matters; smaller requests rely on the cudaMallocAsync error. Free is what
+// cudaMemGetInfo reports plus what the mempool holds unused, capped by
+// Context::free_cap.
+void preflight(int64_t bytes);
+
+// Allocate a device buffer of `bytes` from the context mempool (pre-flight, then
+// cudaMallocAsync on the context stream; reused via the pool's UINT64_MAX
+// release threshold). The caller owns the pointer and frees it with free_device.
 void* alloc_device(int64_t bytes);
 
 // Free a device buffer previously returned by alloc_device (cudaFreeAsync back
-// to the mempool). Returns the memory to the pool, not the OS, so the next
-// allocation of the same size reuses it. CHECK-wrapped: never call from teardown.
+// to the mempool, ordered behind every queued use). Never throws, and after
+// teardown it leaks instead of touching the destroyed stream.
 void free_device(void* dptr);
 
-// Host->device and device->host copies on the context TRANSFER stream (separate
-// from the compute stream so a copy can overlap an unrelated GEMM). Both are
-// cudaMemcpyAsync: they are queued, not synchronous. A D2H whose result is about
-// to cross back into Python MUST be followed by sync_transfer() before the host
-// buffer is read -- see from_device in the binding. bytes is int64 per the src
-// index rule; the cast to size_t at the cudaMemcpyAsync boundary is guarded by
-// the caller's allocation having succeeded for that many bytes.
+// Copies queued on the context stream. copy_h2d returns once the source may be
+// changed: a pageable source has been staged by then, and a page-locked one is
+// waited for. copy_d2h only queues; the host reads the destination after sync().
 void copy_h2d(void* dst_dev, const void* src_host, int64_t bytes);
 void copy_d2h(void* dst_host, const void* src_dev, int64_t bytes);
 
-// Synchronize the transfer stream: blocks until every queued copy on it has
-// completed. This is the "async wins live inside a call, never across the API
-// boundary" rule made concrete -- from_device calls it after copy_d2h and before
-// returning the host ndarray, so a caller can never read a half-filled buffer.
-// to_device also calls it after copy_h2d so operands are fully resident before a
-// later compute-stream GEMM reads them: alloc_device/copy_h2d run on the transfer
-// stream, the GEMM on the compute stream, and the two streams are unordered, so
-// without this fence cuBLAS can read an operand whose H2D copy has not landed (a
-// cross-stream use-before-ready race; compute-sanitizer memcheck
-// --track-stream-ordered-races all reports it as use-before-alloc).
-void sync_transfer();
+// The host fence: blocks until everything queued on the context stream is done,
+// and throws pg::cuda_error carrying the name of any asynchronous device error
+// queued work raised. Used wherever the host or another library is about to read
+// device results.
+void sync();
 
-// Synchronize the compute stream: blocks until every launch on it (the cuBLAS
-// GEMM) has completed. The device-resident matmul entry calls it after the GEMM
-// so the output buffer is fully written before the result Array crosses back to
-// Python -- the compute-side twin of sync_transfer's D2H fence. Without it a
-// caller could from_device an output whose GEMM has not finished, the same
-// across-the-API-boundary race the D2H sync closes for transfers. CHECK-wrapped
-// (a sync can surface an asynchronous launch error) and never used at teardown.
-void sync_compute();
+// Whether the context stream has no unfinished work (cudaStreamQuery), for tests.
+bool stream_idle();
 
-// Pinned host-staging is a future optimization and is not implemented here:
-// current transfers use pageable host memory (gemm_host stages through a pageable
-// new T[]; to_device/from_device copy pageable host buffers). A pageable copy
-// forces cudaMemcpyAsync through a driver-internal bounce buffer and cannot fully
-// overlap, so a pinned-buffer cache would be the way to make H2D/D2H genuinely
-// async at the full PCIe rate when a large-transfer path needs it.
+// Host buffers for device-to-host results, lent to NumPy. A buffer is
+// page-locked, from a pool capped at 256 MB of page-locked memory counting the
+// buffers on loan, or ordinary pageable memory once the pool cannot fit it.
+// release_host is the capsule deleter that ends the loan: it makes no CUDA call,
+// and after teardown it leaks the buffer.
+struct host_buffer {
+    void* data;
+    void* loan;  // the capsule pointer for release_host
+};
+host_buffer acquire_host(int64_t bytes);
+void release_host(void* loan) noexcept;
+
+struct pinned_pool_stats {
+    int64_t reserved;  // page-locked bytes the pool holds, free or on loan
+    int64_t loaned;
+    int64_t cap;
+};
+pinned_pool_stats pinned_stats();
 
 } // namespace pg::cuda
