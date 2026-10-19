@@ -40,6 +40,12 @@ struct Context {
     // orders a buffer's allocation, its uses, and its free; the host waits only
     // at the fences where it or another library reads device results.
     cudaStream_t stream;
+    // Used only inside the staged float32 GEMM, which uploads on one and downloads
+    // on the other while its row blocks compute on `stream`, ordered by events, and
+    // joins both back into `stream` before its fence, so nothing outside that call
+    // ever waits on them.
+    cudaStream_t upload_stream;
+    cudaStream_t download_stream;
     cudaMemPool_t pool;       // the device default mempool, release threshold raised for reuse
     cublasHandle_t cublas;    // one v2 handle, bound to the stream
     cublasLtHandle_t cublaslt; // held for future use (batched/epilogue work); GEMM uses cublasSgemm/Dgemm
