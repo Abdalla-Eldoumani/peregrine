@@ -460,15 +460,16 @@ def _measure_grid(budget_seconds: float, start: float, cuda: bool) -> dict:
 def _measure_transfer(sizes: list) -> dict:
     """Measure H2D / D2H bandwidth and the fixed staging floor, in seconds.
 
-    Caller-gated on ``pg.has_cuda()``. The native upload and download entries
-    both synchronize at the boundary, so a ``perf_counter`` round trip around
-    them is an honest transfer time. Bandwidth is derived from the largest
-    measured size (where the fixed per-call overhead is the smallest fraction of
-    the time, giving the cleanest GB/s), and the fixed staging floor is recovered
-    from the smallest size as the part of its round-trip time NOT explained by
-    the measured bandwidth -- the allocation, crossing, and copy-setup floor that
-    keeps a small host GEMM on the CPU. Both are clamped non-negative so a
-    noisy tiny-size sample can never produce a nonsensical negative floor.
+    Caller-gated on ``pg.has_cuda()``. The native download waits for its copy
+    and each upload is followed by the stream fence, so a ``perf_counter``
+    round trip around them is an honest transfer time. Bandwidth is derived
+    from the largest measured size (where the fixed per-call overhead is the
+    smallest fraction of the time, giving the cleanest GB/s), and the fixed
+    staging floor is recovered from the smallest size as the part of its
+    round-trip time NOT explained by the measured bandwidth -- the allocation,
+    crossing, and copy-setup floor that keeps a small host GEMM on the CPU.
+    Both are clamped non-negative so a noisy tiny-size sample can never produce
+    a nonsensical negative floor.
 
     Parameters
     ----------
@@ -481,8 +482,13 @@ def _measure_transfer(sizes: list) -> dict:
     dict
         ``{"h2d_gbps", "d2h_gbps", "fixed_overhead_s"}``.
     """
+    def _upload(arr):
+        dev = pg._to_device_native(arr)
+        pg._core._cuda_sync()
+        return dev
+
     def _h2d(arr) -> float:
-        return _min_time(lambda: pg._to_device_native(arr), _GPU_REPS, _GPU_WARMUP)
+        return _min_time(lambda: _upload(arr), _GPU_REPS, _GPU_WARMUP)
 
     def _d2h(dev) -> float:
         return _min_time(lambda: pg._from_device_native(dev), _GPU_REPS, _GPU_WARMUP)
