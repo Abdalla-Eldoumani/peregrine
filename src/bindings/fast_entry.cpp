@@ -1,6 +1,7 @@
 // The fast entries: METH_FASTCALL functions that take the common host case of
 // each public op (exact ndarrays, 2-D, float32 or float64, native, aligned,
-// C-contiguous, non-empty) straight to pg::dispatch, and return NotImplemented
+// C-contiguous, or F-contiguous too for matmul, non-empty) straight to
+// pg::dispatch, and return NotImplemented
 // for anything else so the Python wrapper, which owns every error, promotion,
 // and warning, handles it. They never raise for an input the wrapper would
 // handle: any failure here declines instead.
@@ -85,6 +86,30 @@ bool is_operand(PyObject* o, int type) {
            PyArray_DIM(a, 0) > 0 && PyArray_DIM(a, 1) > 0;
 }
 
+// matmul also takes F-contiguous operands, transposed views among them: its
+// kernels read strides and sum each element in the same order for every
+// layout. The reductions and elementwise ops do not, since the Python path
+// computes them on a C-ordered copy and another memory order would change the
+// bits.
+bool is_matmul_operand(PyObject* o, int type) {
+    if (!PyArray_CheckExact(o)) {
+        return false;
+    }
+    PyArrayObject* a = as_array(o);
+    return PyArray_NDIM(a) == 2 && PyArray_TYPE(a) == type && PyArray_ISNOTSWAPPED(a) &&
+           PyArray_CHKFLAGS(a, NPY_ARRAY_ALIGNED) &&
+           (PyArray_CHKFLAGS(a, NPY_ARRAY_C_CONTIGUOUS) || PyArray_CHKFLAGS(a, NPY_ARRAY_F_CONTIGUOUS)) &&
+           PyArray_DIM(a, 0) > 0 && PyArray_DIM(a, 1) > 0;
+}
+
+// In elements. A length-1 dim may carry any byte stride, even one that is not
+// a whole number of elements; dispatch replaces it, since it never moves the
+// pointer.
+int64_t elem_stride(PyObject* o, int dim) {
+    PyArrayObject* a = as_array(o);
+    return static_cast<int64_t>(PyArray_STRIDE(a, dim) / PyArray_ITEMSIZE(a));
+}
+
 bool same_dims(PyObject* x, PyObject* y) {
     return PyArray_DIM(as_array(x), 0) == PyArray_DIM(as_array(y), 0) &&
            PyArray_DIM(as_array(x), 1) == PyArray_DIM(as_array(y), 1);
@@ -102,7 +127,7 @@ bool is_out(PyObject* o, int type, npy_intp d0, npy_intp d1) {
            PyArray_DIM(a, 0) == d0 && PyArray_DIM(a, 1) == d1;
 }
 
-// Address-range overlap of two C-contiguous 2-D arrays. A C-contiguous array
+// Address-range overlap of two C- or F-contiguous 2-D arrays. Such an array
 // occupies exactly d0*d1*itemsize bytes from its data pointer whatever strides
 // its length-1 dims carry, so the range is exact, matching np.may_share_memory.
 bool overlaps(PyObject* x, PyObject* y) {
@@ -222,7 +247,7 @@ PyObject* matmul_typed(PyObject* const* args) {
     PyObject* a = args[0];
     PyObject* b = args[1];
     PyObject* out = args[2];
-    if (!is_operand(a, type) || !is_operand(b, type)) {
+    if (!is_matmul_operand(a, type) || !is_matmul_operand(b, type)) {
         return not_implemented();
     }
     const npy_intp m = PyArray_DIM(as_array(a), 0);
@@ -242,7 +267,8 @@ PyObject* matmul_typed(PyObject* const* args) {
     }
     const double work = static_cast<double>(m) * static_cast<double>(k) * static_cast<double>(n);
     return run(r, work >= kMatmulGilWork, [&] {
-        pg::dispatch::matmul<T>(data_of<const T>(a), data_of<const T>(b), data_of<T>(r), m, k, n);
+        pg::dispatch::matmul<T>(data_of<const T>(a), elem_stride(a, 0), elem_stride(a, 1), data_of<const T>(b),
+                                elem_stride(b, 0), elem_stride(b, 1), data_of<T>(r), m, k, n);
     });
 }
 
