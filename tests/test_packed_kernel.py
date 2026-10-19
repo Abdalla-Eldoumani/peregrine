@@ -1,7 +1,7 @@
 """The packed microkernels: the store-only first k panel and every edge tile.
 
-Every product here has a dimension above 96, the largest that gemm_blis still
-sends to its small direct path, so each one runs the packed f64 6x8 or f32 6x16
+Every product here has a dimension above 96, the largest that dispatch still
+sends to the small direct path, so each one runs the packed f64 6x8 or f32 6x16
 microkernel.
 
 The first k panel of each C tile stores acc + 0.0 without reading C. The + 0.0
