@@ -241,42 +241,9 @@ void gemm_blis(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b,
     }
 }
 
-// The direct path: no packing, no heap, one thread. Each element is one chain
-// over k in order, so like the packed path it gives the same bits for every
-// operand layout; the unit-stride loop is only the vectorizable form of the
-// same arithmetic.
-template <typename T>
-void gemm_blis_small(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b,
-                     T* c, int64_t m, int64_t k, int64_t n) {
-    if (m == 0 || n == 0) {
-        return;
-    }
-    std::memset(c, 0, static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T));
-    for (int64_t i = 0; i < m; ++i) {
-        T* ci = c + i * n;
-        for (int64_t p = 0; p < k; ++p) {
-            const T aval = a[i * rs_a + p * cs_a];
-            const T* bp = b + p * rs_b;
-            if (cs_b == 1) {
-                for (int64_t j = 0; j < n; ++j) {
-                    ci[j] += aval * bp[j];
-                }
-            } else {
-                for (int64_t j = 0; j < n; ++j) {
-                    ci[j] += aval * bp[j * cs_b];
-                }
-            }
-        }
-    }
-}
-
 template void gemm_blis<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t,
                                float*, int64_t, int64_t, int64_t);
 template void gemm_blis<double>(const double*, int64_t, int64_t, const double*, int64_t, int64_t,
                                 double*, int64_t, int64_t, int64_t);
-template void gemm_blis_small<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t,
-                                     float*, int64_t, int64_t, int64_t);
-template void gemm_blis_small<double>(const double*, int64_t, int64_t, const double*, int64_t, int64_t,
-                                      double*, int64_t, int64_t, int64_t);
 
 } // namespace pg::cpu
