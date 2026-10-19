@@ -427,12 +427,17 @@ def abba_order(names: list[str], cell_id: str) -> list[str]:
 
 
 def abba_blocks(order: list[str], rounds: int) -> list[str]:
-    # Mirrored rounds: A B | B A | A B ... (A B C | C B A for three). Each
-    # contender sits at every position equally often, so a slow drift in clock
-    # or temperature cannot favor whoever always runs first.
+    # Mirrored rounds: A B | B A | A B ..., so a slow drift in clock or
+    # temperature cannot favor whoever always runs first. With three or more
+    # contenders the base order also rotates every two rounds (A B C | C B A |
+    # B C A | A C B | ...): mirroring alone would keep the middle contender in
+    # the middle, always following another contender and never itself.
     seq: list[str] = []
+    n = len(order)
     for r in range(rounds):
-        seq.extend(order if r % 2 == 0 else order[::-1])
+        k = (r // 2) % n if n > 2 else 0
+        base = order[k:] + order[:k]
+        seq.extend(base if r % 2 == 0 else base[::-1])
     return seq
 
 
