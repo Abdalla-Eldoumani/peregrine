@@ -1090,8 +1090,11 @@ def sum(a, *, axis=None):
 
     Matches ``numpy.sum`` for float32 and float64 operands, including
     zero-sized dimensions and NaN/Inf propagation, with summation performed
-    in the input dtype (pairwise along a contiguous axis, sequential along
-    the non-contiguous axis, the same algorithm class NumPy uses).
+    in the input dtype. Rows and the whole array sum pairwise, as NumPy sums
+    a contiguous axis. Along axis 0, blocks of up to 128 rows sum
+    sequentially, as NumPy does, and the blocks then add pairwise, so tall
+    arrays round less than a running sum. The result does not depend on the
+    thread count.
 
     Parameters
     ----------
