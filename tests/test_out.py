@@ -348,13 +348,14 @@ def test_device_operands_with_out_are_mixed_residency(op):
 @gpu
 def test_matmul_out_on_a_gpu_route(monkeypatch):
     # a forced cuda backend stages a host float32 pair to the device; the staged
-    # product is copied into out
+    # product lands in out, bit for bit the product staged without out
     monkeypatch.setattr(pg, "_backend", "cuda")
     a = _rand((64, 48), np.float32, 0)
     b = _rand((48, 80), np.float32, 1)
     out = np.full((64, 80), np.nan, np.float32)
     assert pg.matmul(a, b, out=out) is out
     assert_matmul_close(out, a @ b, a, b)
+    assert out.tobytes() == pg.matmul(a, b).tobytes()
 
 
 # --- every host result is NumPy-allocated ---------------------------------------
