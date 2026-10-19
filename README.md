@@ -103,6 +103,18 @@ if pg.has_cuda():
 `set_backend` accepts `"auto"`, `"cpu"`, or `"cuda"`. `calibrate` measures a square
 GEMM per size and dtype and caches the crossover the auto policy reads.
 
+### Output memory
+
+A large result is new memory from the operating system, and the first write to
+each 4 KiB page of it costs a page fault: about 0.4 us a page, which for a
+transpose or a fused op over a few MiB can take longer than the arithmetic.
+Peregrine therefore keeps the buffers of large results you have freed (512 KiB
+and up) and hands them to the next result of the same size. Results are still
+ordinary NumPy-owned arrays; NumPy's own allocations and yours are untouched.
+The price is memory: up to 256 MiB of freed buffers stay with the process
+instead of going back to the system. Set `PEREGRINE_OUTPUT_CACHE_MB` before
+importing Peregrine to change that cap, or to `0` to turn the cache off.
+
 ## Results
 
 All numbers below are regenerated from the committed results JSON by
