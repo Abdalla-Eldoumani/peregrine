@@ -118,7 +118,7 @@ inline void put(T* c, int64_t ldc, int r, int v, int64_t nr, bool last, typename
     }
 #define PG_PUT(r, v)                                                                                         \
     if constexpr (r < MR && v < NV) {                                                                        \
-        put(c, ldc, r, v, nr, last, c##r##v);                                                                \
+        put(c, ldc, r, v, nr, ONE || last, c##r##v);                                                         \
     }
 #define PG_B(v)                                                                                              \
     if constexpr (v < NV) {                                                                                  \
@@ -138,14 +138,20 @@ inline void put(T* c, int64_t ldc, int r, int v, int64_t nr, bool last, typename
 // row at the block's first k column; row p of the B panel is bp + p * ldb, NV
 // full vectors wide. first starts each chain from +0.0 instead of the partial
 // sum the previous k block left in C; last applies the final + 0.0. nr is the
-// live column count, so the panel's padded columns are never stored.
-template <typename T, int MR, int NV>
+// live column count, so the panel's padded columns are never stored. ONE marks a
+// single k block (first and last): the chains start from +0.0 in registers and
+// take the final + 0.0 unconditionally, since the run-time checks cost a branch
+// or two per accumulator at both ends of the tile (out=, float64 16-cube 341 ->
+// 305 ns, float32 32-cube 988 -> 907).
+template <typename T, int MR, int NV, bool ONE>
 void tile(const T* a, int64_t rs_a, int64_t cs_a, const T* bp, int64_t ldb, T* c, int64_t ldc, int64_t kb,
           int64_t nr, bool first, bool last) {
     using S = simd<T>;
     static_assert(MR >= 1 && MR <= 6 && NV >= 1 && NV <= (MR == 1 ? 8 : MR == 2 ? 4 : MR == 3 ? 3 : 2));
     PG_TILE_ACCS(PG_DECL)
-    PG_TILE_ACCS(PG_START)
+    if constexpr (!ONE) {
+        PG_TILE_ACCS(PG_START)
+    }
     [[maybe_unused]] typename S::reg b0, b1, b2, b3, b4, b5, b6, b7;
     typename S::reg av;
     for (int64_t p = 0; p < kb; ++p) {
@@ -180,7 +186,31 @@ void rows(int64_t mr, const T* a, int64_t rs_a, int64_t cs_a, const T* bp, int64
             return;
         }
     }
-    tile<T, MR, NV>(a, rs_a, cs_a, bp, ldb, c, ldc, kb, nr, first, last);
+    if (first && last) {
+        tile<T, MR, NV, true>(a, rs_a, cs_a, bp, ldb, c, ldc, kb, nr, first, last);
+    } else {
+        tile<T, MR, NV, false>(a, rs_a, cs_a, bp, ldb, c, ldc, kb, nr, first, last);
+    }
+}
+
+// The light pack of unit-stride rows, a vector at a time: whole vectors are
+// copied, a partial one comes through a masked load whose dead lanes read as
+// zero, and the vectors past nr are zero. Element by element it cost about a
+// third of a float32 12-cube (out= 263 -> 182 ns, 20-cube 590 -> 476).
+template <typename T, int NV>
+void pack_rows(T* dst, const T* src, int64_t rs, int64_t kb, int64_t nr) {
+    using S = simd<T>;
+    for (int64_t p = 0; p < kb; ++p) {
+        const T* s = src + p * rs;
+        T* d = dst + p * NV * S::W;
+        for (int v = 0; v < NV; ++v) {
+            const int64_t live = nr - v * S::W;
+            const typename S::reg x = live >= S::W ? S::load(s + v * S::W)
+                                      : live > 0   ? S::load_part(s + v * S::W, live)
+                                                   : S::zero();
+            S::store(d + v * S::W, x);
+        }
+    }
 }
 
 // Copies kb x nr of B into a panel of width columns, zero-padding the rest, so
@@ -232,7 +262,7 @@ void drive(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int
         if (cs_b == 1) {
             const int64_t full = n - n % NR;
             if (full < n) {
-                light_pack(buf, b + p0 * rs_b + full, rs_b, cs_b, kb, n - full, NR);
+                pack_rows<T, NV>(buf, b + p0 * rs_b + full, rs_b, kb, n - full);
             }
             const int64_t fit = CHUNK_BYTES / (kb * static_cast<int64_t>(sizeof(T))) / NR * NR;
             const int64_t jb = fit > NR ? fit : NR;
