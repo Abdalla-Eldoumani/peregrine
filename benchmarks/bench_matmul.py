@@ -388,6 +388,8 @@ class Contender:
     # verification path.
     timer: Callable[[int], float] | None = None
     to_host: Callable[[object], np.ndarray] = np.asarray
+    # Drives the GPU, so its rewarm lasts Protocol.gpu_rewarm_s.
+    gpu: bool = False
 
 
 @dataclass
@@ -400,6 +402,12 @@ class Protocol:
     # Untimed running of the incoming contender before it is sampled, measured
     # in time rather than samples; see _rewarm.
     rewarm_s: float = 0.2
+    # The display GPU leaves P0 after one to a few seconds without work, and
+    # climbs back gradually: after 8 s idle a 2048 float32 device GEMM took 31.8
+    # ms on the first call, 4.75 ms at 0.2 s, 3.07 at 2 s, and 2.78 (steady) at
+    # 2.5 s of continuous work; 2 s idle already sent it to 17.6 ms. A GPU
+    # contender therefore rewarms this long at every switch.
+    gpu_rewarm_s: float = 3.0
     cv_limit: float = 0.05
     max_strikes: int = 3
     strike_cooldown_s: float = 30.0
@@ -495,6 +503,10 @@ def _sample(c: Contender, k: int, mode: str, now) -> tuple[float, list]:
     return ns / 1e9 / k, slots
 
 
+def _rewarm_s(c: Contender, proto: Protocol) -> float:
+    return max(proto.rewarm_s, proto.gpu_rewarm_s) if c.gpu else proto.rewarm_s
+
+
 def _rewarm(c: Contender, k: int, mode: str, now, seconds: float, at_least: int) -> None:
     # Cores left idle through a switch gap fall to low clocks and take on the
     # order of 100 ms to ramp back. In the first v3.0.0 baseline here, 6-thread
@@ -504,7 +516,7 @@ def _rewarm(c: Contender, k: int, mode: str, now, seconds: float, at_least: int)
     t_end = now() + int(seconds * 1e9)
     for i in range(1 << 20):
         if i >= at_least and now() >= t_end:
-            return
+            break
         if c.timer is not None:
             c.timer(k)
         else:
@@ -605,7 +617,7 @@ def measure_cell(
     planned = rounds * block * len(names)
 
     for n in order:
-        _rewarm(by[n], K, mode, now, proto.rewarm_s, proto.warmups)
+        _rewarm(by[n], K, mode, now, _rewarm_s(by[n], proto), proto.warmups)
     last = order[-1]
 
     samples = {n: [] for n in names}
@@ -624,7 +636,7 @@ def measure_cell(
             # The GPU also drops to idle clocks while a CPU contender runs (the
             # first event-timed chain after 3 s idle read 21 percent slow), so
             # a device contender always gets at least one untimed sample.
-            _rewarm(c, K, mode, now, proto.rewarm_s, 1 if c.timer is not None else 0)
+            _rewarm(c, K, mode, now, _rewarm_s(c, proto), 1 if c.timer is not None else 0)
         taken = 0
         while taken < block:
             g = min(group[n], block - taken)
