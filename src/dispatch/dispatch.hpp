@@ -30,7 +30,7 @@ inline void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n
 // CPU features, never of the layout or the thread count, because each path
 // rounds differently and a layout- or thread-dependent choice would change the
 // bits.
-enum class gemm_path { naive, small, packed };
+enum class gemm_path { naive, small, skinny, packed };
 gemm_path choose_gemm_path(int64_t m, int64_t k, int64_t n, bool avx2_fma) noexcept;
 
 #if defined(PG_HAS_CUDA)
