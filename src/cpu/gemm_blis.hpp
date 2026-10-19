@@ -10,26 +10,16 @@ namespace pg::cpu {
 // cs_b], any stride (negative or zero included), and C C-contiguous with ldc =
 // n, overwritten.
 //
-// gemm_blis is the packed five-loop engine, threaded; gemm_blis_small is the
-// direct single-threaded pass for products too small to repay packing. Each
-// computes any shape correctly; which one runs is dispatch's call, made on the
-// shape alone.
+// gemm_blis is the packed five-loop engine, threaded. It computes any shape
+// correctly; whether it runs is dispatch's call, made on the shape alone.
 template <typename T>
 void gemm_blis(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b,
                T* c, int64_t m, int64_t k, int64_t n);
-
-template <typename T>
-void gemm_blis_small(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b,
-                     T* c, int64_t m, int64_t k, int64_t n);
 
 extern template void gemm_blis<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t,
                                       float*, int64_t, int64_t, int64_t);
 extern template void gemm_blis<double>(const double*, int64_t, int64_t, const double*, int64_t, int64_t,
                                        double*, int64_t, int64_t, int64_t);
-extern template void gemm_blis_small<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t,
-                                            float*, int64_t, int64_t, int64_t);
-extern template void gemm_blis_small<double>(const double*, int64_t, int64_t, const double*, int64_t, int64_t,
-                                             double*, int64_t, int64_t, int64_t);
 
 // MC, KC, NC are loop bounds, not unroll factors, so making them runtime-settable
 // costs nothing at execution time and lets a sweep walk its grid in one process
