@@ -18,10 +18,13 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "bindings/output_cache.hpp"
 #include "dispatch/dispatch.hpp"
 #include "pg_build_definitions.h"
 
 namespace {
+
+namespace cache = pg::bindings::output_cache;
 
 // Releasing and reacquiring the GIL measured about 0.1 us per call, so it is
 // dropped only once the kernel takes about 1 to 2 us: a 32-cube matmul (32768
@@ -193,6 +196,56 @@ bool axis_arg(PyObject* o, int& axis) {
     return true;
 }
 
+// NumPy's memory-policy handler over the output cache. Static, and its capsule
+// is never released: every array allocated through it keeps a reference, and
+// one may outlive everything else at interpreter exit.
+PyDataMem_Handler g_output_handler = {
+    "peregrine",
+    1,
+    {nullptr, [](void*, std::size_t size) { return cache::allocate(size); },
+     [](void*, std::size_t nelem, std::size_t elsize) { return cache::allocate_zeroed(nelem, elsize); },
+     [](void*, void* ptr, std::size_t size) { return cache::reallocate(ptr, size); },
+     [](void*, void* ptr, std::size_t size) { cache::release(ptr, size); }},
+};
+PyObject* g_output_capsule = nullptr; // nullptr while the cache is off
+
+// A new C-ordered array that NumPy owns, from a reference to its descr (stolen).
+// From the cache threshold up the data comes through the output handler,
+// installed for this one allocation: PyDataMem_SetHandler swaps a context
+// variable, and the two swaps plus the cache lookup cost about 100 ns (an
+// allocation and free took 470 ns at the threshold, 368 just below it), which
+// small outputs cannot afford. Every allocation NumPy or the user makes keeps
+// NumPy's default handler.
+PyObject* new_output(int nd, npy_intp* dims, PyArray_Descr* descr) {
+    // Unsigned, so an absurd shape wraps instead of overflowing; NumPy rejects it.
+    std::size_t bytes = static_cast<std::size_t>(PyDataType_ELSIZE(descr));
+    for (int i = 0; i < nd; ++i) {
+        bytes *= static_cast<std::size_t>(dims[i]);
+    }
+    if (g_output_capsule == nullptr || bytes < cache::kThreshold) {
+        return PyArray_NewFromDescr(&PyArray_Type, descr, nd, dims, nullptr, nullptr, 0, nullptr);
+    }
+    PyObject* saved = PyDataMem_SetHandler(g_output_capsule);
+    if (saved == nullptr) {
+        Py_DECREF(descr);
+        return nullptr;
+    }
+    PyObject* r = PyArray_NewFromDescr(&PyArray_Type, descr, nd, dims, nullptr, nullptr, 0, nullptr);
+    PyObject* error = PyErr_GetRaisedException();
+    PyObject* ours = PyDataMem_SetHandler(saved);
+    Py_DECREF(saved);
+    if (ours == nullptr) {
+        Py_XDECREF(r);
+        Py_XDECREF(error);
+        return nullptr;
+    }
+    Py_DECREF(ours);
+    if (error != nullptr) {
+        PyErr_SetRaisedException(error);
+    }
+    return r;
+}
+
 // A new reference to the array the result is written into: out itself, or a
 // fresh array NumPy owns. nullptr (with no error set) declines.
 PyObject* result_array(PyObject* out, int type, int nd, npy_intp* dims) {
@@ -200,7 +253,8 @@ PyObject* result_array(PyObject* out, int type, int nd, npy_intp* dims) {
         Py_INCREF(out);
         return out;
     }
-    PyObject* r = PyArray_SimpleNew(nd, dims, type);
+    PyArray_Descr* descr = PyArray_DescrFromType(type);
+    PyObject* r = descr == nullptr ? nullptr : new_output(nd, dims, descr);
     if (r == nullptr) {
         PyErr_Clear();
     }
@@ -549,6 +603,30 @@ PyObject* set_routing_facts(PyObject*, PyObject* const* args, Py_ssize_t nargs) 
     Py_RETURN_NONE;
 }
 
+// _new_output(shape, dtype): the Python path's host results, allocated exactly
+// as the fast entries allocate theirs, so both paths return the same kind of
+// array. Private and called only by the wrapper, so bad arguments raise.
+PyObject* new_output_entry(PyObject*, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2 || !PyTuple_Check(args[0]) || !PyArray_DescrCheck(args[1])) {
+        PyErr_SetString(PyExc_TypeError, "_new_output takes a shape tuple and a dtype");
+        return nullptr;
+    }
+    const Py_ssize_t nd = PyTuple_Size(args[0]);
+    if (nd > NPY_MAXDIMS) {
+        PyErr_SetString(PyExc_ValueError, "_new_output: too many dimensions");
+        return nullptr;
+    }
+    npy_intp dims[NPY_MAXDIMS];
+    for (Py_ssize_t i = 0; i < nd; ++i) {
+        dims[i] = PyLong_AsSsize_t(PyTuple_GetItem(args[0], i));
+        if (dims[i] == -1 && PyErr_Occurred()) {
+            return nullptr;
+        }
+    }
+    Py_INCREF(args[1]);
+    return new_output(static_cast<int>(nd), dims, reinterpret_cast<PyArray_Descr*>(args[1]));
+}
+
 PyObject* clear_routing_facts(PyObject*, PyObject*) {
     g_forced = kAuto;
     g_auto_ready = false;
@@ -608,6 +686,23 @@ PyObject* build_info(PyObject*, PyObject*) {
     return d;
 }
 
+// The test and benchmark hook: the cache's threshold, cap, and contents.
+PyObject* output_cache_stats(PyObject*, PyObject*) {
+    PyObject* d = PyDict_New();
+    if (d == nullptr) {
+        return nullptr;
+    }
+    const cache::stats s = cache::read();
+    const bool ok = put(d, "threshold", PyLong_FromSize_t(cache::kThreshold)) &&
+                    put(d, "cap", PyLong_FromSize_t(s.cap)) && put(d, "bytes", PyLong_FromSize_t(s.bytes)) &&
+                    put(d, "blocks", PyLong_FromSize_t(s.blocks)) && put(d, "hits", PyLong_FromSize_t(s.hits));
+    if (!ok) {
+        Py_DECREF(d);
+        return nullptr;
+    }
+    return d;
+}
+
 // Function pointers go through void(*)(void) because PyCFunction does not
 // match the METH_FASTCALL signature.
 #define PG_FASTCALL(fn) reinterpret_cast<PyCFunction>(reinterpret_cast<void (*)(void)>(fn))
@@ -622,6 +717,8 @@ PyMethodDef g_methods[] = {
     {"_fast_scaled_relu", PG_FASTCALL(fast_scaled_relu), METH_FASTCALL, nullptr},
     {"_set_routing_facts", PG_FASTCALL(set_routing_facts), METH_FASTCALL, nullptr},
     {"_clear_routing_facts", clear_routing_facts, METH_NOARGS, nullptr},
+    {"_new_output", PG_FASTCALL(new_output_entry), METH_FASTCALL, nullptr},
+    {"_output_cache_stats", output_cache_stats, METH_NOARGS, nullptr},
     {"_build_info", build_info, METH_NOARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
 };
@@ -640,6 +737,12 @@ int add_fast_entries(PyObject* module) {
     g_descr_f64 = PyArray_DescrFromType(NPY_DOUBLE);
     if (g_descr_f32 == nullptr || g_descr_f64 == nullptr) {
         return -1;
+    }
+    if (cache::init()) {
+        g_output_capsule = PyCapsule_New(&g_output_handler, "mem_handler", nullptr);
+        if (g_output_capsule == nullptr) {
+            return -1;
+        }
     }
     return PyModule_AddFunctions(module, g_methods);
 }
