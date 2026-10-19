@@ -686,8 +686,23 @@ def test_staged_host_operands_in_any_layout():
         pg.set_backend("auto")
 
 
-# Legacy-killer sizes, a skinny product, and the empty and k=0 edges.
-_STAGED_SHAPES = [(1, 1, 1), (7, 5, 3), (250, 333, 7), (512, 515, 333), (4, 0, 3), (0, 5, 3)]
+# Legacy-killer sizes, a skinny product, and the empty and k=0 edges. Then the
+# edges of the overlapped float32 path, which runs from 768 rows and 2*512**3
+# flops in four row blocks cut at multiples of 64 rows: one row short, one flop
+# step short, the first shape it takes (blocks of 128, 256, 256, and 128 rows),
+# and a row count that leaves a partial last block (128, 320, 384, 169).
+_STAGED_SHAPES = [
+    (1, 1, 1),
+    (7, 5, 3),
+    (250, 333, 7),
+    (512, 515, 333),
+    (4, 0, 3),
+    (0, 5, 3),
+    (767, 419, 420),
+    (768, 418, 418),
+    (768, 419, 418),
+    (1001, 419, 418),
+]
 
 
 @gpu
