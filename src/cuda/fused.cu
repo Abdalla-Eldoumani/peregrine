@@ -262,11 +262,11 @@ void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b) {
     if constexpr (std::is_same_v<T, float>) {
         AxpbyOp op{a, b};
         fused_binary_kernel<float, AxpbyOp>
-            <<<blocks, threads, 0, context().compute>>>(x, y, out, n, nvec, op);
+            <<<blocks, threads, 0, context().stream>>>(x, y, out, n, nvec, op);
     } else {
         AxpbyOpD op{a, b};
         fused_binary_kernel<double, AxpbyOpD>
-            <<<blocks, threads, 0, context().compute>>>(x, y, out, n, nvec, op);
+            <<<blocks, threads, 0, context().stream>>>(x, y, out, n, nvec, op);
     }
     PG_CUDA_CHECK(cudaGetLastError());
 }
@@ -282,11 +282,11 @@ void fused_fma3(const T* x, const T* y, const T* z, T* out, int64_t n) {
     if constexpr (std::is_same_v<T, float>) {
         Fma3Op op{};
         fused_ternary_kernel<float, Fma3Op>
-            <<<blocks, threads, 0, context().compute>>>(x, y, z, out, n, nvec, op);
+            <<<blocks, threads, 0, context().stream>>>(x, y, z, out, n, nvec, op);
     } else {
         Fma3OpD op{};
         fused_ternary_kernel<double, Fma3OpD>
-            <<<blocks, threads, 0, context().compute>>>(x, y, z, out, n, nvec, op);
+            <<<blocks, threads, 0, context().stream>>>(x, y, z, out, n, nvec, op);
     }
     PG_CUDA_CHECK(cudaGetLastError());
 }
@@ -302,11 +302,11 @@ void fused_scaled_relu(const T* x, T* out, int64_t n, T scale) {
     if constexpr (std::is_same_v<T, float>) {
         ScaledReluOp op{scale};
         fused_unary_kernel<float, ScaledReluOp>
-            <<<blocks, threads, 0, context().compute>>>(x, out, n, nvec, op);
+            <<<blocks, threads, 0, context().stream>>>(x, out, n, nvec, op);
     } else {
         ScaledReluOpD op{scale};
         fused_unary_kernel<double, ScaledReluOpD>
-            <<<blocks, threads, 0, context().compute>>>(x, out, n, nvec, op);
+            <<<blocks, threads, 0, context().stream>>>(x, out, n, nvec, op);
     }
     PG_CUDA_CHECK(cudaGetLastError());
 }
@@ -322,11 +322,11 @@ template <typename T>
 float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
                        int warmups) {
     // Clone the time_matmul SHAPE (reject reps<=0/n==0, alloc scratch on the
-    // compute stream, events, warmups + sync, timed reps, elapsed, free), but the
+    // context stream, events, warmups + sync, timed reps, elapsed, free), but the
     // timed body is the 3-op CHAIN, not one op. Two scratch buffers (t = the
     // axpby/fma3 intermediate, out = the chain result) are allocated once outside
     // the timed window so no allocation lands inside it; the chain runs
-    // transfer-free on the compute stream. Fixed a/b/scale so the timed chain
+    // transfer-free on the context stream. Fixed a/b/scale so the timed chain
     // matches what the bench measures; correctness is the @gpu oracle test's job.
     if (reps <= 0) {
         throw ::pg::cuda_error("cuda time_fused_chain: reps must be positive");
@@ -337,7 +337,7 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
     }
 
     Context& ctx = context();
-    const cudaStream_t stream = ctx.compute;
+    const cudaStream_t stream = ctx.stream;
     const size_t bytes = static_cast<size_t>(n) * sizeof(T);
 
     void* t_raw = nullptr;
@@ -359,7 +359,7 @@ float time_fused_chain(const T* x, const T* y, const T* z, int64_t n, int reps,
     const T scale = static_cast<T>(1);
 
     // One chain iteration: t = axpby(x, y, a, b); t = fma3(t, y, z) = t*y + z;
-    // out = scaled_relu(t, scale). Three launches on the compute stream, each
+    // out = scaled_relu(t, scale). Three launches on the context stream, each
     // CHECK'd. fma3 is the true 3-operand x*y + z, so the middle step reuses y and
     // z as the multiply and add operands -- this is the same axpby -> fma3 ->
     // scaled_relu composition the bench measures, and the in-place t (read and
