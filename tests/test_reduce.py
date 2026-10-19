@@ -141,7 +141,14 @@ PAIRWISE_SHAPES = [
     (1, 16_387), (1, 131_077), (1, 1_000_003), (37, 17), (5, 129), (2, 3001),
     (9, 50_000), (1000, 3),
 ]
-AXIS0_SHAPES = [(1, 9), (128, 37), (129, 37), (1000, 3), (5000, 70), (20_000, 5), (256, 1100)]
+# Above 12 MiB the axis-0 kernel reads the rows of a block in pairs and
+# prefetches the next pair (below it, in fours): the last four shapes are over
+# that size in both dtypes, with blocks of 2, 3, and 5 rows (the row left after
+# the pairs, and both sides of the prefetch) and a short last column panel.
+AXIS0_SHAPES = [
+    (1, 9), (128, 37), (129, 37), (1000, 3), (5000, 70), (20_000, 5), (256, 1100),
+    (2, 1_600_003), (5, 700_001), (131, 25_003), (133, 25_003),
+]
 
 
 @pytest.mark.parametrize("threads", [1, 6])
