@@ -38,6 +38,7 @@ if os.name == "nt":
 
 from . import _core, policy
 from ._core import _clear_routing_facts, _has_cuda_build, _set_routing_facts, cpu_features
+from ._core import _new_output
 from ._core import axpby_into as _axpby_into
 from ._core import fma3_into as _fma3_into
 from ._core import matmul_into as _matmul_into
@@ -303,7 +304,7 @@ def _fused_out(out, arrs, op: str, dtype: np.dtype) -> np.ndarray:
     # only, the cheap test the fast path repeats in C.
     shape = arrs[0].shape
     if out is None:
-        return np.empty(shape, dtype)
+        return _new_output(shape, dtype)
     _check_out(out, op, dtype, shape)
     ptr = out.__array_interface__["data"][0]
     for arr in arrs:
@@ -695,10 +696,11 @@ def from_device(x: Array) -> np.ndarray:
 
 
 def _matmul_cpu(a, b, out=None):
-    # a and b are normalized host operands; out is validated or None. NumPy
-    # allocates every host result, so its provenance matches the fast path's.
+    # a and b are normalized host operands; out is validated or None. Every
+    # host result comes from _new_output, the allocation the fast entries
+    # make, so the two paths' results have the same provenance.
     if out is None:
-        out = np.empty((a.shape[0], b.shape[1]), a.dtype)
+        out = _new_output((a.shape[0], b.shape[1]), a.dtype)
     _matmul_into(a, b, out)
     return out
 
@@ -1027,14 +1029,14 @@ def transpose(a) -> np.ndarray:
     arr = _prepare(a, "a", "transpose")
     common = _resolve_dtype(arr, "transpose")
     arr = _normalize(arr, common)
-    out = np.empty(arr.shape[::-1], common)
+    out = _new_output(arr.shape[::-1], common)
     _transpose_into(arr, out)
     return out
 
 
 def _sum_axis(arr: np.ndarray, axis: int) -> np.ndarray:
     # axis 0 leaves one value per column, axis 1 one per row.
-    out = np.empty(arr.shape[1 - axis], arr.dtype)
+    out = _new_output((arr.shape[1 - axis],), arr.dtype)
     _sum_axis_into(arr, axis, out)
     return out
 
@@ -1184,7 +1186,10 @@ def mean(a, *, axis=None):
     # round differently, and NumPy composes mean with a division. count is a
     # Python int, so NumPy's weak-scalar rule converts it to the result dtype
     # and divides in that dtype (float32 stays float32, never a double divide).
-    return total / count
+    # In place, so an axis result keeps the _new_output buffer the fast path
+    # returns; a scalar total simply rebinds.
+    total /= count
+    return total
 
 
 def _fused_residency(operands, op: str) -> str:
