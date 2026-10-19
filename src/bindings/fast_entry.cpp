@@ -324,13 +324,10 @@ PyObject* reduce_typed(PyObject* a, int axis, bool mean) {
         return not_implemented();
     }
     return run(r, release, [&] {
-        T* o = data_of<T>(r);
-        pg::dispatch::sum_axis<T>(data_of<const T>(a), o, m, n, axis);
         if (mean) {
-            const T count = static_cast<T>(axis == 0 ? m : n);
-            for (npy_intp i = 0; i < len; ++i) {
-                o[i] = o[i] / count;
-            }
+            pg::dispatch::mean_axis<T>(data_of<const T>(a), data_of<T>(r), m, n, axis);
+        } else {
+            pg::dispatch::sum_axis<T>(data_of<const T>(a), data_of<T>(r), m, n, axis);
         }
     });
 }
