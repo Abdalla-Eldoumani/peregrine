@@ -351,6 +351,88 @@ void block(const double* x, int64_t ld, int64_t rows, int64_t w, double* acc) {
     }
 }
 
+// Sequential sums of two rows per pass over the panel, each element still adding
+// row by row, with the next pass's two rows prefetched a line at a time. A panel
+// row is a short run one array row away from the next, and the hardware
+// prefetchers do not follow that stride: at (4096, 4096) the read ran at about
+// 16 GB/s while the stalled cores clocked down to 40-50 percent, and at 30-32
+// GB/s with the prefetch (6 threads, sustained 100 ms batches). Two rows per pass
+// against four, same prefetch: float64 (4096, 4096) 4.46 vs 4.77 ms, float32
+// (16, 1000000) 2.60 vs 2.77 ms, the other axis-0 cells within 5 percent.
+void stream_block(const float* x, int64_t ld, int64_t rows, int64_t w, float* acc) {
+    const int64_t wv = w & ~int64_t{7};
+    for (int64_t j = 0; j < wv; j += 8) {
+        _mm256_storeu_ps(acc + j, _mm256_setzero_ps());
+    }
+    for (int64_t j = wv; j < w; ++j) {
+        acc[j] = 0.0f;
+    }
+    int64_t i = 0;
+    for (; i + 2 <= rows; i += 2) {
+        const float* r0 = x + i * ld;
+        const float* r1 = r0 + ld;
+        const bool ahead = i + 4 <= rows;
+        const float* p0 = ahead ? r1 + ld : r0;
+        for (int64_t j = 0; j < wv; j += 8) {
+            if (ahead && (j & 15) == 0) {
+                _mm_prefetch(reinterpret_cast<const char*>(p0 + j), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(p0 + ld + j), _MM_HINT_T0);
+            }
+            __m256 v = _mm256_add_ps(_mm256_loadu_ps(acc + j), _mm256_loadu_ps(r0 + j));
+            _mm256_storeu_ps(acc + j, _mm256_add_ps(v, _mm256_loadu_ps(r1 + j)));
+        }
+        for (int64_t j = wv; j < w; ++j) {
+            acc[j] = (acc[j] + r0[j]) + r1[j];
+        }
+    }
+    if (i < rows) {
+        const float* r0 = x + i * ld;
+        for (int64_t j = 0; j < wv; j += 8) {
+            _mm256_storeu_ps(acc + j, _mm256_add_ps(_mm256_loadu_ps(acc + j), _mm256_loadu_ps(r0 + j)));
+        }
+        for (int64_t j = wv; j < w; ++j) {
+            acc[j] += r0[j];
+        }
+    }
+}
+
+void stream_block(const double* x, int64_t ld, int64_t rows, int64_t w, double* acc) {
+    const int64_t wv = w & ~int64_t{3};
+    for (int64_t j = 0; j < wv; j += 4) {
+        _mm256_storeu_pd(acc + j, _mm256_setzero_pd());
+    }
+    for (int64_t j = wv; j < w; ++j) {
+        acc[j] = 0.0;
+    }
+    int64_t i = 0;
+    for (; i + 2 <= rows; i += 2) {
+        const double* r0 = x + i * ld;
+        const double* r1 = r0 + ld;
+        const bool ahead = i + 4 <= rows;
+        const double* p0 = ahead ? r1 + ld : r0;
+        for (int64_t j = 0; j < wv; j += 4) {
+            if (ahead && (j & 7) == 0) {
+                _mm_prefetch(reinterpret_cast<const char*>(p0 + j), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(p0 + ld + j), _MM_HINT_T0);
+            }
+            __m256d v = _mm256_add_pd(_mm256_loadu_pd(acc + j), _mm256_loadu_pd(r0 + j));
+            _mm256_storeu_pd(acc + j, _mm256_add_pd(v, _mm256_loadu_pd(r1 + j)));
+        }
+        for (int64_t j = wv; j < w; ++j) {
+            acc[j] = (acc[j] + r0[j]) + r1[j];
+        }
+    }
+    if (i < rows) {
+        const double* r0 = x + i * ld;
+        for (int64_t j = 0; j < wv; j += 4) {
+            _mm256_storeu_pd(acc + j, _mm256_add_pd(_mm256_loadu_pd(acc + j), _mm256_loadu_pd(r0 + j)));
+        }
+        for (int64_t j = wv; j < w; ++j) {
+            acc[j] += r0[j];
+        }
+    }
+}
+
 } // namespace
 
 template <typename T>
@@ -383,9 +465,16 @@ void sum_block_avx2(const T* x, int64_t ld, int64_t rows, int64_t w, T* acc) {
     block(x, ld, rows, w, acc);
 }
 
+template <typename T>
+void sum_block_stream_avx2(const T* x, int64_t ld, int64_t rows, int64_t w, T* acc) {
+    stream_block(x, ld, rows, w, acc);
+}
+
 template void sum_rows_avx2<float>(const float*, int64_t, int64_t, float*);
 template void sum_rows_avx2<double>(const double*, int64_t, int64_t, double*);
 template void sum_block_avx2<float>(const float*, int64_t, int64_t, int64_t, float*);
 template void sum_block_avx2<double>(const double*, int64_t, int64_t, int64_t, double*);
+template void sum_block_stream_avx2<float>(const float*, int64_t, int64_t, int64_t, float*);
+template void sum_block_stream_avx2<double>(const double*, int64_t, int64_t, int64_t, double*);
 
 } // namespace pg::cpu
