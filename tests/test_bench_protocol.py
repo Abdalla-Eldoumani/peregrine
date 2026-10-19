@@ -314,6 +314,12 @@ def test_abba_order_seeded_start():
 def test_abba_blocks_mirror():
     assert abba_blocks(["A", "B"], 4) == ["A", "B", "B", "A", "A", "B", "B", "A"]
     assert abba_blocks(["A", "B", "C"], 2) == ["A", "B", "C", "C", "B", "A"]
+    # Three or more contenders also rotate, so each holds every position
+    # equally often over 2 * n rounds.
+    seq = abba_blocks(["A", "B", "C"], 6)
+    rounds = [seq[i:i + 3] for i in range(0, 18, 3)]
+    for name in "ABC":
+        assert sorted(r.index(name) for r in rounds) == [0, 0, 1, 1, 2, 2]
 
 
 def test_rewarm_keeps_cold_clock_calls_out_of_the_samples():
