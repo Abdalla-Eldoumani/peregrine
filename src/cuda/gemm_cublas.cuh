@@ -28,9 +28,12 @@ extern template void gemm<double>(const double*, const double*, double*, int64_t
 // The staged GEMM for host operands, in one native crossing: pre-flights the
 // three buffers together, allocates dA/dB/dC from the context mempool, copies the
 // host inputs up, runs the device gemm above, copies the result back, and waits
-// for the stream, all in stream order on the context stream. An asynchronous
-// device error surfaces as pg::cuda_error before it returns. a, b, c are HOST
-// pointers (c is the caller-owned m*n output buffer).
+// for the stream, all in stream order on the context stream. A large float32
+// product instead runs in row blocks whose uploads and downloads overlap the
+// GEMM on the context's side streams, with bits identical to the unblocked
+// product (see gemm_cublas.cu). An asynchronous device error surfaces as
+// pg::cuda_error before it returns. a, b, c are HOST pointers (c is the
+// caller-owned m*n output buffer).
 template <typename T>
 void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 
