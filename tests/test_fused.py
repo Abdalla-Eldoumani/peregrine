@@ -476,12 +476,14 @@ def test_thread_count_bitwise_identical(tmp_path):
 
 # ---------------------------------------------------------------------------
 # Kernel edges: sizes just below, at, and above every threshold the kernels
-# switch on (one thread vs a team, six threads, streaming stores), every head
-# length of the 32-byte alignment peel (out is a view at an element offset into
-# a larger buffer), out= exactly an input, NaN/Inf/-0.0/subnormal operands, and
-# the caller's FTZ/DAZ. One script computes every case; it runs at 1 and 6
-# threads on the AVX2 kernels and at 1 and 6 threads on the scalar twins
-# (PEREGRINE_DISABLE_AVX2=1, read at import, so each run is its own process).
+# switch on (the serial size, below which one thread runs without the alignment
+# peel, six threads, streaming stores), every head length of the 32-byte
+# alignment peel and every misalignment below it (out is a view at an element
+# offset into a larger buffer), out= exactly an input, NaN/Inf/-0.0/subnormal
+# operands, and the caller's FTZ/DAZ. One script computes every case; it runs
+# at 1 and 6 threads on the AVX2 kernels and at 1 and 6 threads on the scalar
+# twins (PEREGRINE_DISABLE_AVX2=1, read at import, so each run is its own
+# process).
 # -k "edges"
 # ---------------------------------------------------------------------------
 
