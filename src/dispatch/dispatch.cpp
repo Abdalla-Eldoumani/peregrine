@@ -6,6 +6,8 @@
 #include "cpu/reduce.hpp"
 #include "cpu/transpose.hpp"
 
+#include <algorithm>
+
 #if defined(PG_HAS_CUDA)
 namespace pg::cuda {
 // Forward-declared, not #included: gemm_cublas.cuh is itself CUDA-free, but the
@@ -31,24 +33,57 @@ void fused_scaled_relu(const T* x, T* out, int64_t n, T scale);
 
 namespace pg::dispatch {
 
-template <typename T>
-void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
-    // The features are memoized at import and already fold in PEREGRINE_DISABLE_AVX2,
-    // so a forced fallback routes here exactly as a CPU without AVX2 would. The
-    // packed kernel owns its own small-matrix branch, so this stays a pure
-    // features-in/path-out decision with no side effects. gemm_blis and
-    // gemm_naive share the signature, so the call crosses the TU boundary with
-    // no adapter and no AVX2 codegen leaking into this fallback-linked unit.
-    const auto& f = cpu::detect();
-    if (f.avx2 && f.fma) {
-        cpu::gemm_blis<T>(a, b, c, m, k, n);
-        return;
+// Below this max dimension the pack buffers and the thread start cost more than
+// they save, so the direct pass wins. 96 is a measurement-validated default, not
+// a calibrated threshold.
+constexpr int64_t SMALL_MAX_DIM = 96;
+
+gemm_path choose_gemm_path(int64_t m, int64_t k, int64_t n, bool avx2_fma) noexcept {
+    if (!avx2_fma) {
+        return gemm_path::naive;
     }
-    cpu::gemm_naive<T>(a, b, c, m, k, n);
+    return std::max(m, std::max(k, n)) <= SMALL_MAX_DIM ? gemm_path::small : gemm_path::packed;
 }
 
-template void matmul<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
-template void matmul<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
+template <typename T>
+void matmul(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b,
+            T* c, int64_t m, int64_t k, int64_t n) {
+    // NumPy gives a length-1 dim any stride (it never moves the pointer, and the
+    // contiguity and alignment flags ignore it). Unit stride reads the same
+    // elements and lets the kernels take a contiguous reading.
+    if (m == 1) {
+        rs_a = 1;
+    }
+    if (k == 1) {
+        cs_a = 1;
+        rs_b = 1;
+    }
+    if (n == 1) {
+        cs_b = 1;
+    }
+    // The features are memoized at import and already fold in
+    // PEREGRINE_DISABLE_AVX2, so a forced fallback routes here exactly as a CPU
+    // without AVX2 would. The kernels share the signature, so the call crosses
+    // the TU boundary with no adapter and no AVX2 codegen leaking into this
+    // fallback-linked unit.
+    const auto& f = cpu::detect();
+    switch (choose_gemm_path(m, k, n, f.avx2 && f.fma)) {
+    case gemm_path::packed:
+        cpu::gemm_blis<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+        return;
+    case gemm_path::small:
+        cpu::gemm_blis_small<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+        return;
+    case gemm_path::naive:
+        break;
+    }
+    cpu::gemm_naive<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+}
+
+template void matmul<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t,
+                            float*, int64_t, int64_t, int64_t);
+template void matmul<double>(const double*, int64_t, int64_t, const double*, int64_t, int64_t,
+                             double*, int64_t, int64_t, int64_t);
 
 #if defined(PG_HAS_CUDA)
 template <typename T>
