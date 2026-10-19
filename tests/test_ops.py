@@ -124,6 +124,42 @@ class TestTranspose:
             assert got.flags.c_contiguous and got.flags.owndata
             assert got.tobytes() == np.ascontiguousarray(a.T).tobytes()
 
+    # Outputs just below, at, and above the 1020 KiB page-prefault threshold for
+    # each dtype (510 x 512 f32 and 255 x 512 f64 sit on it), with odd rows so a
+    # column block's range of out starts and ends mid-page.
+    @pytest.mark.parametrize(
+        "shape",
+        [(509, 513), (510, 512), (511, 511), (255, 511), (255, 512), (256, 511), (1021, 1031)],
+        ids=str,
+    )
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_prefault_threshold_bitwise(self, dtype, n_threads, shape, threads):
+        threads(n_threads)
+        rng = np.random.default_rng(list(shape))
+        a = self._operand(rng, shape, dtype, bits=True)
+        assert pg.transpose(a).tobytes() == np.ascontiguousarray(a.T).tobytes()
+
+    # The native entry writes into any C-contiguous out, so out can sit at an
+    # element offset from a 64-byte line: streaming stores must then step aside
+    # (offset 1) while a line-aligned out of the same shape streams (offset 0).
+    # Both outputs are past 12 MiB with rows of whole lines.
+    @pytest.mark.parametrize("offset", [0, 1])
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_into_line_offsets_bitwise(self, dtype, n_threads, offset, threads):
+        threads(n_threads)
+        m, n = (2048, 2048) if dtype == np.float32 else (2048, 1024)
+        rng = np.random.default_rng(offset)
+        a = self._operand(rng, (m, n), dtype, bits=True)
+        item = np.dtype(dtype).itemsize
+        buf = np.empty(m * n + 64 // item, dtype)
+        start = (-buf.ctypes.data % 64) // item + offset
+        out = buf[start:start + m * n].reshape(n, m)
+        assert out.ctypes.data % 64 == (0 if offset == 0 else item)
+        pg._core.transpose_into(a, out)
+        assert out.tobytes() == np.ascontiguousarray(a.T).tobytes()
+
 
 class TestReductions:
     @pytest.mark.parametrize("n", SIZES)
