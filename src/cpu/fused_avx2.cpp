@@ -55,6 +55,15 @@ struct simd<float> {
         const reg m = _mm256_max_ps(v, _mm256_setzero_ps());
         return _mm256_blendv_ps(m, v, _mm256_cmp_ps(v, v, _CMP_UNORD_Q));
     }
+    static reg nan(reg v) { return _mm256_cmp_ps(v, v, _CMP_UNORD_Q); }
+    static bool any(reg m) { return _mm256_movemask_ps(m) != 0; }
+    // Lanes where v is a NaN get v with the quiet bit set (what arithmetic makes
+    // of it), the others keep r. The bit is set only where v is already a NaN:
+    // on an infinity it would make one.
+    static reg pickq(reg r, reg v) {
+        const reg q = _mm256_or_ps(v, _mm256_castsi256_ps(_mm256_set1_epi32(0x00400000)));
+        return _mm256_blendv_ps(r, q, nan(v));
+    }
 };
 
 template <>
@@ -78,12 +87,26 @@ struct simd<double> {
         const reg m = _mm256_max_pd(v, _mm256_setzero_pd());
         return _mm256_blendv_pd(m, v, _mm256_cmp_pd(v, v, _CMP_UNORD_Q));
     }
+    static reg nan(reg v) { return _mm256_cmp_pd(v, v, _CMP_UNORD_Q); }
+    static bool any(reg m) { return _mm256_movemask_pd(m) != 0; }
+    static reg pickq(reg r, reg v) {
+        const reg q = _mm256_or_pd(v, _mm256_castsi256_pd(_mm256_set1_epi64x(0x0008000000000000)));
+        return _mm256_blendv_pd(r, q, nan(v));
+    }
 };
 
 // Each op computes the vector at element i from operands read through ld, a
 // full or a masked load. Named products in a fixed order keep axpby's two
 // multiplies and one add; MSVC /fp:precise never contracts them, so it matches
 // the unfused NumPy expression and the scalar twin bit for bit.
+//
+// When two NaNs meet in one instruction the result carries the payload of the
+// operand in the first source slot, and the compiler may commute a multiply or
+// an add, or pick a different FMA form, in each instantiation: the peel, body,
+// and tail would then disagree for the same element, so a result's bits would
+// depend on alignment. A vector with any NaN lane is therefore redone with the
+// payload chosen explicitly: the first NaN operand in written order (a, x, b, y;
+// x, y, z; scale, x), quieted. The scalar twin applies the same rule.
 template <typename T>
 struct axpby_op {
     using S = simd<T>;
@@ -93,9 +116,15 @@ struct axpby_op {
     typename S::reg b;
     template <typename Load>
     typename S::reg operator()(int64_t i, const Load& ld) const {
-        const typename S::reg ax = S::mul(a, ld(x + i));
-        const typename S::reg by = S::mul(b, ld(y + i));
-        return S::add(ax, by);
+        typename S::reg ax = S::mul(a, ld(x + i));
+        typename S::reg by = S::mul(b, ld(y + i));
+        const typename S::reg r = S::add(ax, by);
+        if (!S::any(S::nan(r))) {
+            return r;
+        }
+        ax = S::pickq(ax, a);
+        by = S::pickq(by, b);
+        return S::pickq(S::add(ax, by), ax);
     }
 };
 
@@ -107,7 +136,14 @@ struct fma3_op {
     const T* z;
     template <typename Load>
     typename S::reg operator()(int64_t i, const Load& ld) const {
-        return S::fmadd(ld(x + i), ld(y + i), ld(z + i));
+        const typename S::reg xv = ld(x + i);
+        const typename S::reg yv = ld(y + i);
+        const typename S::reg zv = ld(z + i);
+        const typename S::reg r = S::fmadd(xv, yv, zv);
+        if (!S::any(S::nan(r))) {
+            return r;
+        }
+        return S::pickq(S::pickq(S::pickq(r, zv), yv), xv);
     }
 };
 
@@ -118,7 +154,8 @@ struct scaled_relu_op {
     typename S::reg scale;
     template <typename Load>
     typename S::reg operator()(int64_t i, const Load& ld) const {
-        return S::relu(S::mul(scale, ld(x + i)));
+        const typename S::reg sx = S::mul(scale, ld(x + i));
+        return S::relu(S::any(S::nan(sx)) ? S::pickq(sx, scale) : sx);
     }
 };
 
