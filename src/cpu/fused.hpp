@@ -15,6 +15,23 @@ namespace pg::cpu {
 // the kernel; every index is int64_t (a flat element count exceeds int32 well
 // before the allocation would fail).
 
+// Threading both twins share, in bytes of out. Threads take whole 64-byte lines
+// of out. Single-call diagnostic with out= and forced teams of 1, 2, 3, 6: at
+// 16 KiB one thread ties a team (f32 4096 elements axpby 0.89 us alone, 0.89
+// with 3) and below it wins (f32 1024 elements 0.39 alone, 0.68 with 2); from
+// 32 KiB a team wins (f32 8192 elements 1.72 alone, 1.08 with 6; f64 4096
+// elements fma3 2.08 alone, 1.01 with 6).
+inline constexpr double FUSED_SERIAL_BELOW_BYTES = 32768.0;
+inline constexpr double FUSED_PER_THREAD_BYTES = 8192.0;
+// The AVX2 bodies stream (non-temporal stores) once the buffers an op touches,
+// inputs and out, exceed the 12 MiB L3: the result cannot stay cached, and a
+// streaming store skips the read for ownership. Single-call diagnostic, 6
+// threads, out=: f32 2896^2 axpby 5.03 -> 3.25 ms, f64 5793^2 axpby 50.7 -> 31.4
+// ms, f64 1024^2 axpby (24 MiB) 0.81 -> 0.56 ms; at or under 12 MiB streaming
+// lost, since the buffers stay in L3 between calls (f32 1024^2 axpby at 12 MiB
+// 0.125 -> 0.164 ms, scaled_relu at 8 MiB 0.049 -> 0.107 ms).
+inline constexpr double FUSED_STREAM_BYTES = 12.0 * 1024 * 1024;
+
 // out[i] = a*x[i] + b*y[i]. Two roundings (a*x, then +b*y), matching the
 // unfused NumPy expression within the elementwise tolerance; deliberately NOT
 // contracted into one rounding.
