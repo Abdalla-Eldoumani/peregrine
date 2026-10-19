@@ -60,7 +60,6 @@ The -k test names, one per acceptance point, with the code each one exercises:
         f64_host_cpu              host f64 never auto-routes to the GPU            [policy.choose_backend]
         f32_256_host_cpu          host f32 n=256 stays on the CPU (overhead floor) [policy.choose_backend]
         f32_4096_host_gpu         host f32 n=4096 routes to the GPU                [policy.choose_backend]
-        f32_device_gpu            f32 device-resident routes to the GPU            [policy.choose_backend]
         set_backend               an explicit backend choice is honored           [policy.choose_backend]
         env_backend               PEREGRINE_BACKEND (subprocess, env-before-import) [__init__.py]
         live_crossover            real RTX 3060 calibration reproduces the routing (@gpu) [integration]
@@ -69,7 +68,7 @@ The -k test names, one per acceptance point, with the code each one exercises:
         skinny_host               skinny host products stay on the CPU            [policy.choose_backend]
         reproduces_measured       grid decisions match measured staged vs CPU     [policy.choose_backend]
         monotone                  square decisions are monotone in the work       [policy.choose_backend]
-        device_crosses            device-resident crosses no later than host      [policy.choose_backend]
+        needs_compute             a host GPU route needs compute alone to win     [policy.choose_backend]
     Per-process memos (no file system work after the first auto dispatch):
         memoizes_calibration      the second dispatch reads no file and no NVML    [__init__.py]
         invalidate                reset hook and set_backend drop the memos        [__init__.py]
@@ -147,13 +146,11 @@ def test_calibration_module_scaffold():
 #           dominates at small n; the policy fits its fixed cost from this
 #           series, and the fit recovers the 800us exactly.
 #
-# Resulting host square crossover is n=299, and a device-resident product goes
-# to the GPU at every size (below n=128 both times clamp to the n=128 values,
-# where the GPU's compute is already faster), so:
+# Resulting host square crossover is n=299, while the GPU's compute alone is
+# faster at every size (below n=128 both times clamp to the n=128 values), so:
 #   f32 n=256 host  -> CPU  (gpu_compute + transfer + fixed 0.93ms > cpu 0.61ms)
 #   f32 n=4096 host -> CUDA (70.5ms < cpu 2499ms)
-#   f32 n=512 device-> CUDA (gpu_compute 0.15ms < cpu 4.88ms, no transfer)
-#   f32 n=256 device-> CUDA while n=256 host -> CPU  (transfer-cost crossover)
+#   f32 n=256: compute alone favors the GPU, the host product stays on the CPU
 
 _GRID = [128, 256, 512, 1024, 2048, 4096]
 
@@ -251,15 +248,16 @@ def _routing_tables():
 
 
 def _host(table, m, k, n):
-    return policy.choose_backend(
-        "float32", m, k, n, residency="host", calibration=table, backend="auto"
-    )
+    return policy.choose_backend("float32", m, k, n, calibration=table, backend="auto")
 
 
-def _device(table, m, k, n):
-    return policy.choose_backend(
-        "float32", m, k, n, residency="device", calibration=table, backend="auto"
-    )
+def _compute_only(table, m, k, n):
+    # The GPU's product time against the CPU's with no transfer and no fixed
+    # cost: the floor under the host decision's GPU side.
+    work = 2.0 * m * k * n
+    gpu = policy._interp_time(table["gpu"]["float32"], work)
+    cpu = policy._interp_time(table["cpu"]["float32"], work)
+    return "cuda" if gpu < cpu else "cpu"
 
 
 # Square sizes from 1 past the largest grid point, so the interpolation, both
@@ -277,9 +275,7 @@ def test_f64_host_cpu():
     # size, decided BEFORE any table lookup. Holds at every grid size.
     table = synthetic_calibration()
     for n in (256, 1024, 4096):
-        got = policy.choose_backend(
-            "float64", n, n, n, residency="host", calibration=table, backend="auto"
-        )
+        got = policy.choose_backend("float64", n, n, n, calibration=table, backend="auto")
         assert got == "cpu", f"f64 host n={n} must stay on cpu, got {got}"
 
 
@@ -288,9 +284,7 @@ def test_f32_256_host_cpu():
     # fixed staging floor (~0.93ms) exceeds the honest CPU time (~0.61ms). This
     # is the point a single-GFLOP/s model gets wrong.
     table = synthetic_calibration()
-    got = policy.choose_backend(
-        "float32", 256, 256, 256, residency="host", calibration=table, backend="auto"
-    )
+    got = policy.choose_backend("float32", 256, 256, 256, calibration=table, backend="auto")
     assert got == "cpu"
 
 
@@ -298,66 +292,34 @@ def test_f32_4096_host_gpu():
     # Host f32 n=4096 crosses to the GPU: the GEMM time saved (~2499ms CPU vs
     # ~53ms GPU compute) dwarfs the ~17.6ms transfer round trip.
     table = synthetic_calibration()
-    got = policy.choose_backend(
-        "float32", 4096, 4096, 4096, residency="host", calibration=table, backend="auto"
-    )
+    got = policy.choose_backend("float32", 4096, 4096, 4096, calibration=table, backend="auto")
     assert got == "cuda"
-
-
-def test_f32_device_gpu():
-    # Device-resident f32 at n>=512 routes to the GPU: no transfer cost, so it
-    # crosses far earlier than the host path. Verify the stated point and that it
-    # holds across the larger grid sizes too.
-    table = synthetic_calibration()
-    for n in (512, 1024, 2048, 4096):
-        got = policy.choose_backend(
-            "float32", n, n, n, residency="device", calibration=table, backend="auto"
-        )
-        assert got == "cuda", f"f32 device n={n} must route to cuda, got {got}"
 
 
 # --- static fallback and the transfer-cost crossover ----------------
 
 
 def test_static_fallback():
-    # No cache -> conservative CPU-preferring choice, for every (dtype, size,
-    # residency). A calibration dict with no "gpu" key (a CPU-only cache) is the
-    # same: the GPU is treated as unavailable.
+    # No cache -> conservative CPU-preferring choice, for every (dtype, size).
+    # A calibration dict with no "gpu" key (a CPU-only cache) is the same: the
+    # GPU is treated as unavailable.
     cpu_only = synthetic_calibration()
     del cpu_only["gpu"]
     for dtype in ("float32", "float64"):
         for n in (256, 1024, 4096):
-            for residency in ("host", "device"):
-                assert (
-                    policy.choose_backend(
-                        dtype, n, n, n, residency=residency,
-                        calibration=None, backend="auto",
-                    )
-                    == "cpu"
-                )
-                assert (
-                    policy.choose_backend(
-                        dtype, n, n, n, residency=residency,
-                        calibration=cpu_only, backend="auto",
-                    )
-                    == "cpu"
-                )
+            for table in (None, cpu_only):
+                got = policy.choose_backend(dtype, n, n, n, calibration=table, backend="auto")
+                assert got == "cpu"
 
 
 def test_transfer_cost():
-    # The crossover accounts for the host<->device round trip: at n=256 a
-    # device-resident f32 routes to the GPU (compute alone beats the CPU) while
-    # the SAME n as a host array stays on the CPU once H2D+D2H + staging is added.
-    # The device path therefore crosses at a smaller n than the host path.
+    # The crossover accounts for the host<->device round trip: at n=256 the
+    # GPU's compute alone beats the CPU, yet the host product stays on the CPU
+    # once H2D+D2H + staging is added.
     table = synthetic_calibration()
-    host = policy.choose_backend(
-        "float32", 256, 256, 256, residency="host", calibration=table, backend="auto"
-    )
-    device = policy.choose_backend(
-        "float32", 256, 256, 256, residency="device", calibration=table, backend="auto"
-    )
+    host = policy.choose_backend("float32", 256, 256, 256, calibration=table, backend="auto")
     assert host == "cpu"
-    assert device == "cuda"
+    assert _compute_only(table, 256, 256, 256) == "cuda"
 
 
 # --- routing on work and bytes moved ------------------------------------------
@@ -413,7 +375,7 @@ def test_square_decision_is_monotone_in_work():
     # segment's slope. Clamping them there instead would send host squares past
     # about n=15,000 back to the CPU on the reference calibration.
     for table in _routing_tables():
-        for decide in (_host, _device):
+        for decide in (_host, _compute_only):
             got = [decide(table, n, n, n) for n in _SQUARE_NS]
             first = got.index("cuda")
             assert set(got[:first]) <= {"cpu"} and set(got[first:]) == {"cuda"}, (
@@ -421,17 +383,17 @@ def test_square_decision_is_monotone_in_work():
             )
 
 
-def test_device_crosses_no_later_than_host():
-    # The host path prices the same compute plus transfers and a fixed cost that
-    # are never negative, so wherever a host product goes to the GPU the same
-    # product already resident on the device does too.
+def test_host_route_needs_compute_alone_to_win():
+    # The host decision prices the GPU's compute plus transfers and a fixed cost
+    # that are never negative, so wherever a host product goes to the GPU the
+    # GPU's compute alone already beats the CPU.
     dims = (1, 7, 64, 300, 4096)
     shapes = [(n, n, n) for n in _SQUARE_NS]
     shapes += [(m, k, n) for m in dims for k in dims for n in dims]
     for table in _routing_tables():
         for shape in shapes:
             if _host(table, *shape) == "cuda":
-                assert _device(table, *shape) == "cuda", shape
+                assert _compute_only(table, *shape) == "cuda", shape
 
 
 # --- explicit backend override (set_backend / PEREGRINE_BACKEND) ----------
@@ -441,9 +403,7 @@ def test_set_backend_forces_cpu():
     # A forced "cpu" backend wins within rules 1-2: it stays CPU even when the
     # table favors the GPU (large-n f32).
     table = synthetic_calibration()
-    got = policy.choose_backend(
-        "float32", 4096, 4096, 4096, residency="host", calibration=table, backend="cpu"
-    )
+    got = policy.choose_backend("float32", 4096, 4096, 4096, calibration=table, backend="cpu")
     assert got == "cpu"
 
 
@@ -451,13 +411,11 @@ def test_set_backend_forces_cuda_routing():
     # A forced "cuda" backend routes to cuda even for float64 and even with no
     # calibration: the POLICY only routes; the wrapper (not the policy) validates
     # device availability and raises the requested-but-unavailable RuntimeError.
-    got_f64 = policy.choose_backend(
-        "float64", 256, 256, 256, residency="host", calibration=None, backend="cuda"
-    )
+    got_f64 = policy.choose_backend("float64", 256, 256, 256, calibration=None, backend="cuda")
     assert got_f64 == "cuda"
     table = synthetic_calibration()
     got_small = policy.choose_backend(
-        "float32", 256, 256, 256, residency="host", calibration=table, backend="cuda"
+        "float32", 256, 256, 256, calibration=table, backend="cuda"
     )
     assert got_small == "cuda"
 
@@ -627,52 +585,35 @@ def test_live_crossover(tmp_path, monkeypatch):
     # exactly as on the synthetic table)
     for n in measured_ns:
         assert (
-            policy.choose_backend(
-                "float64", n, n, n, residency="host", calibration=cal, backend="auto"
-            )
+            policy.choose_backend("float64", n, n, n, calibration=cal, backend="auto")
             == "cpu"
         ), f"live f64 host n={n} must stay on cpu"
 
-    # The transfer-cost ordering, on real numbers: at EVERY measured size a
-    # device-resident f32 is at least as likely to route to the GPU as the same
-    # size as a host array, because the host path adds the H2D+D2H round trip and
-    # the fixed staging floor on top of the identical compute comparison. So the
-    # host path can never pick cuda where the device path picks cpu -- the device
-    # crossover sits at a smaller-or-equal n. This is the load-bearing fallback and routing
-    # property and it holds regardless of the absolute CPU-time magnitude (it falls
-    # straight out of the transfer time and the fitted fixed cost both being
-    # >= 0 in the policy). The exact small-n
-    # host->cpu point is asserted on the synthetic table (test_f32_256_host_cpu),
-    # where the CPU baseline is honest by construction; here the live CPU grid only
-    # has to be internally consistent, which the inequality checks.
+    # The transfer-cost ordering, on real numbers: at EVERY measured size the
+    # host decision adds the H2D+D2H round trip and the fixed staging floor on
+    # top of the compute comparison, so it can never pick cuda where the GPU's
+    # compute alone loses. This holds regardless of the absolute CPU-time
+    # magnitude (it falls straight out of the transfer time and the fitted fixed
+    # cost both being >= 0 in the policy). The exact small-n host->cpu point is
+    # asserted on the synthetic table (test_f32_256_host_cpu), where the CPU
+    # baseline is honest by construction; here the live CPU grid only has to be
+    # internally consistent, which the inequality checks.
     for n in measured_ns:
-        host = policy.choose_backend(
-            "float32", n, n, n, residency="host", calibration=cal, backend="auto"
-        )
-        device = policy.choose_backend(
-            "float32", n, n, n, residency="device", calibration=cal, backend="auto"
-        )
-        assert not (host == "cuda" and device == "cpu"), (
-            f"live n={n}: host picked cuda but device picked cpu -- the transfer "
-            f"floor must make the host path the more conservative one"
+        host = policy.choose_backend("float32", n, n, n, calibration=cal, backend="auto")
+        assert not (host == "cuda" and _compute_only(cal, n, n, n) == "cpu"), (
+            f"live n={n}: host picked cuda where the GPU's compute alone loses"
         )
 
-    # device-resident f32 at the largest measured size routes to the GPU: with no
-    # transfer cost the warm device GEMM beats the CPU outright
-    assert (
-        policy.choose_backend(
-            "float32", large_n, large_n, large_n,
-            residency="device", calibration=cal, backend="auto",
-        )
-        == "cuda"
-    ), f"live f32 device n={large_n} should route to cuda"
+    # at the largest measured size the warm device GEMM beats the CPU outright
+    assert _compute_only(cal, large_n, large_n, large_n) == "cuda", (
+        f"live f32 compute n={large_n} should favor cuda"
+    )
 
     # the largest measured host f32 crosses to the GPU: the GEMM time saved dwarfs
     # the transfer round trip at large n (the headline routing win, on real numbers)
     assert (
         policy.choose_backend(
-            "float32", large_n, large_n, large_n,
-            residency="host", calibration=cal, backend="auto",
+            "float32", large_n, large_n, large_n, calibration=cal, backend="auto"
         )
         == "cuda"
     ), f"live f32 host n={large_n} should route to cuda"
@@ -792,16 +733,12 @@ def test_malformed_body_recalibrate(tmp_path):
 
     # the load-bearing consequence: with the cache rejected to None, the dispatch
     # path falls back to the conservative static choice and does NOT crash, for
-    # every (dtype, residency) -- the fail-safe contract of the cache read.
+    # every dtype -- the fail-safe contract of the cache read.
     for dtype in ("float32", "float64"):
-        for residency in ("host", "device"):
-            assert (
-                policy.choose_backend(
-                    dtype, 256, 256, 256, residency=residency,
-                    calibration=None, backend="auto",
-                )
-                == "cpu"
-            )
+        assert (
+            policy.choose_backend(dtype, 256, 256, 256, calibration=None, backend="auto")
+            == "cpu"
+        )
 
 
 def test_signature_mismatch(tmp_path):
@@ -1342,11 +1279,11 @@ def test_auto_routing_stops_after_cuda_fallback(monkeypatch):
 
     uploads = []
 
-    def _failing_upload(x):
-        uploads.append(x)
+    def _failing_staged(*args):
+        uploads.append(args)
         raise RuntimeError("cudaErrorLaunchFailure at fake.cu:1")
 
-    monkeypatch.setattr(pg, "_to_device_native", _failing_upload, raising=False)
+    monkeypatch.setattr(pg, "_gemm_host_native", _failing_staged, raising=False)
     with pytest.warns(RuntimeWarning, match="falling back to cpu for this session"):
         got = pg.matmul(a, a)
     assert_matmul_close(got, a @ a, a, a)
