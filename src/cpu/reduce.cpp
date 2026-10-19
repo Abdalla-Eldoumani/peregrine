@@ -64,6 +64,13 @@ constexpr int64_t PANEL_MIN = 512;
 constexpr int64_t PANEL_MAX = 4096;
 constexpr int64_t COL_UNITS = 48;
 
+// Axis 0 over more bytes than the 12 MiB L3 reads from DRAM, where the streaming
+// block kernel prefetches the next rows; below it the plain kernel won (64x64
+// float32 0.51-0.55 us against 0.64-0.69 streaming, 256x256 float64 5.3-5.8
+// against 6.0-7.2) and above it the streaming one (4096x4096 float32 4.05-4.29
+// ms against 1.95-2.10, (1000000, 16) float64 6.64-6.70 against 3.46-3.58).
+constexpr double STREAM_BYTES = 12.0 * 1024 * 1024;
+
 // Team sizing in bytes read. Single-call diagnostics, sum over every element:
 // float64 128 KiB took 3.1 us on one thread and 2.2 on two, 256 KiB 6.3 on one
 // and 2.2 on four or six; float32 64 KiB lost to one thread. Below 128 KiB the
@@ -81,8 +88,10 @@ void rows_kernel(bool avx2, const T* x, int64_t n, int64_t rows, T* out) {
 }
 
 template <typename T>
-void block_kernel(bool avx2, const T* x, int64_t ld, int64_t rows, int64_t w, T* acc) {
-    if (avx2) {
+void block_kernel(bool avx2, bool stream, const T* x, int64_t ld, int64_t rows, int64_t w, T* acc) {
+    if (avx2 && stream) {
+        sum_block_stream_avx2<T>(x, ld, rows, w, acc);
+    } else if (avx2) {
         sum_block_avx2<T>(x, ld, rows, w, acc);
     } else {
         sum_block_naive<T>(x, ld, rows, w, acc);
@@ -214,16 +223,16 @@ int tree_levels(int64_t s) {
 // using the deeper buffers, so a tree of L levels needs L panels.
 template <typename T>
 void block_tree(const T* a, int64_t m, int64_t n, int64_t b0, int64_t b1, int64_t j0, int64_t w, T* dst,
-                T* lvl, bool avx2) {
+                T* lvl, bool avx2, bool stream) {
     if (b1 - b0 == 1) {
         const int64_t r0 = b0 * ROW_BLOCK;
         const int64_t rows = m - r0 < ROW_BLOCK ? m - r0 : ROW_BLOCK;
-        block_kernel<T>(avx2, a + r0 * n + j0, n, rows, w, dst);
+        block_kernel<T>(avx2, stream, a + r0 * n + j0, n, rows, w, dst);
         return;
     }
     const int64_t mid = b0 + (b1 - b0) / 2;
-    block_tree(a, m, n, b0, mid, j0, w, dst, lvl, avx2);
-    block_tree(a, m, n, mid, b1, j0, w, lvl, lvl + w, avx2);
+    block_tree(a, m, n, b0, mid, j0, w, dst, lvl, avx2, stream);
+    block_tree(a, m, n, mid, b1, j0, w, lvl, lvl + w, avx2, stream);
     for (int64_t j = 0; j < w; ++j) {
         dst[j] = dst[j] + lvl[j];
     }
@@ -286,6 +295,7 @@ void col_sums(const T* a, int64_t m, int64_t n, T* out, bool avx2, bool mean) {
     std::unique_ptr<T[]> scratch(c > 1 ? new T[static_cast<size_t>((c - 1) * n)] : nullptr);
     T* const extra = scratch.get();
     const auto dst = [&](int64_t k) { return k == 0 ? out : extra + (k - 1) * n; };
+    const bool stream = bytes > STREAM_BYTES;
     const auto run = [&](int64_t lo, int64_t hi) {
         alignas(64) T lvl[LEVEL_ELEMS];
         for (int64_t u = lo; u < hi; ++u) {
@@ -293,7 +303,7 @@ void col_sums(const T* a, int64_t m, int64_t n, T* out, bool avx2, bool mean) {
             const int64_t j0 = (u % panels) * w;
             const int64_t b0 = chunk_block(0, nb, d, k);
             const int64_t b1 = k + 1 < c ? chunk_block(0, nb, d, k + 1) : nb;
-            block_tree(a, m, n, b0, b1, j0, n - j0 < w ? n - j0 : w, dst(k) + j0, lvl, avx2);
+            block_tree(a, m, n, b0, b1, j0, n - j0 < w ? n - j0 : w, dst(k) + j0, lvl, avx2, stream);
         }
     };
     // The chunks' partial rows add in the block tree's order, column by column.
