@@ -570,6 +570,29 @@ def _confine_to_physical_cores() -> str | None:
     return hex(mask) if k32.SetProcessAffinityMask(k32.GetCurrentProcess(), mask) else None
 
 
+_PRIORITY = "normal"
+
+
+def _set_priority(level: str) -> str:
+    # Background work that lands on one of the six measured cores mid-sample
+    # stalls the whole team at its next barrier: 2048 GEMM samples of 75 ms
+    # showed isolated 83-108 ms spikes on both libraries at a flat clock. HIGH
+    # lets the measured threads preempt normal-priority work. Both contenders
+    # run in this process, so both get it. The argtypes matter: without them the
+    # -1 pseudo-handle is passed as a 32-bit int and the call fails silently.
+    if os.name != "nt" or level != "high":
+        return "normal"
+    import ctypes
+
+    k32 = ctypes.windll.kernel32
+    k32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    k32.GetPriorityClass.argtypes = [ctypes.c_void_p]
+    high = 0x80
+    if k32.SetPriorityClass(k32.GetCurrentProcess(), high) and k32.GetPriorityClass(k32.GetCurrentProcess()) == high:
+        return "high"
+    return "normal"
+
+
 def fresh_process_runner(smoke: bool):
     """The last chance for a noisy cell: this script re-invoked for that cell alone."""
 
@@ -580,7 +603,7 @@ def fresh_process_runner(smoke: bool):
                 cmd = [
                     sys.executable, os.path.abspath(__file__),
                     "--cell", json.dumps(cell.spec()),
-                    "--out", out, "--fresh-child",
+                    "--out", out, "--fresh-child", "--priority", _PRIORITY,
                     *_proto_argv(proto, smoke),
                     *(["--all-logical-cpus"] if _AFFINITY is None else []),
                 ]
@@ -785,6 +808,8 @@ def _parse(argv):
     p.add_argument("--cooldown-s", type=float, default=30.0, help="between series and before each CV rerun")
     # Fewer strikes and a shorter fresh-process cooldown make a quick check
     # finish on a noisy machine; the published matrix keeps the defaults.
+    p.add_argument("--priority", choices=("normal", "high"), default="normal",
+                   help="process priority class for the measurement (Windows only)")
     p.add_argument("--max-strikes", type=int, default=3,
                    help="CV-gate attempts before the fresh-process last chance (default 3)")
     p.add_argument("--fresh-cooldown-s", type=float, default=120.0,
@@ -854,6 +879,8 @@ def main(argv=None) -> int:
     args = _parse(argv)
     global _AFFINITY
     _AFFINITY = None if args.all_logical_cpus else _confine_to_physical_cores()
+    global _PRIORITY
+    _PRIORITY = _set_priority(args.priority)
     proto, cooldown = _protocol(args)
     clock = PdhClock()
     clock_obj = clock if clock.available else None
@@ -890,7 +917,7 @@ def main(argv=None) -> int:
     manifest = protocol_manifest(
         argv=["bench_suite.py", *argv], series_seed=seed, clock=clock,
         extra={"smoke": args.smoke, "protocol": dataclasses.asdict(proto), "series_cooldown_s": cooldown,
-               "affinity_mask": _AFFINITY},
+               "affinity_mask": _AFFINITY, "priority": _PRIORITY},
     )
     result = {"manifest": manifest, "cells": []}
     fresh = None if args.fresh_child else fresh_process_runner(args.smoke)
