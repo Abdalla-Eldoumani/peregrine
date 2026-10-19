@@ -757,6 +757,17 @@ def test_series_order_reproducible():
     assert a != [s[0].series for s in bench_suite.series_order(cells, 12)]
 
 
+@gpu
+def test_auto_matmul_cell_runs_both_forced_routes():
+    # The routing target compares auto with the faster forced route, so the
+    # auto cell carries both routes and checks each against NumPy.
+    cell = bench_suite.Cell("gpu", "matmul", "float32", (64, 64, 64), variant="auto")
+    contenders, check, meta = bench_suite.BUILDERS["matmul"](cell)
+    assert [c.name for c in contenders] == ["peregrine", "numpy", "peregrine_cpu", "peregrine_gpu"]
+    check({c.name: c.fn() for c in contenders})
+    assert meta["route"] in ("cpu", "cuda")
+
+
 def test_spin_settle_from_quantized_trace():
     # Five threads spinning until 190 ms, charged in 15.6 ms scheduler ticks.
     tick = 0.015625
