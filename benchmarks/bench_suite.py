@@ -669,10 +669,12 @@ def _fmt_s(s: float) -> str:
 
 
 def list_cells(groups, seeds, proto: Protocol, cooldown_s: float, clock_on: bool, cuda: bool,
-               cell_cooldown_s: float = 10.0) -> None:
+               cell_cooldown_s: float = 10.0, cell_filter: str | None = None) -> None:
     grand = 0.0
     for g in groups:
         cells = select([g], seeds, cuda)
+        if cell_filter:
+            cells = [c for c in cells if re.search(cell_filter, c.id)]
         n_series = len({c.series for c in cells})
         est = 0.0
         heavy = 0
@@ -862,7 +864,8 @@ def main(argv=None) -> int:
         return 0
 
     if args.list:
-        list_cells(args.group, args.seeds, proto, cooldown, clock_obj is not None, cuda, args.cell_cooldown_s)
+        list_cells(args.group, args.seeds, proto, cooldown, clock_obj is not None, cuda, args.cell_cooldown_s,
+                   args.filter)
         return 0
 
     cells = [Cell.from_spec(json.loads(args.cell))] if args.cell else select(args.group, args.seeds, cuda)
