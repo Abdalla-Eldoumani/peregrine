@@ -24,10 +24,12 @@
 namespace {
 
 // Releasing and reacquiring the GIL measured about 0.1 us per call, so it is
-// dropped only once the kernel takes about 2 us: a 16-cube matmul (4096
-// multiply-adds) or a 64x64 transpose or sum (4096 elements) on the kernels of
-// 2026-10-18. Faster kernels move these sizes up.
-constexpr double kMatmulGilWork = 4096.0;
+// dropped only once the kernel takes about 1 to 2 us: a 32-cube matmul (32768
+// multiply-adds) or a 64x64 transpose or sum (4096 elements). The register-tiled
+// small kernel does a 16-cube in 0.1-0.2 us, so dropping the GIL there cost
+// about a third of the float32 call (out=: 16x16x16 292 ns, dropping it, against
+// 169 for 12x16x16, holding it).
+constexpr double kMatmulGilWork = 32768.0;
 constexpr int64_t kElementGilWork = 4096;
 
 // Releases the GIL for its scope. Unwinding restores the thread state before
