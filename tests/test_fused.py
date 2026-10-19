@@ -638,6 +638,75 @@ def test_edges_avx2_equals_scalar_twin(edge_digests):
     assert [k for k in keys if avx2[k][1] != twin[k][1]] == []
 
 
+# NaN payloads. Two NaNs meeting in one instruction give the payload of the
+# first source slot, and the compiler may order operands differently in the
+# peel, the body, and the tail. The kernels choose the first NaN operand in
+# written order (a, x, b, y; x, y, z; scale, x), quieted, so a payload never
+# depends on alignment, thread count, or path. -k "payload"
+# ---------------------------------------------------------------------------
+
+_QUIET = {np.float32: (np.uint32, 0x7F800000, 0x00400000), np.float64: (np.uint64, 0x7FF0000000000000, 0x0008000000000000)}
+
+
+def _call_fused(op, xs, s, out):
+    if op == "axpby":
+        return pg.axpby(xs[0], xs[1], a=s, b=-1.5, out=out)
+    if op == "fma3":
+        return pg.fma3(xs[0], xs[1], xs[2], out=out)
+    return pg.scaled_relu(xs[0], scale=s, out=out)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("op", ["axpby", "fma3", "scaled_relu"])
+@pytest.mark.parametrize("scalar_nan", [False, True])
+def test_nan_payload_is_the_first_nan_operand(op, dtype, scalar_nan):
+    if op == "fma3" and scalar_nan:
+        pytest.skip("fma3 has no scalar operand")
+    u, exp, q = _QUIET[dtype]
+    k = {"axpby": 2, "fma3": 3, "scaled_relu": 1}[op]
+    # Past the serial size, so the alignment peel, the body, and the tail all run.
+    n = 32768 // np.dtype(dtype).itemsize + 37
+    rng = np.random.default_rng(11)
+    xs = [rng.standard_normal(n).astype(dtype) for _ in range(k)]
+    # Distinct payloads, every other one signaling; step 7 puts NaNs at every
+    # lane offset, and the operand subsets cycle so every combination occurs.
+    payload = 1
+    for idx, p in enumerate(range(0, n, 7)):
+        mask = idx % (2**k - 1) + 1
+        for j in range(k):
+            if mask >> j & 1:
+                xs[j][p] = np.array(exp | (q if payload % 2 else 0) | payload, u).view(dtype)
+                payload += 1
+    s = 0.75
+    if scalar_nan:
+        s = np.array(exp | 0x5A5A, u).view(dtype)
+    order = {"axpby": lambda i: [s, xs[0][i], -1.5, xs[1][i]], "fma3": lambda i: [xs[0][i], xs[1][i], xs[2][i]],
+             "scaled_relu": lambda i: [s, xs[0][i]]}[op]
+    expected = {}
+    for i in range(n):
+        first = next((v for v in order(i) if np.isnan(v)), None)
+        if first is not None:
+            expected[i] = int(np.array(first, dtype).view(u)) | q
+    assert expected
+    w = 32 // np.dtype(dtype).itemsize
+    results = []
+    saved = pg.get_num_threads()
+    try:
+        for threads in (1, 6):
+            pg.set_num_threads(threads)
+            for off in range(w):
+                buf = np.zeros((1, n + w), dtype)
+                out = buf[:, off:off + n]
+                _call_fused(op, [x.reshape(1, n) for x in xs], s, out)
+                bits = out.reshape(-1).view(u)
+                assert {i: int(bits[i]) for i in expected} == expected, (threads, off)
+                results.append(bits.copy())
+    finally:
+        pg.set_num_threads(saved)
+    for r in results[1:]:
+        assert np.array_equal(r, results[0])
+
+
 # ---------------------------------------------------------------------------
 # Hypothesis property over drawn shapes + the legacy-killer @example
 # pins + an explicit large @example. -k "property"
