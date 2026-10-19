@@ -254,9 +254,10 @@ def _build_matmul(cell: Cell):
         if pg.has_cuda():
             # The routing target is auto within 5 percent of the faster forced
             # route, so both forced routes run in the same cell.
+            contenders[0].gpu = True
             contenders += [
                 Contender("peregrine_cpu", lambda: pg._matmul_cpu(a, b)),
-                Contender("peregrine_gpu", lambda: pg._matmul_gpu_staged(a, b)),
+                Contender("peregrine_gpu", lambda: pg._matmul_gpu_staged(a, b), gpu=True),
             ]
 
     def check(refs):
@@ -393,6 +394,7 @@ def _build_gpu_matmul(cell: Cell):
             PEREGRINE,
             lambda: pg.from_device(pg.matmul(xa, xb)),
             timer=lambda kk: pg._core._cuda_time_matmul(xa, xb, kk, 0) / 1e3,
+            gpu=True,
         ),
         Contender("numpy", lambda: np.matmul(a, b)),
     ]
@@ -407,10 +409,10 @@ def _build_transfer(cell: Cell):
     dt = np.dtype(cell.dtype)
     a = _normal(np.random.default_rng(cell.seed), cell.shape, dt)
     if cell.op == "to_device":
-        c = Contender(PEREGRINE, lambda: pg.to_device(a), to_host=pg.from_device)
+        c = Contender(PEREGRINE, lambda: pg.to_device(a), to_host=pg.from_device, gpu=True)
     else:
         xd = pg.to_device(a)
-        c = Contender(PEREGRINE, lambda: pg.from_device(xd))
+        c = Contender(PEREGRINE, lambda: pg.from_device(xd), gpu=True)
 
     def check(refs):
         if not bitwise_equal(refs[PEREGRINE], a):
@@ -436,6 +438,7 @@ def _build_gpu_chain(cell: Cell):
             PEREGRINE,
             device_chain,
             timer=lambda kk: pg._core._cuda_time_fused(xd, yd, zd, kk, 0) / 1e3,
+            gpu=True,
         ),
         Contender("numpy", lambda: _numpy_chain(x, y, z)),
     ]
