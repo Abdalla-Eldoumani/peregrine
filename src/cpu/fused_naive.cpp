@@ -1,6 +1,7 @@
 #include "cpu/fused.hpp"
 #include "cpu/threads.hpp"
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 
@@ -36,6 +37,17 @@ inline T relu_nan_safe_scalar(T sx) {
     return sx > T(0) ? sx : T(0);
 }
 
+// The AVX2 bodies' NaN rule: v with the quiet bit set where v is a NaN, else r,
+// so a result built from two NaNs takes the first NaN operand in written order
+// whatever operand order the compiler emits.
+inline float pickq(float r, float v) {
+    return v != v ? std::bit_cast<float>(std::bit_cast<std::uint32_t>(v) | 0x00400000u) : r;
+}
+
+inline double pickq(double r, double v) {
+    return v != v ? std::bit_cast<double>(std::bit_cast<std::uint64_t>(v) | 0x0008000000000000u) : r;
+}
+
 // Runs f(lo, hi) on each thread's elements, split at 64-byte lines of out.
 template <typename T, typename F>
 void elementwise(T* out, int64_t n, const F& f) {
@@ -69,7 +81,15 @@ template <typename T>
 void fused_axpby_naive(const T* x, const T* y, T* out, int64_t n, T a, T b) {
     elementwise(out, n, [=](int64_t lo, int64_t hi) {
         for (int64_t i = lo; i < hi; ++i) {
-            out[i] = a * x[i] + b * y[i];
+            T ax = a * x[i];
+            T by = b * y[i];
+            T r = ax + by;
+            if (r != r) {
+                ax = pickq(ax, a);
+                by = pickq(by, b);
+                r = pickq(ax + by, ax);
+            }
+            out[i] = r;
         }
     });
 }
@@ -78,7 +98,11 @@ template <typename T>
 void fused_fma3_naive(const T* x, const T* y, const T* z, T* out, int64_t n) {
     elementwise(out, n, [=](int64_t lo, int64_t hi) {
         for (int64_t i = lo; i < hi; ++i) {
-            out[i] = std::fma(x[i], y[i], z[i]);
+            T r = std::fma(x[i], y[i], z[i]);
+            if (r != r) {
+                r = pickq(pickq(pickq(r, z[i]), y[i]), x[i]);
+            }
+            out[i] = r;
         }
     });
 }
@@ -87,7 +111,8 @@ template <typename T>
 void fused_scaled_relu_naive(const T* x, T* out, int64_t n, T scale) {
     elementwise(out, n, [=](int64_t lo, int64_t hi) {
         for (int64_t i = lo; i < hi; ++i) {
-            out[i] = relu_nan_safe_scalar<T>(scale * x[i]);
+            const T sx = scale * x[i];
+            out[i] = relu_nan_safe_scalar<T>(sx != sx ? pickq(sx, scale) : sx);
         }
     });
 }
