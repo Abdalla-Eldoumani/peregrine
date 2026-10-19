@@ -248,12 +248,22 @@ def _build_matmul(cell: Cell):
         Contender("numpy", lambda: np.matmul(a, b)),
     ]
 
-    def check(refs):
-        assert_matmul_close(refs[PEREGRINE], refs["numpy"], a, b)
-
     meta = {"flop": 2 * m * k * n}
     if cell.variant == "auto" and hasattr(pg, "_host_backend_for"):
         meta["route"] = pg._host_backend_for(a, b)
+        if pg.has_cuda():
+            # The routing target is auto within 5 percent of the faster forced
+            # route, so both forced routes run in the same cell.
+            contenders += [
+                Contender("peregrine_cpu", lambda: pg._matmul_cpu(a, b)),
+                Contender("peregrine_gpu", lambda: pg._matmul_gpu_staged(a, b)),
+            ]
+
+    def check(refs):
+        for name in refs:
+            if name != "numpy":
+                assert_matmul_close(refs[name], refs["numpy"], a, b)
+
     return contenders, check, meta
 
 
