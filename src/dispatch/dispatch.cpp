@@ -200,16 +200,21 @@ template void fused_scaled_relu_device<float>(const float*, float*, int64_t, flo
 template void fused_scaled_relu_device<double>(const double*, double*, int64_t, double);
 #endif
 
-// transpose and the two sum entries have one CPU implementation each, valid on
-// every CPU, so they forward directly. No avx2/naive branch: unlike matmul
-// there is no packed variant to choose, and the kernels are plain TUs the
-// fallback path links unconditionally. The decision stays pure: no features
-// are read, no state mutated, the call simply crosses the TU boundary.
+// transpose takes the AVX2 body on avx2 && fma, the scalar twin otherwise; the
+// result is a permutation of the input bits, so both give the same array.
 template <typename T>
 void transpose(const T* a, T* out, int64_t m, int64_t n) {
+    const auto& f = cpu::detect();
+    if (f.avx2 && f.fma) {
+        cpu::transpose_avx2<T>(a, out, m, n);
+        return;
+    }
     cpu::transpose<T>(a, out, m, n);
 }
 
+// The two sum entries have one CPU implementation each, valid on every CPU, so
+// they forward directly. The decision stays pure: no features are read, no
+// state mutated, the call simply crosses the TU boundary.
 template <typename T>
 T sum_all(const T* a, int64_t m, int64_t n) {
     return cpu::sum_all<T>(a, m, n);
