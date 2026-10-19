@@ -475,6 +475,168 @@ def test_thread_count_bitwise_identical(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Kernel edges: sizes just below, at, and above every threshold the kernels
+# switch on (one thread vs a team, six threads, streaming stores), every head
+# length of the 32-byte alignment peel (out is a view at an element offset into
+# a larger buffer), out= exactly an input, NaN/Inf/-0.0/subnormal operands, and
+# the caller's FTZ/DAZ. One script computes every case; it runs at 1 and 6
+# threads on the AVX2 kernels and at 1 and 6 threads on the scalar twins
+# (PEREGRINE_DISABLE_AVX2=1, read at import, so each run is its own process).
+# -k "edges"
+# ---------------------------------------------------------------------------
+
+_EDGE_SCRIPT = r"""
+import hashlib
+import sys
+
+import numpy as np
+
+import peregrine as pg
+
+threads, path = int(sys.argv[1]), sys.argv[2]
+pg.set_num_threads(threads)
+MXCSR_DEFAULT, FTZ_DAZ = 0x1F80, 0x8040
+L3 = 12 * 2**20
+ARRAYS = {"axpby": 3, "fma3": 4, "scaled_relu": 2}
+INPUTS = {"axpby": 2, "fma3": 3, "scaled_relu": 1}
+SMALL = [1, 2, 3, 5, 7, 8, 9, 15, 16, 17, 31, 33, 64, 65]
+# GCC may contract the AVX2 axpby into one rounding (see the twin test below).
+GCC = pg._core._build_info()["compiler"].startswith("GNU")
+
+
+def sizes(op, dt):
+    item = np.dtype(dt).itemsize
+    team = 32768 // item  # the serial threshold, in elements of out
+    six = 6 * 8192 // item  # six threads have work from here
+    at = L3 // (ARRAYS[op] * item)  # streaming starts above this
+    return SMALL + [team - 1, team, team + 1, six - 1, six, six + 1, at - 1, at, at + 1]
+
+
+def operands(op, dt, n, seed):
+    # Mixed signs, a run of subnormal operands, products that underflow, and one
+    # special per index (NaN, +-Inf, -0.0, inf * 0 for fma3), at both ends and
+    # inside, so they land on peels, tails, and thread boundaries alike.
+    rng = np.random.default_rng(seed)
+    k = INPUTS[op]
+    tiny = 2.0**-70 if dt == np.float32 else 2.0**-540
+    xs = [rng.standard_normal(n) for _ in range(k)]
+    for j, v in enumerate(xs):
+        v[j::5 + j] *= tiny
+    xs[0][3::11] *= tiny
+    sub = np.finfo(dt).smallest_subnormal
+    picks = sorted(p for p in {0, 1, n // 3, n // 2, n - 2, n - 1, *rng.integers(0, n, 8).tolist()} if 0 <= p < n)
+    specials = [np.nan, np.inf, -np.inf, -0.0, 3 * float(sub)]
+    for i, p in enumerate(picks):
+        xs[i % k][p] = specials[i % len(specials)]
+    if op == "fma3" and n > 4:
+        xs[0][n // 4], xs[1][n // 4] = np.inf, 0.0
+    return [v.astype(dt).reshape(1, n) for v in xs]
+
+
+def run(op, xs, out):
+    if op == "axpby":
+        return pg.axpby(xs[0], xs[1], a=0.75, b=-1.5, out=out)
+    if op == "fma3":
+        return pg.fma3(xs[0], xs[1], xs[2], out=out)
+    return pg.scaled_relu(xs[0], scale=1.25, out=out)
+
+
+def run_case(op, dt, n, off, where, given, csr):
+    buf = np.zeros((1, n + 8), dt)
+    xs = [v.copy() for v in given]
+    if where is None:
+        out = buf[:, off:off + n]
+    else:
+        i = 0 if where == "xx" else where
+        buf[:, off:off + n] = xs[i]
+        xs[i] = out = buf[:, off:off + n]
+        if where == "xx":
+            xs[1] = out
+    previous = pg._core._set_mxcsr(csr)
+    try:
+        r = run(op, xs, out)
+    finally:
+        pg._core._set_mxcsr(previous)
+    assert r is out
+    # Values against NumPy where it computes the same roundings, so a run whose
+    # results never reached out cannot pass by agreeing with another such run.
+    x0 = given[0]
+    x1 = x0 if where == "xx" else given[-1]
+    if csr == MXCSR_DEFAULT and op == "scaled_relu":
+        assert np.array_equal(r, np.maximum(dt(1.25) * x0, dt(0.0)), equal_nan=True)
+    if csr == MXCSR_DEFAULT and op == "axpby" and not GCC:
+        assert np.array_equal(r, dt(0.75) * x0 + dt(-1.5) * x1, equal_nan=True)
+    canon = np.where(np.isnan(r), np.nan, r)
+    return hashlib.blake2b(r.tobytes()).hexdigest(), hashlib.blake2b(canon.tobytes()).hexdigest()
+
+
+digests = {}
+for op in ("axpby", "fma3", "scaled_relu"):
+    # where: None for a fresh output, else the input out= aliases; "xx" passes
+    # x twice to axpby with out=x
+    wheres = [None, 0] + ([INPUTS[op] - 1] if INPUTS[op] > 1 else []) + (["xx"] if op == "axpby" else [])
+    for dt in (np.float32, np.float64):
+        lanes = 32 // np.dtype(dt).itemsize
+        for n in sizes(op, dt):
+            given = operands(op, dt, n, n)
+            for off in range(lanes) if n < 100000 else (0, 1):
+                for where in wheres:
+                    for mode, csr in (("plain", MXCSR_DEFAULT), ("ftz", MXCSR_DEFAULT | FTZ_DAZ)):
+                        key = f"{mode} {op} {np.dtype(dt).name} {n} {off} {where}"
+                        digests[key] = run_case(op, dt, n, off, where, given, csr)
+np.save(path, np.array(sorted((k, *v) for k, v in digests.items())))
+"""
+
+
+@pytest.fixture(scope="module")
+def edge_digests(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("edges")
+    runs = {}
+    for threads in (1, 6):
+        for twin in (False, True):
+            env = dict(os.environ)
+            env.pop("PEREGRINE_NUM_THREADS", None)
+            env.pop("PEREGRINE_DISABLE_AVX2", None)
+            if twin:
+                env["PEREGRINE_DISABLE_AVX2"] = "1"
+            path = tmp / f"edges_{threads}_{int(twin)}.npy"
+            # the four runs share nothing, so they run side by side
+            proc = subprocess.Popen([sys.executable, "-c", _EDGE_SCRIPT, str(threads), str(path)], env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            runs[(threads, twin)] = (proc, path)
+    digests = {}
+    for key, (proc, path) in runs.items():
+        _, err = proc.communicate(timeout=600)
+        assert proc.returncode == 0, err
+        digests[key] = {row[0]: (row[1], row[2]) for row in np.load(path)}
+    return digests
+
+
+@pytest.mark.parametrize("twin", [False, True], ids=["avx2", "twin"])
+def test_edges_thread_count_does_not_change_bits(edge_digests, twin):
+    one, six = edge_digests[(1, twin)], edge_digests[(6, twin)]
+    assert one.keys() == six.keys()
+    assert [k for k in one if one[k][0] != six[k][0]] == []
+    # the operands carry subnormals that FTZ/DAZ must visibly flush
+    assert any(one[k][0] != one["ftz" + k[len("plain"):]][0] for k in one if k.startswith("plain"))
+
+
+@pytest.mark.skipif(not (pg.cpu_features()["avx2"] and pg.cpu_features()["fma"]),
+                    reason="the AVX2 kernels need an AVX2 CPU")
+def test_edges_avx2_equals_scalar_twin(edge_digests):
+    avx2, twin = edge_digests[(6, False)], edge_digests[(6, True)]
+    assert avx2.keys() == twin.keys()
+    # GCC's default FP model contracts the AVX2 axpby into one rounding, which the
+    # twin cannot do; test_cpu_axpby_bitwise_equals_unfused holds that kernel to
+    # one ULP of the two-rounding expression the twin computes exactly. NaN
+    # payloads are compared positionally: the twin's std::fma may come from the
+    # C runtime, which need not produce the payload the FMA instruction does.
+    gcc = pg._core._build_info()["compiler"].startswith("GNU")
+    keys = [k for k in avx2 if not (gcc and " axpby " in k)]
+    assert [k for k in keys if avx2[k][1] != twin[k][1]] == []
+
+
+# ---------------------------------------------------------------------------
 # Hypothesis property over drawn shapes + the legacy-killer @example
 # pins + an explicit large @example. -k "property"
 # ---------------------------------------------------------------------------
