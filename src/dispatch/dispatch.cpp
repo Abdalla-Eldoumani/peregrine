@@ -23,7 +23,7 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 // The device-resident fused kernels, forward-declared CUDA-free the same way:
 // fused.cu's explicit float/double instantiations satisfy these, and this TU
 // pulls no src/cuda header so the deletable-src/cuda invariant holds. Pure
-// device-pointer compute on the compute stream.
+// device-pointer compute on the context stream.
 template <typename T>
 void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b);
 template <typename T>
@@ -104,7 +104,7 @@ template void matmul<double>(const double*, int64_t, int64_t, const double*, int
 template <typename T>
 void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // Device-in/device-out: a, b, c are device pointers, so this is a pure
-    // forward to the cuBLAS GEMM on the compute stream -- no host staging, no
+    // forward to the cuBLAS GEMM on the context stream -- no host staging, no
     // sync (the binding owns the result's lifetime; from_device syncs when it
     // crosses back to host). f32 and f64 both forward to gemm<T>: f64 is the
     // FORCED device-resident path (both operands were explicitly to_device'd),
@@ -169,11 +169,9 @@ template void fused_scaled_relu<double>(const double*, double*, int64_t, double)
 
 #if defined(PG_HAS_CUDA)
 // Device-resident fused entries: x, y, z, out are device pointers, so each is a
-// pure forward to the hand-written grid-stride kernel on the compute stream -- no
-// host staging, no sync (the binding owns the output buffer's lifetime; the
-// output alloc and the kernel are both on the compute stream, so the single-stream
-// ordering needs no cross-stream fence, unlike matmul_device's transfer/compute
-// split). Both f32 and f64 forward through: the fused device path is reached only
+// pure forward to the hand-written grid-stride kernel on the context stream -- no
+// host staging, no sync (the binding owns the output buffer's lifetime, and the
+// output alloc and the kernel share the one stream). Both f32 and f64 forward through: the fused device path is reached only
 // when operands are already a pg.Array (the user's explicit to_device), so there
 // is no f64-never-AUTO-routes exclusion to enforce here -- that is a GEMM-only rule
 // and fused never auto-stages a host array. Pure: no warnings/logging/fallback.
