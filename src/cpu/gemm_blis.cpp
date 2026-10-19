@@ -18,20 +18,26 @@ namespace pg::cpu {
 
 namespace {
 
-// Per-dtype blocking, starting from BLIS's Haswell configuration (MR 6; NR 8 f64
-// and 16 f32; MC 72 f64 and 168 f32; KC 256; NC 4080) until a sweep on this
-// machine replaces it. The cache budget it meets on an i7-10750H (32 KiB L1d,
-// 256 KiB L2 per core): the A and B micro-panels, MR x KC plus KC x NR, are
-// 12 + 16 = 28 KiB for f64 and 6 + 16 = 22 KiB for f32, inside L1d; the MC x KC
-// A block is 144 KiB for f64 and 168 KiB for f32, inside L2.
+// Per-dtype blocking from a 6-thread sweep on an i7-10750H at n = 512, 1024,
+// and 2048 (benchmarks/results/tuning/sweep_refbox_t6_*.json: MC {48, 72, 96,
+// 144, 168} x KC {192, 256, 320, 384} x NC {2048, 4080}, mirrored walks, median
+// ranking). f64 {48, 256, 2048} is within the winner's IQR at every size
+// (geometric mean 0.980 of the per-size best; the BLIS Haswell start {72, 256,
+// 4080} was 0.960 and 8 percent behind at 1024); the one config ranked above it
+// needs MC 168, whose A block (344 KiB) overflows the 256 KiB L2. f32 {48, 256,
+// 4080} is within the IQR everywhere (0.997; the start {168, 256, 4080} was
+// 0.948). Cache budget: the A and B micro-panels, MR x KC plus KC x NR, are
+// 12 + 16 = 28 KiB for f64 and 6 + 16 = 22 KiB for f32, inside the 32 KiB L1d;
+// the MC x KC A block is 96 KiB for f64 and 48 KiB for f32, inside L2; KC x NC
+// of B is 4 MiB either way, inside the 12 MiB L3.
 //
 // std::atomic so the sweep hook can publish a new triple while a kernel reads
 // it: blocking is trivially copyable (three int64_t), so the whole struct moves
 // in one atomic store/load and no reader ever sees a torn (mc-new, nc-old) pair.
 // On a 24-byte struct this is not lock-free, but it is correct and off any hot
 // path (the kernel loads it once per call, never per tile).
-std::atomic<blocking> g_blocking_f64{blocking{72, 256, 4080}};
-std::atomic<blocking> g_blocking_f32{blocking{168, 256, 4080}};
+std::atomic<blocking> g_blocking_f64{blocking{48, 256, 2048}};
+std::atomic<blocking> g_blocking_f32{blocking{48, 256, 4080}};
 
 } // namespace
 
