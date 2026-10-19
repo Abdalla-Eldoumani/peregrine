@@ -51,7 +51,7 @@ def test_zero_sized_matches_numpy(shape_a, shape_b):
 def test_transposed_view_input():
     rng = np.random.default_rng(1)
     a = rng.standard_normal((64, 32))
-    b = rng.standard_normal((50, 32)).T  # F-order view exercises the copy path
+    b = rng.standard_normal((50, 32)).T  # an F-order view, read in place
     assert_matmul_close(pg.matmul(a, b), a @ b, a, b)
 
 
@@ -83,15 +83,19 @@ def test_zero_copy_pointer_identity(dtype):
     assert normalized.ctypes.data == arr.ctypes.data
 
 
-def test_zero_copy_strided_inputs_take_copy_path():
+def test_strided_inputs_reach_the_kernel_without_a_copy():
+    # matmul reads any element strides in place; the reductions and elementwise
+    # ops, whose bits depend on memory order, still normalize to a C copy.
     rng = np.random.default_rng(0)
     f_order = np.asfortranarray(rng.standard_normal((16, 8)))
     strided = rng.standard_normal((16, 8))[::2]
-    for view in (f_order, strided):
+    reversed_ = rng.standard_normal((16, 8))[::-1]
+    for view in (f_order, strided, reversed_):
+        assert pg._matmul_operand(view, view.dtype) is view
         normalized = pg._normalize(view, view.dtype)
         assert normalized.ctypes.data != view.ctypes.data
     b = rng.standard_normal((8, 4))
-    for view in (f_order, strided):
+    for view in (f_order, strided, reversed_):
         assert_matmul_close(pg.matmul(view, b), view @ b, view, b)
 
 
@@ -105,8 +109,9 @@ def test_unaligned_inputs_take_copy_path(dtype):
     a = raw[1:].view(dtype).reshape(8, 8)
     a[...] = rng.standard_normal((8, 8))
     assert a.flags.c_contiguous and not a.flags.aligned
-    normalized = pg._normalize(a, a.dtype)
-    assert normalized.flags.aligned and normalized.flags.c_contiguous
+    for normalize in (pg._matmul_operand, pg._normalize):
+        normalized = normalize(a, a.dtype)
+        assert normalized.flags.aligned and normalized.flags.c_contiguous
     b = rng.standard_normal((8, 8)).astype(dtype)
     assert_matmul_close(pg.matmul(a, b), a @ b, a, b)
 
