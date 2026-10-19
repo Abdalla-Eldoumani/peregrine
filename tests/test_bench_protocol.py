@@ -347,6 +347,36 @@ def test_rewarm_keeps_cold_clock_calls_out_of_the_samples():
         assert max(res["contenders"][name]["samples_s"]) == pytest.approx(fast)
 
 
+def test_gpu_contender_rewarms_until_its_batches_agree():
+    # A device that stays slow for its first 600 ms of work after each switch,
+    # longer than the 200 ms rewarm, the way the display GPU climbs back from
+    # a low power state; a gpu contender rewarms for gpu_rewarm_s instead.
+    ft = _FakeTime()
+    state = {"since_switch": 0.0}
+
+    def body(slow_s, fast_s):
+        def fn():
+            d = slow_s if state["since_switch"] < 0.6 else fast_s
+            ft.advance(d)
+            state["since_switch"] += d
+            return np.array([1.0])
+        return fn
+
+    def gap(_s):
+        state["since_switch"] = 0.0
+
+    a = Contender("peregrine", body(400e-6, 100e-6), gpu=True)
+    b = Contender("numpy", body(200e-6, 200e-6))
+    proto = _proto(rewarm_s=0.2, gpu_rewarm_s=1.0, switch_gap_s=0.3)
+    res = run_cell("cell", [a, b], _ok_check, proto, sleep=gap, now=ft.now)
+    assert res["status"] == "ok"
+    assert max(res["contenders"]["peregrine"]["samples_s"]) == pytest.approx(100e-6)
+    # Without the flag the same body is sampled while still slow.
+    a = Contender("peregrine", body(400e-6, 100e-6))
+    res = run_cell("cell", [a, b], _ok_check, proto, sleep=gap, now=ft.now)
+    assert max(res["contenders"]["peregrine"]["samples_s"]) == pytest.approx(400e-6)
+
+
 def test_batch_size_from_fastest():
     target = 200e-6
     assert batch_size({"peregrine": 1e-6, "numpy": 5e-6}, target) == 200
