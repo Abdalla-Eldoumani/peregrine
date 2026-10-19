@@ -106,8 +106,9 @@ extern template void fused_scaled_relu_device<double>(const double*, double*, in
 #endif
 
 // transpose, sum_all, and sum_axis route through the same entry point, so the
-// binding layer never changes when a kernel does. transpose picks its AVX2 body
-// on avx2 && fma, else the scalar twin; the sums forward to their one CPU body.
+// binding layer never changes when a kernel does. transpose and the sums pick
+// their AVX2 bodies on avx2 && fma, else the scalar twins, with the same bits
+// either way.
 template <typename T>
 void transpose(const T* a, T* out, int64_t m, int64_t n);
 
@@ -117,11 +118,18 @@ T sum_all(const T* a, int64_t m, int64_t n);
 template <typename T>
 void sum_axis(const T* a, T* out, int64_t m, int64_t n, int axis);
 
+// sum_axis divided by the reduced count converted to T, in T, inside the same
+// pass; the bits equal sum_axis followed by that division.
+template <typename T>
+void mean_axis(const T* a, T* out, int64_t m, int64_t n, int axis);
+
 extern template void transpose<float>(const float*, float*, int64_t, int64_t);
 extern template void transpose<double>(const double*, double*, int64_t, int64_t);
 extern template float sum_all<float>(const float*, int64_t, int64_t);
 extern template double sum_all<double>(const double*, int64_t, int64_t);
 extern template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
 extern template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
+extern template void mean_axis<float>(const float*, float*, int64_t, int64_t, int);
+extern template void mean_axis<double>(const double*, double*, int64_t, int64_t, int);
 
 } // namespace pg::dispatch
