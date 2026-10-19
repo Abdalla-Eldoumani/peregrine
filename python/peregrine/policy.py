@@ -10,7 +10,7 @@ things and nothing else:
   a partially populated dict. ``None`` means "recalibrate or use static
   thresholds." Any parse error, an unknown schema, or a foreign machine
   signature all collapse to ``None``.
-* ``choose_backend`` -- a PURE function: op/dtype/shape/residency/calibration/
+* ``choose_backend`` -- a PURE function: op/dtype/shape/calibration/
   backend in, a ``"cpu"`` / ``"cuda"`` enum out. No file I/O, no warnings, no
   logging, no global mutation. The wrapper owns side effects; this only decides.
 
@@ -239,8 +239,7 @@ def _transfer_time(transfer, m, k, n) -> float:
 
     The two operands go up (``4*(m*k + k*n)`` bytes at the H2D bandwidth) and
     the product comes back (``4*m*n`` bytes at the D2H bandwidth). Only float32
-    reaches the GPU from the host, so the width is fixed. Device-resident inputs
-    pay none of this, which is why their crossover is at less work.
+    reaches the GPU from the host, so the width is fixed.
 
     Parameters
     ----------
@@ -277,8 +276,8 @@ def _staging_floor(calibration) -> float:
     largest sizes, where the residual is millisecond-scale error in the
     transfer model rather than a fixed cost, while the fixed cost only decides
     anything at the small sizes. A fixed cost cannot be negative, so the fit is
-    floored at zero, which also keeps a host product's GPU cost at or above the
-    compute-only cost a device-resident product is judged by.
+    floored at zero, which also keeps a host product's GPU cost at or above its
+    compute alone.
 
     Parameters
     ----------
@@ -305,8 +304,8 @@ def _staging_floor(calibration) -> float:
     return max(num / den, 0.0)
 
 
-def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
-    """Choose the backend for one GEMM: ``"cpu"`` or ``"cuda"``.
+def choose_backend(dtype, m, k, n, *, calibration, backend) -> str:
+    """Choose the backend for one GEMM of host operands: ``"cpu"`` or ``"cuda"``.
 
     A pure decision function -- inputs in, a backend enum out, no side effects.
     It implements the dispatch rule order (a lower rule never overrides a higher
@@ -325,12 +324,13 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
        prefer the CPU when there is nothing measured to justify the GPU);
     4. otherwise the measured crossover (rule 4) at the product's work
        ``F = 2*m*k*n``: the CPU and GPU compute times are interpolated at ``F``
-       from the square calibration grids. A device-resident input compares
-       compute alone. A host input adds the upload of ``4*(m*k + k*n)`` bytes,
-       the download of ``4*m*n`` bytes, and the staged path's fixed cost fitted
-       from the staged series, so it crosses to the GPU at more work than a
-       device-resident input does, and a product with one small dimension,
-       whose bytes are large for its work, stays on the CPU.
+       from the square calibration grids, and the GPU side adds the upload of
+       ``4*(m*k + k*n)`` bytes, the download of ``4*m*n`` bytes, and the staged
+       path's fixed cost fitted from the staged series, so a product with one
+       small dimension, whose bytes are large for its work, stays on the CPU.
+
+    Device-resident operands never ask: a product of two pg.Arrays always runs
+    on the device.
 
     Parameters
     ----------
@@ -338,9 +338,6 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
         ``"float32"`` or ``"float64"``.
     m, k, n : int
         GEMM dimensions (M x K times K x N).
-    residency : str
-        ``"host"`` (operands in host memory, transfer cost applies) or
-        ``"device"`` (already on the device, no transfer cost).
     calibration : dict or None
         A calibration dict from :func:`_load_cache`, or ``None`` for the static
         fallback. The ``"gpu"``, ``"staged"``, and ``"transfer"`` keys are
@@ -360,10 +357,10 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
 
     >>> from peregrine import policy
     >>> policy.choose_backend("float64", 4096, 4096, 4096,
-    ...                       residency="host", calibration=None, backend="auto")
+    ...                       calibration=None, backend="auto")
     'cpu'
     >>> policy.choose_backend("float32", 256, 256, 256,
-    ...                       residency="host", calibration=None, backend="auto")
+    ...                       calibration=None, backend="auto")
     'cpu'
     """
     # Rule 5 first, but only the forced backends (they win within rules 1-2). A
@@ -377,8 +374,7 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
 
     # Rule 2 (hard exclusion): float64 GEMM never auto-routes to the GPU on this
     # hardware. Decided before any table lookup so no measured crossover can
-    # override it -- the FP64 trap is upheld here exactly as the wrapper upholds
-    # it upstream for device-resident operands.
+    # override it.
     if dtype == "float64":
         return "cpu"
 
@@ -394,12 +390,7 @@ def choose_backend(dtype, m, k, n, *, residency, calibration, backend) -> str:
     cpu_t = _interp_time(calibration["cpu"][dtype], flops)
     gpu_t = _interp_time(calibration["gpu"][dtype], flops)
 
-    # Rule 3 (residency): device-resident inputs pay no transfer cost, so the
-    # comparison is compute-vs-compute and the GPU wins at far less work.
-    if residency == "device":
-        return "cuda" if gpu_t < cpu_t else "cpu"
-
-    # Host inputs pay their bytes both ways plus the staged path's fixed cost.
+    # The operands pay their bytes both ways plus the staged path's fixed cost.
     # That fixed cost is why a small host matrix (e.g. n=256) stays on the CPU
     # even though the GPU's compute alone is faster, and the bytes are why a
     # matrix-vector product stays there at any size.
