@@ -2,9 +2,9 @@
 host threads cannot deadlock the native kernel.
 
 Bitwise identity across thread counts is achievable and therefore required:
-the kernel parallelizes over output rows, and each element's accumulation
+the kernel parallelizes over output tiles, and each element's accumulation
 over the inner dimension runs strictly sequentially, so the thread count
-decides only which thread computes a row, never any element's rounding
+decides only which thread computes a tile, never any element's rounding
 order. The subprocess indirection exists because the OpenMP runtime reads
 OMP_NUM_THREADS once at its initialization; the variable must be in the
 environment before the process starts to take effect. Every child drops an
