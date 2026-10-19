@@ -148,8 +148,16 @@ void check_same_shape(const char* op, const host_in<T>& x, const host_in<T>& y) 
     }
 }
 
+// matmul operands may carry any element strides: the kernels read them in
+// place, so a transposed, F-ordered, sliced, or reversed operand is never
+// copied. nanobind hands over strides in elements and refuses a byte stride
+// that is not a whole number of elements; the wrapper copies those, and
+// misaligned or byte-swapped operands, before calling.
 template <typename T>
-void matmul_into(const host_in<T>& a, const host_in<T>& b, const host_out<T>& out) {
+using host_strided = nb::ndarray<const T, nb::ndim<2>, nb::device::cpu>;
+
+template <typename T>
+void matmul_into(const host_strided<T>& a, const host_strided<T>& b, const host_out<T>& out) {
     const pg::gemm_dims d = pg::check_matmul_dims(
         static_cast<int64_t>(a.shape(0)), static_cast<int64_t>(a.shape(1)),
         static_cast<int64_t>(b.shape(0)), static_cast<int64_t>(b.shape(1)));
@@ -157,7 +165,8 @@ void matmul_into(const host_in<T>& a, const host_in<T>& b, const host_out<T>& ou
     // The kernel never touches Python objects, so the GIL drops for the whole
     // compute. This is what lets callers thread around the library.
     nb::gil_scoped_release release;
-    pg::dispatch::matmul<T>(a.data(), b.data(), out.data(), d.m, d.k, d.n);
+    pg::dispatch::matmul<T>(a.data(), a.stride(0), a.stride(1), b.data(), b.stride(0), b.stride(1),
+                            out.data(), d.m, d.k, d.n);
 }
 
 template <typename T>
