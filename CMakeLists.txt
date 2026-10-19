@@ -52,6 +52,7 @@ nanobind_add_module(_core STABLE_ABI NB_STATIC NOMINSIZE
   src/cpu/transpose.cpp
   src/cpu/reduce.cpp
   src/dispatch/dispatch.cpp
+  src/cpu/transpose_avx2.cpp
 )
 target_include_directories(_core PRIVATE src)
 # SYSTEM keeps the NumPy headers' own /W4 warnings out of the build log.
@@ -74,6 +75,7 @@ set(PG_AVX2_SOURCES
   src/cpu/gemm_small_avx2.cpp
   src/cpu/gemm_skinny_avx2.cpp
   src/cpu/fused_avx2.cpp
+  src/cpu/transpose_avx2.cpp
 )
 
 # The kernel codegen gate reads these listings: the inner k-loop must show no
