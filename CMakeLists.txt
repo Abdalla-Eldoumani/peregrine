@@ -39,10 +39,14 @@ nanobind_add_module(_core STABLE_ABI NB_STATIC NOMINSIZE
   src/cpu/topology.cpp
   src/cpu/threads.cpp
   src/cpu/gemm_naive.cpp
+  src/cpu/gemm_small_naive.cpp
+  src/cpu/gemm_skinny_naive.cpp
   src/cpu/pack.cpp
   src/cpu/microkernel_avx2_f64.cpp
   src/cpu/microkernel_avx2_f32.cpp
   src/cpu/gemm_blis.cpp
+  src/cpu/gemm_small_avx2.cpp
+  src/cpu/gemm_skinny_avx2.cpp
   src/cpu/fused_avx2.cpp
   src/cpu/fused_naive.cpp
   src/cpu/transpose.cpp
@@ -58,15 +62,17 @@ target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
 # flag is deliberately absent at target level: AVX2 instructions in a TU that the
 # no-AVX2 fallback path links produce a module that executes an illegal
 # instruction at import on a CPU without AVX2 (the legacy import crash). The
-# feature_detect, topology, threads, gemm_naive, fused_naive, dispatch, and
-# module TUs must stay free of AVX2 codegen so the fallback path runs
-# everywhere; fused_naive.cpp is the fused fallback and is kept OUT of this list
-# on purpose.
+# feature_detect, topology, threads, gemm_naive, gemm_small_naive,
+# gemm_skinny_naive, fused_naive, dispatch, and module TUs must stay free of
+# AVX2 codegen so the fallback path runs everywhere; fused_naive.cpp is the
+# fused fallback and is kept OUT of this list on purpose.
 set(PG_AVX2_SOURCES
   src/cpu/pack.cpp
   src/cpu/microkernel_avx2_f64.cpp
   src/cpu/microkernel_avx2_f32.cpp
   src/cpu/gemm_blis.cpp
+  src/cpu/gemm_small_avx2.cpp
+  src/cpu/gemm_skinny_avx2.cpp
   src/cpu/fused_avx2.cpp
 )
 
