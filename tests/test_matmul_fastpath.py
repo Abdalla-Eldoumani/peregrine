@@ -75,13 +75,44 @@ def test_fast_path_result_matches_slow_path(entry, dtype):
     assert fast.tobytes() == full.tobytes()
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_native_entry_takes_f_order_and_transposed_views(monkeypatch, dtype):
+    # The kernels read strides, so an F-ordered operand or a transposed view
+    # needs none of the helper chain either, and gives the C-order bits.
+    def _boom(*args, **kwargs):
+        raise AssertionError("the native entry must take F-ordered and transposed operands")
+
+    a, b = _qualifying(dtype)
+    pairs = [(np.asfortranarray(a), b), (a, np.asfortranarray(b)), (a.T, b.T)]
+    refs = [pg.matmul(np.ascontiguousarray(x), np.ascontiguousarray(y)) for x, y in pairs]
+    monkeypatch.setattr(pg, "_fast_matmul", pg._core._fast_matmul)
+    monkeypatch.setattr(pg, "_prepare", _boom)
+    monkeypatch.setattr(pg, "_matmul_operand", _boom)
+    monkeypatch.setattr(pg, "_matmul_into", _boom)
+    pg.set_backend("cpu")
+    try:
+        for (x, y), ref in zip(pairs, refs):
+            assert pg.matmul(x, y).tobytes() == ref.tobytes()
+    finally:
+        pg.set_backend("auto")
+
+
 def test_non_contiguous_falls_through_to_slow_path():
-    # An F-order operand does not qualify; the slow path's _normalize copy must
-    # still run and the result must still be correct.
+    # A row-sliced operand is neither C- nor F-contiguous, so the native entry
+    # declines it; the slow path then reads it in place, with no copy, and gives
+    # the bits of the same values in C order.
     rng = np.random.default_rng(0)
-    a = np.asfortranarray(rng.standard_normal((16, 8)))
+    a = rng.standard_normal((32, 8))[::2]
     b = rng.standard_normal((8, 4))
-    assert_matmul_close(pg.matmul(a, b), a @ b, a, b)
+    pg.set_backend("cpu")
+    try:
+        assert pg._core._fast_matmul(a, b, None) is NotImplemented
+    finally:
+        pg.set_backend("auto")
+    assert pg._matmul_operand(a, a.dtype) is a
+    got = pg.matmul(a, b)
+    assert_matmul_close(got, a @ b, a, b)
+    assert got.tobytes() == pg.matmul(np.ascontiguousarray(a), b).tobytes()
 
 
 def test_mixed_dtype_falls_through_to_slow_path():
@@ -123,17 +154,22 @@ def test_list_input_falls_through_to_slow_path():
     np.testing.assert_array_equal(got, np.array(a) @ np.array(b))
 
 
+@pytest.mark.parametrize("layout", ["C", "F", "T"])
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_fast_path_is_zero_copy(entry, dtype):
-    # The fast path must not copy a C-contiguous matching-dtype input; the
-    # result owns its own buffer but the inputs must reach the kernel without
-    # a defensive copy (the zero-copy contract the wrapper promises). NumPy
-    # reports its buffer allocations to tracemalloc, so with all three arrays
-    # the same size, a copy of either input would at least double the traced
-    # peak over the result alone.
+def test_fast_path_is_zero_copy(entry, dtype, layout):
+    # Neither path may copy a matching-dtype input in C order, F order, or a
+    # transposed view; the result owns its own buffer but the inputs must
+    # reach the kernel without a defensive copy (the zero-copy contract the
+    # wrapper promises). NumPy reports its buffer allocations to tracemalloc,
+    # so with all three arrays the same size, a copy of either input would at
+    # least double the traced peak over the result alone.
     rng = np.random.default_rng(0)
     a = rng.standard_normal((256, 256)).astype(dtype)
     b = rng.standard_normal((256, 256)).astype(dtype)
+    if layout == "F":
+        a, b = np.asfortranarray(a), np.asfortranarray(b)
+    elif layout == "T":
+        a, b = a.T, b.T
     pg.matmul(a, b)
 
     def traced_peak(call):
