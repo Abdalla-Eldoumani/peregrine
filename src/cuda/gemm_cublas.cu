@@ -4,7 +4,9 @@
 #include "cuda/context.cuh"
 #include "cuda/transfer.cuh"
 
+#include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace pg::cuda {
 namespace {
@@ -67,6 +69,186 @@ cublasStatus_t cublas_gemm_nn(cublasHandle_t h, int m, int n, int k,
                               double* C, int ldc) {
     return cublasDgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, alpha, A, lda, B,
                        ldb, beta, C, ldc);
+}
+
+// Owners for the cuBLASLt descriptors the overlapped staged product builds per
+// call, released on the unwind path as device_buf releases its buffer.
+template <typename H, cublasStatus_t (*Destroy)(H)>
+struct lt_owned {
+    H h = nullptr;
+    lt_owned() = default;
+    ~lt_owned() {
+        if (h != nullptr) {
+            Destroy(h);
+        }
+    }
+    lt_owned(const lt_owned&) = delete;
+    lt_owned& operator=(const lt_owned&) = delete;
+};
+using lt_desc = lt_owned<cublasLtMatmulDesc_t, cublasLtMatmulDescDestroy>;
+using lt_layout = lt_owned<cublasLtMatrixLayout_t, cublasLtMatrixLayoutDestroy>;
+using lt_pref = lt_owned<cublasLtMatmulPreference_t, cublasLtMatmulPreferenceDestroy>;
+
+// A large staged float32 product overlaps its transfers with its compute: A and
+// C are split into row blocks, and while block i computes, block i+1 uploads and
+// block i-1 downloads. This GPU has one copy engine (asyncEngineCount 1), so
+// uploads and downloads still take turns; the blocks hide the GEMM under them.
+// Four blocks weighted 1:2:2:1 measured best of the partitions tried (median ms,
+// serial / two halves / four equal / 1:2:2:1 / six blocks): 2048: 7.06 / 5.38 /
+// 5.28 / 4.84 / 4.89, 3000: 17.0 / 14.2 / 12.8 / 12.4 / 12.4, 4096: 38.1 / 32.6
+// / 30.5 / 28.3 / 27.1. The small first block starts the compute soon after B
+// has arrived, and the small last one shortens the download left once it ends.
+constexpr int kBlocks = 4;
+
+// Block edges fall on multiples of 64 rows, so every block's A and C pointers
+// keep the 256-byte alignment of the whole buffers, which cuBLASLt's heuristic
+// assumes by default for the algorithm it picks for the whole product.
+constexpr int64_t kRowAlign = 64;
+
+// Overlap from 768 rows and 2*512^3 flops (median ms, overlapped against
+// serial). Rows: square 768 measured 0.76 against 0.89, square 512 lost, 0.47
+// against 0.43, to the extra launches and events; 768 rows also keeps every
+// block at 128 rows or more. Work, at 768 rows or more: 768x512x512 0.525 against
+// 0.543 and 2048x256x256 0.47 against 0.56, while under 2*512^3 flops it bought
+// nothing (768x300x300 0.324 against 0.327, 1024x256x256 0.34 against 0.34) or
+// lost (768x64x64 0.17 against 0.13).
+constexpr int64_t kOverlapMinRows = 768;
+constexpr double kOverlapMinFlops = 2.0 * 512 * 512 * 512;
+
+// Every block runs the one algorithm cuBLASLt's heuristic picks for the whole
+// product, so its elements are summed exactly as the whole product sums them.
+// Left to choose per shape, cuBLAS gives a block a different kernel (split-K or
+// not), which changed 90 percent or more of the elements at every size tried.
+// With a 4 MiB workspace limit the heuristic's first choice reproduced
+// cublasSgemm's bits at every one of 136 shapes tested (squares 16 to 4096,
+// rectangular and skinny ones), and so did every 64-row-aligned blocking of
+// them; with no workspace or 1 MiB it picked other algorithms at 1024 to 4096.
+constexpr size_t kLtWorkspaceBytes = size_t{4} << 20;
+
+bool overlaps(int64_t m, int64_t k, int64_t n) {
+    return m >= kOverlapMinRows &&
+           2.0 * static_cast<double>(m) * static_cast<double>(k) * static_cast<double>(n) >=
+               kOverlapMinFlops;
+}
+
+// On a throw, waits for the side streams before the caller frees the device
+// buffers on the context stream and hands the host result buffer back, since
+// copies still queued there read and write both. The normal path has already
+// ordered them before the context stream's fence and sets joined.
+struct side_join {
+    cudaStream_t up;
+    cudaStream_t down;
+    bool joined = false;
+    ~side_join() {
+        if (!joined) {
+            cudaStreamSynchronize(up);
+            cudaStreamSynchronize(down);
+            cudaGetLastError();
+        }
+    }
+};
+
+// Queues the blocked product on the context stream and the two side streams and
+// joins the side streams back into the context stream; the caller fences. Returns
+// false, having queued nothing, when cuBLASLt offers no algorithm for the shape.
+bool gemm_host_overlapped(Context& ctx, const float* a, const float* b, float* c, float* da,
+                          float* db, float* dc, int64_t m, int64_t k, int64_t n) {
+    const cudaStream_t stream = ctx.stream;
+    const cudaStream_t up = ctx.upload_stream;
+    const cudaStream_t down = ctx.download_stream;
+
+    // Row-major C = A @ B as column-major C^T = B^T @ A^T, the operand swap gemm
+    // uses; a row block of A and C is a column block of A^T and C^T.
+    lt_desc desc;
+    PG_CUBLAS_CHECK(cublasLtMatmulDescCreate(&desc.h, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+    lt_layout lb;
+    lt_layout la;
+    lt_layout lc;
+    PG_CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lb.h, CUDA_R_32F, n, k, n));
+    PG_CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&la.h, CUDA_R_32F, k, m, k));
+    PG_CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&lc.h, CUDA_R_32F, n, m, n));
+    lt_pref pref;
+    PG_CUBLAS_CHECK(cublasLtMatmulPreferenceCreate(&pref.h));
+    size_t ws_limit = kLtWorkspaceBytes;
+    PG_CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(
+        pref.h, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_limit, sizeof(ws_limit)));
+    cublasLtMatmulHeuristicResult_t heur{};
+    int found = 0;
+    const cublasStatus_t hs = cublasLtMatmulAlgoGetHeuristic(
+        ctx.cublaslt, desc.h, lb.h, la.h, lc.h, lc.h, pref.h, 1, &heur, &found);
+    if (hs == CUBLAS_STATUS_NOT_SUPPORTED || (hs == CUBLAS_STATUS_SUCCESS && found == 0)) {
+        return false;
+    }
+    PG_CUBLAS_CHECK(hs);
+
+    const int64_t edge[kBlocks + 1] = {0, m / 6 / kRowAlign * kRowAlign,
+                                       m / 2 / kRowAlign * kRowAlign,
+                                       5 * m / 6 / kRowAlign * kRowAlign, m};
+
+    void* ws_raw = nullptr;
+    PG_CUDA_CHECK(cudaMallocAsync(&ws_raw, kLtWorkspaceBytes, stream));
+    device_buf ws{ws_raw, stream};
+    cuda_event ready;
+    cuda_event done;
+    cuda_event uploaded[kBlocks];
+    cuda_event computed[kBlocks];
+    for (cuda_event* e : {&ready, &done}) {
+        PG_CUDA_CHECK(cudaEventCreateWithFlags(&e->ev, cudaEventDisableTiming));
+    }
+    for (int i = 0; i < kBlocks; ++i) {
+        PG_CUDA_CHECK(cudaEventCreateWithFlags(&uploaded[i].ev, cudaEventDisableTiming));
+        PG_CUDA_CHECK(cudaEventCreateWithFlags(&computed[i].ev, cudaEventDisableTiming));
+    }
+    side_join join{up, down};
+
+    // The buffers were allocated on the context stream: the side streams start
+    // behind that.
+    PG_CUDA_CHECK(cudaEventRecord(ready.ev, stream));
+    PG_CUDA_CHECK(cudaStreamWaitEvent(up, ready.ev, 0));
+    PG_CUDA_CHECK(cudaStreamWaitEvent(down, ready.ev, 0));
+    PG_CUDA_CHECK(cudaMemcpyAsync(db, b, static_cast<size_t>(k) * n * sizeof(float),
+                                  cudaMemcpyHostToDevice, up));
+
+    const auto download = [&](int i) {
+        PG_CUDA_CHECK(cudaStreamWaitEvent(down, computed[i].ev, 0));
+        PG_CUDA_CHECK(cudaMemcpyAsync(c + edge[i] * n, dc + edge[i] * n,
+                                      static_cast<size_t>(edge[i + 1] - edge[i]) * n * sizeof(float),
+                                      cudaMemcpyDeviceToHost, down));
+    };
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    for (int i = 0; i < kBlocks; ++i) {
+        const int64_t r0 = edge[i];
+        const uint64_t rows = static_cast<uint64_t>(edge[i + 1] - r0);
+        // A pageable source returns once staged, so the host queues the next block
+        // only then; the GEMMs already queued run meanwhile.
+        PG_CUDA_CHECK(cudaMemcpyAsync(da + r0 * k, a + r0 * k, rows * k * sizeof(float),
+                                      cudaMemcpyHostToDevice, up));
+        PG_CUDA_CHECK(cudaEventRecord(uploaded[i].ev, up));
+        PG_CUDA_CHECK(cudaStreamWaitEvent(stream, uploaded[i].ev, 0));
+        PG_CUBLAS_CHECK(cublasLtMatrixLayoutSetAttribute(la.h, CUBLASLT_MATRIX_LAYOUT_COLS, &rows,
+                                                         sizeof(rows)));
+        PG_CUBLAS_CHECK(cublasLtMatrixLayoutSetAttribute(lc.h, CUBLASLT_MATRIX_LAYOUT_COLS, &rows,
+                                                         sizeof(rows)));
+        PG_CUBLAS_CHECK(cublasLtMatmul(ctx.cublaslt, desc.h, &alpha, db, lb.h, da + r0 * k, la.h,
+                                       &beta, dc + r0 * n, lc.h, dc + r0 * n, lc.h, &heur.algo,
+                                       ws.ptr, kLtWorkspaceBytes, stream));
+        PG_CUDA_CHECK(cudaEventRecord(computed[i].ev, stream));
+        // The copy engine takes copies in the order they are queued, so the
+        // previous block's download goes behind this block's upload, which is
+        // ready at once, rather than ahead of it while waiting for its GEMM.
+        if (i > 0) {
+            download(i - 1);
+        }
+    }
+    download(kBlocks - 1);
+
+    // The last download waited for the last GEMM, which waited for the last
+    // upload: once the context stream passes `done`, both side streams are idle.
+    PG_CUDA_CHECK(cudaEventRecord(done.ev, down));
+    PG_CUDA_CHECK(cudaStreamWaitEvent(stream, done.ev, 0));
+    join.joined = true;
+    return true;
 }
 
 } // namespace
@@ -152,13 +334,18 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     const size_t b_bytes = static_cast<size_t>(k) * static_cast<size_t>(n) * sizeof(T);
     const size_t c_bytes = static_cast<size_t>(m) * static_cast<size_t>(n) * sizeof(T);
 
-    // One pre-flight for the three buffers together: they are live at once.
-    preflight(static_cast<int64_t>(a_bytes + b_bytes + c_bytes));
+    // TF32 changes the compute type the overlapped path would have to match, so
+    // it stays on the plain path.
+    const bool overlap = std::is_same_v<T, float> && !ctx.tf32_enabled && overlaps(m, k, n);
+
+    // One pre-flight for the buffers together: they are live at once.
+    preflight(static_cast<int64_t>(a_bytes + b_bytes + c_bytes +
+                                   (overlap ? kLtWorkspaceBytes : 0)));
 
     // Stream-ordered allocation from the context mempool (release threshold
     // UINT64_MAX), so repeated calls reuse buffers instead of re-allocating from
-    // the OS. All three buffers, the copies, the compute, and the free are
-    // ordered on the one context stream, so no cross-stream event is needed. A
+    // the OS. The buffers are allocated and freed on the context stream; the
+    // overlapped path orders its side streams against it with events. A
     // zero-k input still allocates dA/dB (size 0 is a valid cudaMallocAsync) and
     // dC, then gemm zero-fills dC. Each buffer is owned by device_buf so a throw
     // from any CHECK below (a copy or the inner gemm surfacing an async/cuBLAS
@@ -177,18 +364,26 @@ void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     T* db_p = static_cast<T*>(db.ptr);
     T* dc_p = static_cast<T*>(dc.ptr);
 
-    if (a_bytes > 0) {
-        PG_CUDA_CHECK(cudaMemcpyAsync(da_p, a, a_bytes, cudaMemcpyHostToDevice, stream));
+    bool queued = false;
+    if constexpr (std::is_same_v<T, float>) {
+        if (overlap) {
+            queued = gemm_host_overlapped(ctx, a, b, c, da_p, db_p, dc_p, m, k, n);
+        }
     }
-    if (b_bytes > 0) {
-        PG_CUDA_CHECK(cudaMemcpyAsync(db_p, b, b_bytes, cudaMemcpyHostToDevice, stream));
+    if (!queued) {
+        if (a_bytes > 0) {
+            PG_CUDA_CHECK(cudaMemcpyAsync(da_p, a, a_bytes, cudaMemcpyHostToDevice, stream));
+        }
+        if (b_bytes > 0) {
+            PG_CUDA_CHECK(cudaMemcpyAsync(db_p, b, b_bytes, cudaMemcpyHostToDevice, stream));
+        }
+
+        gemm<T>(da_p, db_p, dc_p, m, k, n);
+
+        // `c` is a page-locked pool buffer (the full-rate DMA) or the caller's out
+        // array (pageable, staged by the driver); either way the copy is queued.
+        PG_CUDA_CHECK(cudaMemcpyAsync(c, dc_p, c_bytes, cudaMemcpyDeviceToHost, stream));
     }
-
-    gemm<T>(da_p, db_p, dc_p, m, k, n);
-
-    // `c` is a page-locked pool buffer (the full-rate DMA) or the caller's out
-    // array (pageable, staged by the driver); either way the copy is queued.
-    PG_CUDA_CHECK(cudaMemcpyAsync(c, dc_p, c_bytes, cudaMemcpyDeviceToHost, stream));
 
     // The host fence: c is complete, and any asynchronous error from the work
     // above surfaces here, while the caller still holds the host operands. The
