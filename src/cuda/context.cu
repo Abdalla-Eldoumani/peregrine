@@ -1,5 +1,6 @@
-// std::getenv is the standard portable read and PEREGRINE_ALLOW_TF32 is only ever
-// compared, never used to build a path or a command, so MSVC's /W4 C4996
+// std::getenv is the standard portable read and PEREGRINE_ALLOW_TF32 and
+// PEREGRINE_PREFLIGHT_FREE_CAP are only ever compared or parsed as a number,
+// never used to build a path or a command, so MSVC's /W4 C4996
 // deprecation (which steers toward getenv_s) is noise here; silence it
 // TU-locally, exactly as src/cpu/feature_detect.cpp does for PEREGRINE_DISABLE_AVX2.
 #define _CRT_SECURE_NO_WARNINGS
@@ -39,22 +40,24 @@ constexpr int kMinCcMajor = 7;
 // without touching the static Context during deinit.
 cublasLtHandle_t g_cublaslt = nullptr;
 cublasHandle_t g_cublas = nullptr;
-cudaStream_t g_compute = nullptr;
-cudaStream_t g_transfer = nullptr;
+cudaStream_t g_stream = nullptr;
+
+__global__ void trap_kernel() {
+    __trap();
+}
 
 } // namespace
 
-// Set true at the top of teardown() and read by free_device (transfer.cu). After
-// teardown destroys ctx.transfer, ctx.transfer is a DANGLING handle the static
-// Context still names, so an Array still alive at finalization whose ~Array calls
-// free_device would otherwise cudaFreeAsync on that destroyed stream. The flag
-// turns that post-teardown free into a no-op: the mempool buffer is reclaimed by
-// the driver at process exit anyway, so leaking it is correct, while freeing it
-// on a dead stream is a use-after-teardown. Defined in the named namespace (not
-// the anonymous one) so transfer.cu can read it via context.cuh.
+// Set true at the top of teardown() and read by free_device and the pinned-pool
+// deleter (transfer.cu). After teardown destroys ctx.stream, ctx.stream is a
+// DANGLING handle the static Context still names, so an Array still alive at
+// finalization whose ~Array calls free_device would otherwise cudaFreeAsync on
+// that destroyed stream. The flag turns that post-teardown free into a no-op: the
+// mempool buffer is reclaimed by the driver at process exit anyway, so leaking it
+// is correct, while freeing it on a dead stream is a use-after-teardown. Defined
+// in the named namespace (not the anonymous one) so transfer.cu can read it via
+// context.cuh.
 std::atomic<bool> g_torn_down{false};
-
-namespace {
 
 void teardown() {
     // First, publish that teardown has begun so any ~Array running after this
@@ -75,15 +78,18 @@ void teardown() {
         cublasDestroy(g_cublas);
         g_cublas = nullptr;
     }
-    if (g_compute != nullptr) {
-        cudaStreamDestroy(g_compute);
-        g_compute = nullptr;
-    }
-    if (g_transfer != nullptr) {
-        cudaStreamDestroy(g_transfer);
-        g_transfer = nullptr;
+    if (g_stream != nullptr) {
+        cudaStreamDestroy(g_stream);
+        g_stream = nullptr;
     }
 }
+
+void inject_fault() {
+    trap_kernel<<<1, 1, 0, context().stream>>>();
+    PG_CUDA_CHECK(cudaGetLastError());
+}
+
+namespace {
 
 // Reads PEREGRINE_ALLOW_TF32 exactly once, here, so the answer is folded into the
 // Context for the process lifetime and every later GEMM sees one math mode. Any
@@ -97,6 +103,17 @@ bool read_tf32_flag() {
     return allow != nullptr && std::strcmp(allow, "0") != 0;
 }
 
+// A non-negative decimal byte count, else no cap.
+int64_t read_free_cap() {
+    const char* v = std::getenv("PEREGRINE_PREFLIGHT_FREE_CAP");
+    if (v == nullptr || *v == '\0') {
+        return INT64_MAX;
+    }
+    char* end = nullptr;
+    const long long cap = std::strtoll(v, &end, 10);
+    return (*end == '\0' && cap >= 0) ? static_cast<int64_t>(cap) : INT64_MAX;
+}
+
 Context build_context() {
     Context ctx{};
     ctx.device_id = kDevice;
@@ -104,11 +121,11 @@ Context build_context() {
     PG_CUDA_CHECK(cudaSetDevice(ctx.device_id));
     PG_CUDA_CHECK(cudaGetDeviceProperties(&ctx.props, ctx.device_id));
 
-    // Two streams: GEMM launches on compute, transfers run on transfer so an
-    // H2D/D2H copy can overlap an unrelated compute. Both are plain blocking
-    // streams; the priority/non-blocking knobs buy nothing for this workload.
-    PG_CUDA_CHECK(cudaStreamCreate(&ctx.compute));
-    PG_CUDA_CHECK(cudaStreamCreate(&ctx.transfer));
+    // One plain blocking stream for everything. Two streams made every device op
+    // wait on the host twice to order an allocation or copy on one against the
+    // GEMM on the other; the priority/non-blocking knobs buy nothing here.
+    PG_CUDA_CHECK(cudaStreamCreate(&ctx.stream));
+    ctx.free_cap = read_free_cap();
 
     // The device default mempool with the release threshold raised to UINT64_MAX:
     // cudaFreeAsync returns memory to the pool instead of the OS, so the next
@@ -122,11 +139,11 @@ Context build_context() {
     PG_CUDA_CHECK(cudaMemPoolSetAttribute(
         ctx.pool, cudaMemPoolAttrReleaseThreshold, &release_threshold));
 
-    // One cublas v2 handle, bound to the compute stream so its GEMMs serialize
-    // with everything else on that stream. cublasCreate is the millisecond cost
-    // the singleton exists to pay exactly once.
+    // One cublas v2 handle, bound to the stream so its GEMMs serialize with
+    // everything else on it. cublasCreate is the millisecond cost the singleton
+    // exists to pay exactly once.
     PG_CUBLAS_CHECK(cublasCreate(&ctx.cublas));
-    PG_CUBLAS_CHECK(cublasSetStream(ctx.cublas, ctx.compute));
+    PG_CUBLAS_CHECK(cublasSetStream(ctx.cublas, ctx.stream));
 
     // Fold the TF32 flag once and set the handle's math mode to match here, so
     // the policy is decided at init and cannot be toggled mid-session into a
@@ -149,8 +166,7 @@ Context build_context() {
     // CUDA runtime's own static teardown in the common case; in the racy case
     // teardown swallows cudaErrorCudartUnloading. Registered here, inside the
     // once-built static init, so it is registered exactly once.
-    g_compute = ctx.compute;
-    g_transfer = ctx.transfer;
+    g_stream = ctx.stream;
     g_cublas = ctx.cublas;
     g_cublaslt = ctx.cublaslt;
     std::atexit(teardown);
