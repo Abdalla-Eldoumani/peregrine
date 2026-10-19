@@ -162,10 +162,26 @@ def _prepare(x, name: str, op: str = "matmul") -> np.ndarray:
 
 def _normalize(arr: np.ndarray, common: np.dtype) -> np.ndarray:
     # require is a no-op for arrays that already qualify, which is the
-    # zero-copy fast path. Strided views pay one copy here until the native
-    # kernels grow stride support, and so do unaligned ones: the kernels load
-    # whole elements, and a misaligned element load is undefined behavior.
+    # zero-copy fast path. The reductions and elementwise ops compute on C
+    # order (their bits depend on memory order), so strided views pay one copy
+    # here, and so do unaligned ones: the kernels load whole elements, and a
+    # misaligned element load is undefined behavior.
     return np.require(arr, dtype=common, requirements=("C", "A"))
+
+
+def _matmul_operand(arr: np.ndarray, common: np.dtype) -> np.ndarray:
+    # The matmul kernels read any element strides (negative and zero ones
+    # included) and give the same bits for every layout, so an aligned native
+    # operand of the result dtype goes in as it is. Only what they cannot read
+    # is copied: another dtype or byte order, a misaligned element, or a byte
+    # stride that is not a whole number of elements.
+    if (
+        arr.dtype == common
+        and arr.flags.aligned
+        and all(s % arr.itemsize == 0 for s in arr.strides)
+    ):
+        return arr
+    return np.array(arr, dtype=common, order="C")
 
 
 def _resolve_dtype(arr: np.ndarray, op: str) -> np.dtype:
@@ -727,9 +743,9 @@ def _matmul_gpu_staged(a, b, out=None):
                 RuntimeWarning,
                 stacklevel=2,
             )
-        # Host operands: recompute on the host chain directly. _normalize already
-        # ran upstream, so a, b are accepted-dtype C-contiguous ndarrays and the
-        # fast path forwards them to the CPU kernel untouched.
+        # Host operands: recompute on the host chain directly. The caller already
+        # made a, b accepted-dtype C-contiguous ndarrays, so they go to the CPU
+        # kernel untouched.
         return _matmul_cpu(a, b, out)
     if out is None:
         return r
@@ -798,7 +814,8 @@ def _check_matmul_out(a, b, dtype: np.dtype, out) -> None:
 
 def _matmul_host(a, b, out):
     if _host_backend_for(a, b) == "cuda":
-        return _matmul_gpu_staged(a, b, out)
+        # The device upload takes C order; the CPU kernels read any strides.
+        return _matmul_gpu_staged(np.ascontiguousarray(a), np.ascontiguousarray(b), out)
     return _matmul_cpu(a, b, out)
 
 
@@ -861,6 +878,13 @@ def matmul(a, b, *, out=None):
     RuntimeWarning
         Once per session, if a device matmul fails at runtime and the call
         falls back to the CPU.
+
+    Notes
+    -----
+    Host operands are read in place in any memory layout (C or Fortran
+    order, transposed, sliced, or reversed views), and the result is bitwise
+    the same as for C-ordered copies of them. Only a misaligned, byte-swapped,
+    or other-dtype operand is copied first.
 
     Examples
     --------
@@ -993,14 +1017,13 @@ def matmul(a, b, *, out=None):
             )
         common = np.dtype(np.float64)
 
-    # Normalize to the promoted dtype + C-contiguity, THEN route on the backend
-    # (the staging path needs accepted-dtype contiguous host operands, which these
-    # now are). Same backend decision as the fast path: CPU unless a present GPU's
-    # measured crossover (or a forced "cuda") wins for this host f32 pair. The
-    # overlap check sees the operands as passed, before normalization copies
-    # any of them, so the rule is the same whatever layout the caller used.
+    # Bring the operands to the promoted dtype in a layout the kernels read,
+    # THEN route on the backend. Same backend decision as the fast path: CPU
+    # unless a present GPU's measured crossover (or a forced "cuda") wins for
+    # this host f32 pair. The overlap check sees the operands as passed, before
+    # any copy, so the rule is the same whatever layout the caller used.
     _check_matmul_out(a_arr, b_arr, common, out)
-    return _matmul_host(_normalize(a_arr, common), _normalize(b_arr, common), out)
+    return _matmul_host(_matmul_operand(a_arr, common), _matmul_operand(b_arr, common), out)
 
 
 def transpose(a) -> np.ndarray:
