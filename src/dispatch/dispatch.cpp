@@ -212,17 +212,24 @@ void transpose(const T* a, T* out, int64_t m, int64_t n) {
     cpu::transpose<T>(a, out, m, n);
 }
 
-// The two sum entries have one CPU implementation each, valid on every CPU, so
-// they forward directly. The decision stays pure: no features are read, no
-// state mutated, the call simply crosses the TU boundary.
+// The sums take the AVX2 leaf kernels on avx2 && fma, like the fused ops, and
+// the scalar twins otherwise; both give the same bits.
 template <typename T>
 T sum_all(const T* a, int64_t m, int64_t n) {
-    return cpu::sum_all<T>(a, m, n);
+    const auto& f = cpu::detect();
+    return cpu::sum_all<T>(a, m, n, f.avx2 && f.fma);
 }
 
 template <typename T>
 void sum_axis(const T* a, T* out, int64_t m, int64_t n, int axis) {
-    cpu::sum_axis<T>(a, out, m, n, axis);
+    const auto& f = cpu::detect();
+    cpu::sum_axis<T>(a, out, m, n, axis, f.avx2 && f.fma, false);
+}
+
+template <typename T>
+void mean_axis(const T* a, T* out, int64_t m, int64_t n, int axis) {
+    const auto& f = cpu::detect();
+    cpu::sum_axis<T>(a, out, m, n, axis, f.avx2 && f.fma, true);
 }
 
 template void transpose<float>(const float*, float*, int64_t, int64_t);
@@ -231,5 +238,7 @@ template float sum_all<float>(const float*, int64_t, int64_t);
 template double sum_all<double>(const double*, int64_t, int64_t);
 template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
 template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
+template void mean_axis<float>(const float*, float*, int64_t, int64_t, int);
+template void mean_axis<double>(const double*, double*, int64_t, int64_t, int);
 
 } // namespace pg::dispatch
