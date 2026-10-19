@@ -105,10 +105,9 @@ extern template void fused_scaled_relu_device<float>(const float*, float*, int64
 extern template void fused_scaled_relu_device<double>(const double*, double*, int64_t, double);
 #endif
 
-// transpose, sum_all, and sum_axis route through the same entry point. They
-// have one CPU implementation each (a plain, non-AVX2 TU that runs on every
-// CPU), so the routing is a direct forward today; keeping them behind dispatch
-// means the CUDA backend can join later without touching the binding layer.
+// transpose, sum_all, and sum_axis route through the same entry point, so the
+// binding layer never changes when a kernel does. transpose picks its AVX2 body
+// on avx2 && fma, else the scalar twin; the sums forward to their one CPU body.
 template <typename T>
 void transpose(const T* a, T* out, int64_t m, int64_t n);
 
