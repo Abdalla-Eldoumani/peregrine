@@ -184,23 +184,14 @@ void elementwise(T* out, int64_t n, int arrays, const Make& make) {
     const int nt = team_size(bytes, FUSED_SERIAL_BELOW_BYTES, FUSED_PER_THREAD_BYTES, lines);
     // An in-place call counts out twice, so it may stream a little early.
     const bool stream = bytes * static_cast<double>(arrays) > FUSED_STREAM_BYTES;
-    const store_kind kind = !aligned ? store_kind::unaligned : stream ? store_kind::stream : store_kind::aligned;
-    const unsigned csr = mxcsr();
-#if defined(_OPENMP)
-#pragma omp parallel num_threads(nt) if(nt > 1)
-#endif
-    {
-        const mxcsr_scope fp(csr);
+    // Below the serial size the buffers sit in L1 or L2 and the peel's masked
+    // head and tail cost more than the line-split vectors they save. fma3 out=
+    // float32, one thread: 8x8 72 -> 65 ns, 32x32 254 -> 193-212, 64x64 963 ->
+    // 797-840 without the peel.
+    const bool peel = aligned && bytes >= FUSED_SERIAL_BELOW_BYTES;
+    const store_kind kind = !peel ? store_kind::unaligned : stream ? store_kind::stream : store_kind::aligned;
+    const auto body = [&](int64_t lo, int64_t hi) {
         const auto op = make();
-#if defined(_OPENMP)
-        const int64_t t = omp_get_thread_num();
-        const int64_t team = omp_get_num_threads();
-#else
-        const int64_t t = 0;
-        const int64_t team = 1;
-#endif
-        const int64_t lo = t == 0 ? 0 : base + LINE * (lines * t / team);
-        const int64_t hi = t == team - 1 ? n : base + LINE * (lines * (t + 1) / team);
         if (kind == store_kind::stream) {
             range<store_kind::stream>(op, out, lo, hi);
             // Streaming stores are weakly ordered; fence them before the
@@ -211,6 +202,30 @@ void elementwise(T* out, int64_t n, int arrays, const Make& make) {
         } else {
             range<store_kind::unaligned>(op, out, lo, hi);
         }
+    };
+    // One thread runs the body directly: a region with a false if clause still
+    // enters the OpenMP runtime (fma3 out= float32 8x8 took 0.30-0.32 us through
+    // it, 0.19-0.20 without), and the caller's own thread holds its MXCSR.
+    if (nt <= 1) {
+        body(0, n);
+        return;
+    }
+    const unsigned csr = mxcsr();
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(nt)
+#endif
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+        const int64_t t = omp_get_thread_num();
+        const int64_t team = omp_get_num_threads();
+#else
+        const int64_t t = 0;
+        const int64_t team = 1;
+#endif
+        const int64_t lo = t == 0 ? 0 : base + LINE * (lines * t / team);
+        const int64_t hi = t == team - 1 ? n : base + LINE * (lines * (t + 1) / team);
+        body(lo, hi);
     }
 }
 
