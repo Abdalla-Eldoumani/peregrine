@@ -85,12 +85,10 @@ from .calibrate import calibrate
 # checks in matmul return False on OFF without a separate code path.
 if _has_cuda_build():
     from ._core import Array
-    from ._core import _cuda_device_probe
-    from ._core import axpby as _axpby_device
-    from ._core import fma3 as _fma3_device
+    from ._core import _axpby_device, _cuda_device_probe, _fma3_device
+    from ._core import _gemm_host as _gemm_host_native
+    from ._core import _matmul_device, _scaled_relu_device
     from ._core import from_device as _from_device_native
-    from ._core import matmul as _matmul_device
-    from ._core import scaled_relu as _scaled_relu_device
     from ._core import to_device as _to_device_native
 else:
     class Array:  # noqa: D401 - sentinel; the real device type is CUDA-build-only
@@ -624,6 +622,10 @@ def to_device(a) -> Array:
     matmul never auto-routes to this GPU (its FP64 throughput is far below the
     CPU); a forced device-resident float64 matmul computes correctly and slowly.
 
+    The copy is queued on peregrine's device stream and may still be in flight
+    when this returns; ``a`` may be changed or freed at once, and every later
+    device operation on the result runs after the copy.
+
     Parameters
     ----------
     a : array_like
@@ -656,23 +658,29 @@ def to_device(a) -> Array:
 def from_device(x: Array) -> np.ndarray:
     """Copy an pg.Array back to a host NumPy array.
 
-    Performs a device-to-host copy and synchronizes before returning, so the
-    result is fully populated. The returned array owns a fresh host buffer.
+    Waits for the device work that produces ``x`` and for the copy before
+    returning, so the result is fully populated. This is where an error from
+    earlier queued device work surfaces.
 
     Parameters
     ----------
     x : pg.Array
-        A device-resident array produced by to_device or a device matmul.
+        A device-resident array produced by to_device or a device operation.
 
     Returns
     -------
     numpy.ndarray
-        A host copy of ``x``.
+        A host copy of ``x``, writeable. Its memory is a page-locked buffer
+        peregrine lends from a pool of at most 256 MB (an ordinary pageable
+        buffer once the pool cannot fit it), so ``owndata`` is False and
+        ``base`` holds the buffer; it goes back to the pool when the array and
+        every view of it are gone.
 
     Raises
     ------
     RuntimeError
-        If no usable CUDA device is available.
+        If no usable CUDA device is available, or if queued device work failed;
+        the message starts with the cuda error name.
     TypeError
         If ``x`` is not an pg.Array.
     """
@@ -686,17 +694,6 @@ def from_device(x: Array) -> np.ndarray:
     return _from_device_native(x)
 
 
-def _matmul_cpu_fallback(a, b):
-    # Recompute on the CPU after an auto-mode device failure: the operands are
-    # device-resident pg.Arrays, so copy them back to host and run the host
-    # matmul. The result is a host ndarray -- "falling back to cpu" means the
-    # computation (and its residency) is now host-side; we cannot return a device
-    # array when the device is exactly what failed. This is the correct,
-    # testable fallback (the forced-OOM test compares it to NumPy through
-    # assert_matmul_close, which operates on host arrays).
-    return matmul(_from_device_native(a), _from_device_native(b))
-
-
 def _matmul_cpu(a, b, out=None):
     # a and b are normalized host operands; out is validated or None. NumPy
     # allocates every host result, so its provenance matches the fast path's.
@@ -707,28 +704,17 @@ def _matmul_cpu(a, b, out=None):
 
 
 def _matmul_gpu_staged(a, b, out=None):
-    # Route a HOST array pair to the GPU by staging through the existing device
-    # entries: H2D both operands (to_device, synced at the boundary), the device
-    # matmul(Array, Array), then D2H the result (from_device, synced) back to a
-    # host ndarray. Minimal-risk by reuse -- no new native code, no new sanitizer
-    # surface; the three Python crossings are exactly the staging overhead the
-    # policy already counted when it chose this path. a and b are already
-    # promotion-/contiguity-normalized host ndarrays (the caller normalizes before
-    # routing), so this only moves bytes and computes.
-    #
-    # The body is wrapped in the SAME warn-once fallback as the device-resident
-    # path (the _cuda_fallback_lock / _cuda_fallback_warned mechanism), shared
-    # intentionally: the "falling back to cpu for this session" contract is
-    # process-wide, so whichever GPU path fails first claims the single warning
-    # and every later failure (device-resident or host-staged) silently falls
-    # back. On any CUDA runtime failure here, recompute on the HOST arrays a, b
-    # directly via the normal host chain -- NOT _matmul_cpu_fallback, which
-    # from_devices its operands (those are device Arrays; a and b here are host).
+    # A HOST pair routed to the GPU: one native call uploads both operands,
+    # computes, downloads the product (into out when given), and waits for the
+    # device, so any device error, including one from earlier queued work,
+    # surfaces here while a and b are still on the host. That is the one place a
+    # failure can fall back: warn once for the session and recompute on the CPU.
+    # a and b are normalized C-contiguous host ndarrays of the result dtype.
     try:
-        xa = _to_device_native(a)
-        xb = _to_device_native(b)
-        xc = _matmul_device(xa, xb)
-        r = _from_device_native(xc)
+        if out is None:
+            return _gemm_host_native(a, b)
+        _gemm_host_native(a, b, out)
+        return out
     except RuntimeError as exc:
         global _cuda_fallback_warned
         with _cuda_fallback_lock:
@@ -743,14 +729,7 @@ def _matmul_gpu_staged(a, b, out=None):
                 RuntimeWarning,
                 stacklevel=2,
             )
-        # Host operands: recompute on the host chain directly. The caller already
-        # made a, b accepted-dtype C-contiguous ndarrays, so they go to the CPU
-        # kernel untouched.
         return _matmul_cpu(a, b, out)
-    if out is None:
-        return r
-    np.copyto(out, r)
-    return out
 
 
 def _host_backend_for(a_arr, b_arr) -> str:
@@ -795,9 +774,7 @@ def _host_backend_for(a_arr, b_arr) -> str:
     dtype = a_arr.dtype.name
     m, k = a_arr.shape
     n = b_arr.shape[1]
-    return policy.choose_backend(
-        dtype, m, k, n, residency="host", calibration=calibration, backend="auto"
-    )
+    return policy.choose_backend(dtype, m, k, n, calibration=calibration, backend="auto")
 
 
 def _check_matmul_out(a, b, dtype: np.dtype, out) -> None:
@@ -831,8 +808,11 @@ def matmul(a, b, *, out=None):
     than transferring silently. A device float64 product computes on the GPU only
     when both operands were explicitly placed there with to_device; a host
     float64 product never auto-routes to the GPU (its FP64 throughput is below
-    the CPU). If a device computation fails at runtime, the call warns once and
-    falls back to the CPU for the rest of the session, returning a host ndarray.
+    the CPU). If a host product routed to the GPU fails there, the call
+    computes it on the CPU and warns, once per session; auto mode then keeps
+    every later host product on the CPU. A device product is queued and returns
+    at once; a failure in it raises at the next point that waits for the device
+    (from_device, or ``Array.__dlpack__``).
 
     Parameters
     ----------
@@ -857,7 +837,9 @@ def matmul(a, b, *, out=None):
         int8/int16/uint8/uint16 mixed with float32 give float32.
         Integer-with-integer products always promote to float64, unlike NumPy,
         which keeps int64: this is a float library, so every result is a float
-        array.
+        array. A host product computed on the GPU without ``out`` is lent from
+        the page-locked pool described in :func:`from_device` (``owndata`` is
+        False); a host product computed on the CPU is owned by NumPy.
 
     Raises
     ------
@@ -872,12 +854,16 @@ def matmul(a, b, *, out=None):
         other than float32, float64, or an integer dtype (longdouble and
         clongdouble on platforms where they are distinct), or ``out`` is not
         a numpy.ndarray of the result dtype.
+    RuntimeError
+        If a device product cannot be started (for example the output does
+        not fit in device memory); the message starts with the cuda error
+        name.
 
     Warns
     -----
     RuntimeWarning
-        Once per session, if a device matmul fails at runtime and the call
-        falls back to the CPU.
+        Once per session, if a host product routed to the GPU fails there and
+        the call falls back to the CPU.
 
     Notes
     -----
@@ -923,42 +909,10 @@ def matmul(a, b, *, out=None):
         # Both device-resident: the f32 (and forced f64) device path. f64 reaches
         # here ONLY because the caller explicitly put both operands on the device
         # (to_device) -- a host f64 array never auto-routes to the GPU (it would
-        # not be an pg.Array), so the FP64 trap rule is upheld upstream. Auto mode
-        # catches a CUDA runtime failure, warns ONCE, and falls back to the CPU.
-        try:
-            return _matmul_device(a, b)
-        except RuntimeError as exc:
-            # The native cuda_error arm maps every PG_CUDA_CHECK / cuBLAS / OOM
-            # failure to RuntimeError carrying the cuda error NAME. This is
-            # recoverable: warn once with the verbatim fallback token (the cuda op
-            # and error name come from the message) and recompute on the CPU. The
-            # warn-once flag below is SHARED with the host-staging path
-            # (_matmul_gpu_staged): whichever GPU path fails first this session
-            # claims the single warning, by design (the "for this session" contract
-            # is process-wide). Both the auto policy and a forced set_backend("cuda")
-            # reach a device GEMM, and both fall back here on a runtime device
-            # failure -- the forced choice still degrades rather than crashing mid
-            # matmul, since set_backend already validated availability at the set.
-            global _cuda_fallback_warned
-            # Atomic check-then-set under the lock so exactly one thread
-            # ever sees the flag as unset and wins the warning, even when several
-            # threads hit a device failure at once. warnings.warn runs OUTSIDE the
-            # lock: it can invoke arbitrary user warning filters, and holding a
-            # lock across that is needless contention -- the only invariant the
-            # lock must protect is the single flip of the sentinel.
-            with _cuda_fallback_lock:
-                should_warn = not _cuda_fallback_warned
-                _cuda_fallback_warned = True
-            _push_routing_facts(True)
-            if should_warn:
-                name = _cuda_error_name(exc)
-                warnings.warn(
-                    f"cuda matmul failed ({name}), "
-                    "falling back to cpu for this session",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-            return _matmul_cpu_fallback(a, b)
+        # not be an pg.Array), so the FP64 trap rule is upheld upstream. A device
+        # failure raises RuntimeError: with no host copy of the operands there is
+        # nothing to recompute from on the CPU.
+        return _matmul_device(a, b)
 
     # Fast path: when both operands are already 2-D C-contiguous
     # ndarrays of the same accepted float dtype, np.asarray, np.result_type, and
