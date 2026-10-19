@@ -3,8 +3,13 @@
 #include "cuda/check.cuh"
 #include "cuda/context.cuh"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <new>
+#include <string>
+#include <vector>
 
 namespace pg::cuda {
 namespace {
@@ -18,50 +23,125 @@ namespace {
 // the reference machine.
 constexpr int64_t kOomMarginBytes = 64 * 1024 * 1024;
 
+// cudaMemGetInfo measured 2.2-2.5 us per call on this WDDM device, a large share
+// of a small device op, so smaller requests are left to the cudaMallocAsync error.
+constexpr int64_t kPreflightBytes = int64_t{256} << 20;
+
+// The page-locked pool: power-of-two buffer sizes from one page to the cap, so a
+// repeated result shape always finds its size again and the number of distinct
+// buffers stays small. Page-locked memory is taken from the OS's nonpaged pool,
+// and holding more of it degrades the whole machine, hence the cap.
+constexpr int64_t kPinnedCap = int64_t{256} << 20;
+constexpr int kMinLog2 = 12;
+constexpr int kMaxLog2 = 28;
+constexpr int kClasses = kMaxLog2 - kMinLog2 + 1;
+
+int64_t class_bytes(int cls) {
+    return int64_t{1} << (cls + kMinLog2);
+}
+
+// -1 when the request is larger than the whole pool.
+int size_class(int64_t bytes) {
+    int cls = 0;
+    while (cls < kClasses && class_bytes(cls) < bytes) {
+        ++cls;
+    }
+    return cls < kClasses ? cls : -1;
+}
+
+struct host_loan {
+    void* data;
+    int cls;  // -1: pageable
+};
+
+struct pinned_pool {
+    std::mutex mu;
+    std::vector<void*> free_list[kClasses];
+    int64_t reserved = 0;
+    int64_t loaned = 0;
+};
+
+pinned_pool& pool() {
+    // Never destroyed: a NumPy array can release its buffer during interpreter
+    // finalization, after this library's static destructors would have run.
+    static pinned_pool* p = new pinned_pool;
+    return *p;
+}
+
+// Under p.mu. Returns a page-locked buffer of class cls, or nullptr when the
+// cap leaves no room even after giving back the cached buffers of other sizes.
+void* take_pinned(pinned_pool& p, int cls) {
+    std::vector<void*>& mine = p.free_list[cls];
+    if (!mine.empty()) {
+        void* data = mine.back();
+        mine.pop_back();
+        return data;
+    }
+    const int64_t size = class_bytes(cls);
+    for (int c = kClasses - 1; c >= 0 && p.reserved + size > kPinnedCap; --c) {
+        while (!p.free_list[c].empty() && p.reserved + size > kPinnedCap) {
+            cudaFreeHost(p.free_list[c].back());
+            p.free_list[c].pop_back();
+            p.reserved -= class_bytes(c);
+        }
+    }
+    void* data = nullptr;
+    if (p.reserved + size > kPinnedCap ||
+        cudaHostAlloc(&data, static_cast<std::size_t>(size), cudaHostAllocDefault) !=
+            cudaSuccess) {
+        data = nullptr;
+    }
+    // A failed free or an exhausted nonpaged pool is not an error for the
+    // caller (the result goes to pageable memory), and it must not linger as
+    // the last error for the next kernel launch check to report.
+    cudaGetLastError();
+    if (data == nullptr) {
+        return nullptr;
+    }
+    p.reserved += size;
+    return data;
+}
+
 } // namespace
 
+void preflight(int64_t bytes) {
+    if (bytes < kPreflightBytes) {
+        return;
+    }
+    Context& ctx = context();
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    PG_CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    // The mempool keeps freed blocks reserved (release threshold UINT64_MAX), and
+    // cudaMemGetInfo counts them as used although the pool can serve them again.
+    std::uint64_t reserved = 0;
+    std::uint64_t used = 0;
+    PG_CUDA_CHECK(cudaMemPoolGetAttribute(ctx.pool, cudaMemPoolAttrReservedMemCurrent, &reserved));
+    PG_CUDA_CHECK(cudaMemPoolGetAttribute(ctx.pool, cudaMemPoolAttrUsedMemCurrent, &used));
+    const int64_t available = std::min(
+        static_cast<int64_t>(free_bytes + (reserved - used)), ctx.free_cap);
+    if (bytes + kOomMarginBytes > available) {
+        throw ::pg::cuda_error(
+            std::string(cudaGetErrorName(cudaErrorMemoryAllocation)) + " at " + __FILE__ +
+            ":" + std::to_string(__LINE__) + ": device allocation of " +
+            std::to_string(bytes) + " bytes exceeds the " + std::to_string(available) +
+            " bytes free less a " + std::to_string(kOomMarginBytes) + " byte margin");
+    }
+}
+
 void* alloc_device(int64_t bytes) {
-    // Reject a negative byte count explicitly: the pre-flight below is gated on
-    // `bytes > 0`, so a negative value would SKIP it and then reach
-    // cudaMallocAsync via static_cast<size_t>(bytes), which wraps to a near-
-    // SIZE_MAX request (~16 EiB). checked_bytes upstream makes this unreachable
-    // from the binding, but alloc_device is a public entry in transfer.cuh and
-    // must defend its own contract rather than trust the `> 0` skip.
+    // Reject a negative byte count explicitly: static_cast<size_t>(bytes) would
+    // wrap to a near-SIZE_MAX request. checked_bytes upstream makes this
+    // unreachable from the binding, but alloc_device must defend its own contract.
     if (bytes < 0) {
         throw ::pg::cuda_error("alloc_device: negative byte count");
     }
     // A zero-byte buffer is legal (an empty operand): cudaMallocAsync accepts 0
-    // and returns a pointer that is valid to free. Skip the pre-flight for it --
-    // there is nothing to exhaust -- but still allocate so the handle is uniform.
-    Context& ctx = context();
-    const cudaStream_t stream = ctx.transfer;
-
-    if (bytes > 0) {
-        // Pre-flight against CURRENT free VRAM, never a hardcoded 6144: free
-        // fluctuates with the display (measured 4709-5130 MiB on the reference
-        // machine at different moments), so a fixed target either fails to guard or wedges
-        // the desktop. If the request plus the margin exceeds free, throw
-        // pg::cuda_error carrying the cudaErrorMemoryAllocation NAME -- the same
-        // name a real allocation failure would carry -- so the wrapper composes
-        // one byte-math message off the name for both the pre-flight refusal and a
-        // mid-flight OOM (the VRAM-exhaustion path).
-        std::size_t free_bytes = 0;
-        std::size_t total_bytes = 0;
-        PG_CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
-        const int64_t need = bytes + kOomMarginBytes;
-        if (need > static_cast<int64_t>(free_bytes)) {
-            throw ::pg::cuda_error(
-                std::string(cudaGetErrorName(cudaErrorMemoryAllocation)) +
-                ": device allocation of " + std::to_string(bytes) +
-                " bytes exceeds free VRAM (" + std::to_string(free_bytes) +
-                " bytes free, " + std::to_string(kOomMarginBytes) +
-                " bytes margin)");
-        }
-    }
-
+    // and returns a pointer that is valid to free, so the handle stays uniform.
+    preflight(bytes);
     void* dptr = nullptr;
     PG_CUDA_CHECK(
-        cudaMallocAsync(&dptr, static_cast<std::size_t>(bytes), stream));
+        cudaMallocAsync(&dptr, static_cast<std::size_t>(bytes), context().stream));
     return dptr;
 }
 
@@ -70,10 +150,10 @@ void free_device(void* dptr) {
         return;
     }
     // ~Array calls this during Python GC, which includes interpreter
-    // finalization AFTER the atexit teardown() has destroyed ctx.transfer. Two
+    // finalization AFTER the atexit teardown() has destroyed ctx.stream. Two
     // guards make that path safe:
     //
-    //   1. If teardown has run, ctx.transfer is a dangling handle the static
+    //   1. If teardown has run, ctx.stream is a dangling handle the static
     //      Context still names. Skip the free entirely: the mempool buffer is
     //      reclaimed by the CUDA driver at process exit anyway, so leaking it
     //      here is correct, while cudaFreeAsync on the destroyed stream is a
@@ -86,12 +166,9 @@ void free_device(void* dptr) {
     if (g_torn_down.load()) {
         return;
     }
-    Context& ctx = context();
-    // cudaFreeAsync on the transfer stream returns the buffer to the mempool
-    // (release threshold UINT64_MAX) rather than the OS, so the next same-size
-    // allocation reuses it. Stream-ordered: it completes behind any
-    // copy still queued on the transfer stream that touched this buffer.
-    const cudaError_t e = cudaFreeAsync(dptr, ctx.transfer);
+    // Stream-ordered behind every queued use of the buffer, so no host wait is
+    // needed before the free; the block returns to the mempool, not the OS.
+    const cudaError_t e = cudaFreeAsync(dptr, context().stream);
     if (e != cudaSuccess && e != cudaErrorCudartUnloading &&
         e != cudaErrorInvalidResourceHandle && e != cudaErrorInvalidValue) {
         // A genuine live-path failure (not a shutdown race). ~Array must never
@@ -106,51 +183,84 @@ void copy_h2d(void* dst_dev, const void* src_host, int64_t bytes) {
     if (bytes <= 0) {
         return;
     }
-    // On the TRANSFER stream, not compute: an H2D for one operation can overlap
-    // a GEMM still running on the compute stream. Async (queued) -- the caller
-    // orders any dependent compute on the same stream or syncs before a
-    // host-visible read.
-    Context& ctx = context();
-    PG_CUDA_CHECK(cudaMemcpyAsync(dst_dev, src_host,
-                                   static_cast<std::size_t>(bytes),
-                                   cudaMemcpyHostToDevice, ctx.transfer));
+    const cudaStream_t stream = context().stream;
+    PG_CUDA_CHECK(cudaMemcpyAsync(dst_dev, src_host, static_cast<std::size_t>(bytes),
+                                  cudaMemcpyHostToDevice, stream));
+    // A page-locked source (a from_device result fed back, say) is read by DMA
+    // after the call returns, so the caller could change or release it under the
+    // copy; a pageable one has already been staged into driver memory.
+    cudaPointerAttributes attr{};
+    if (cudaPointerGetAttributes(&attr, src_host) != cudaSuccess) {
+        cudaGetLastError();
+    } else if (attr.type == cudaMemoryTypeHost) {
+        PG_CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
 }
 
 void copy_d2h(void* dst_host, const void* src_dev, int64_t bytes) {
     if (bytes <= 0) {
         return;
     }
-    // D2H on the transfer stream. The HARD async-correctness rule: a D2H feeding a
-    // returned ndarray is async here but MUST be
-    // followed by sync_transfer() before the host buffer is read on the Python
-    // side. This function only queues the copy; from_device owns the sync.
-    Context& ctx = context();
-    PG_CUDA_CHECK(cudaMemcpyAsync(dst_host, src_dev,
-                                   static_cast<std::size_t>(bytes),
-                                   cudaMemcpyDeviceToHost, ctx.transfer));
+    PG_CUDA_CHECK(cudaMemcpyAsync(dst_host, src_dev, static_cast<std::size_t>(bytes),
+                                  cudaMemcpyDeviceToHost, context().stream));
 }
 
-void sync_transfer() {
-    // Block until every queued copy on the transfer stream has finished. This is
-    // the API-boundary fence: from_device calls it after copy_d2h so the host
-    // buffer is fully written before the ndarray is handed to Python, and
-    // to_device calls it after copy_h2d so the operand is fully resident before
-    // the unordered compute stream's GEMM reads it (the cross-stream
-    // use-before-ready race this fence closes). CHECK-wrapped (a sync can surface
-    // an asynchronous launch/copy error) and never used at teardown.
-    Context& ctx = context();
-    PG_CUDA_CHECK(cudaStreamSynchronize(ctx.transfer));
+void sync() {
+    PG_CUDA_CHECK(cudaStreamSynchronize(context().stream));
 }
 
-void sync_compute() {
-    // Block until every launch on the compute stream (the cuBLAS GEMM) has
-    // finished. The device-resident matmul entry calls it after the GEMM so the
-    // output buffer is fully written before the result Array can be from_device'd
-    // back to host -- the compute-side twin of sync_transfer's D2H fence, the
-    // same "async wins inside a call, never across the API boundary" rule applied
-    // to the compute stream. CHECK-wrapped and never used at teardown.
-    Context& ctx = context();
-    PG_CUDA_CHECK(cudaStreamSynchronize(ctx.compute));
+bool stream_idle() {
+    const cudaError_t e = cudaStreamQuery(context().stream);
+    if (e == cudaErrorNotReady) {
+        cudaGetLastError();
+        return false;
+    }
+    PG_CUDA_CHECK(e);
+    return true;
+}
+
+host_buffer acquire_host(int64_t bytes) {
+    host_loan* loan = new host_loan{nullptr, size_class(bytes)};
+    if (loan->cls >= 0) {
+        pinned_pool& p = pool();
+        std::lock_guard<std::mutex> lock(p.mu);
+        loan->data = take_pinned(p, loan->cls);
+        if (loan->data != nullptr) {
+            p.loaned += class_bytes(loan->cls);
+            return {loan->data, loan};
+        }
+    }
+    loan->cls = -1;
+    try {
+        loan->data = ::operator new(static_cast<std::size_t>(std::max<int64_t>(bytes, 1)));
+    } catch (...) {
+        delete loan;
+        throw;
+    }
+    return {loan->data, loan};
+}
+
+void release_host(void* raw) noexcept {
+    host_loan* loan = static_cast<host_loan*>(raw);
+    if (loan->cls < 0) {
+        ::operator delete(loan->data);
+    } else if (!g_torn_down.load()) {
+        try {
+            pinned_pool& p = pool();
+            std::lock_guard<std::mutex> lock(p.mu);
+            p.free_list[loan->cls].push_back(loan->data);
+            p.loaned -= class_bytes(loan->cls);
+        } catch (...) {
+            // Out of memory for the free list: the buffer stays reserved, unused.
+        }
+    }
+    delete loan;
+}
+
+pinned_pool_stats pinned_stats() {
+    pinned_pool& p = pool();
+    std::lock_guard<std::mutex> lock(p.mu);
+    return {p.reserved, p.loaned, kPinnedCap};
 }
 
 } // namespace pg::cuda
