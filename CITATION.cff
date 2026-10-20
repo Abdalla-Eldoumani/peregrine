@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use Peregrine in your work, please cite it as below."
+title: "Peregrine: heterogeneous linear algebra for Python"
+type: software
+authors:
+  - family-names: "ElDoumani"
+    given-names: "Abdalla"
+version: "3.1.0"
+license: MIT
+repository-code: "https://github.com/Abdalla-Eldoumani/peregrine"
+abstract: >-
+  Peregrine is a linear algebra library for Python with AVX2 CPU kernels and a
+  CUDA backend behind a zero-copy, NumPy-compatible API, with per-machine
+  calibrated routing between the CPU and the GPU.
+keywords:
+  - linear algebra
+  - matrix multiplication
+  - AVX2
+  - CUDA
+  - NumPy
