@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peregrine"
-version = "3.0.0"
+version = "3.1.0"
 description = "Heterogeneous linear algebra for Python: packed AVX2 CPU kernels and a CUDA backend behind one zero-copy, NumPy-compatible API"
 readme = "README.md"
 requires-python = ">=3.12"
