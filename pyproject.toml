@@ -51,6 +51,9 @@ cmake.version = ">=3.26"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["python/peregrine"]
 wheel.py-api = "cp312"
+# The sdist walks the working tree, so untracked local folders would ride along
+# unless excluded; the release checks also hold it to tracked files only.
+sdist.exclude = ["paper/", "build/", "wheelhouse/", "benchmarks/results/local/"]
 
 [tool.scikit-build.cmake.define]
 PG_ENABLE_CUDA = { env = "PG_ENABLE_CUDA", default = "OFF" }
