@@ -5,9 +5,13 @@
 #include "cpu/pack.hpp"
 #include "cpu/threads.hpp"
 
+#include <immintrin.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <memory>
+#include <thread>
 #include <type_traits>
 
 #if defined(_OPENMP)
@@ -66,13 +70,18 @@ constexpr double SERIAL_FLOPS = 2.5e5;
 constexpr double PER_THREAD_FLOPS = 2.0e5;
 
 template <typename T>
-void microkernel(const T* ap, const T* bp, T* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first) {
+void microkernel(const T* ap, const T* bp, T* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first,
+                 const T* b_next) {
     if constexpr (std::is_same_v<T, double>) {
-        microkernel_f64_6x8(ap, bp, c, kc, ldc, mr, nr, first);
+        microkernel_f64_6x8(ap, bp, c, kc, ldc, mr, nr, first, b_next);
     } else {
-        microkernel_f32_6x16(ap, bp, c, kc, ldc, mr, nr, first);
+        microkernel_f32_6x16(ap, bp, c, kc, ldc, mr, nr, first, b_next);
     }
 }
+
+// Each kernel call prefetches an eighth of a B micro-panel (microkernel.hpp), and
+// MC / MR = 8 calls run per jr column at the default MC of 48.
+constexpr int64_t B_SLICES = 8;
 
 // The packing buffers, owned by the OS thread that calls in: each Python
 // thread is the root of its own OpenMP team, so a pool shared by thread number
@@ -107,6 +116,56 @@ template <typename T>
 workspace<T>& caller_workspace() {
     thread_local workspace<T> ws;
     return ws;
+}
+
+// One (jc, pc) step's progress, shared by the team: B panels claimed and packed,
+// and members done reading the step's B buffer.
+struct step_sync {
+    std::atomic<int64_t> claimed;
+    std::atomic<int64_t> packed;
+    std::atomic<int64_t> done;
+};
+
+// Per calling thread for the reason the workspace is, grown and zeroed in serial
+// code before the region.
+class sync_steps {
+public:
+    step_sync* reset(int64_t count) {
+        if (count > cap_) {
+            p_.reset(new step_sync[static_cast<size_t>(count)]);
+            cap_ = count;
+        }
+        for (int64_t s = 0; s < count; ++s) {
+            p_[s].claimed.store(0, std::memory_order_relaxed);
+            p_[s].packed.store(0, std::memory_order_relaxed);
+            p_[s].done.store(0, std::memory_order_relaxed);
+        }
+        return p_.get();
+    }
+
+private:
+    std::unique_ptr<step_sync[]> p_;
+    int64_t cap_ = 0;
+};
+
+sync_steps& caller_sync() {
+    thread_local sync_steps ss;
+    return ss;
+}
+
+// A member waits for another's progress, which lags by microseconds up to one
+// step's compute (milliseconds), so it spins on pause first; after about 4096
+// pauses (a few hundred microseconds) it yields each round, so a core shared by
+// several teams (concurrent callers) goes to the member being waited for.
+void wait_until(const std::atomic<int64_t>& x, int64_t target) {
+    for (int spins = 0; x.load(std::memory_order_acquire) < target;) {
+        if (spins < 4096) {
+            ++spins;
+            _mm_pause();
+        } else {
+            std::this_thread::yield();
+        }
+    }
 }
 
 constexpr int64_t ceil_div(int64_t x, int64_t y) {
@@ -178,10 +237,16 @@ void gemm_blis(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b,
     const int nt = team_size(2.0 * static_cast<double>(m) * static_cast<double>(k) * static_cast<double>(n),
                              SERIAL_FLOPS, PER_THREAD_FLOPS, mp * ceil_div(nc_max, nr_));
 
+    const int64_t kb = ceil_div(k, KC);
+    const int64_t steps = ceil_div(n, NC) * kb;
     const int64_t bp_count = kc_max * ceil_div(nc_max, nr_) * nr_;
     const int64_t ap_count = round_line<T>(std::min(MC, mp * MR) * kc_max);
-    T* const Bp = caller_workspace<T>().reserve(bp_count + nt * ap_count);
-    T* const ap_base = Bp + bp_count;
+    // Two B buffers let a member start packing the next step while the rest still
+    // read the current one; a single step or a single thread needs one.
+    const int64_t nbuf = nt > 1 && steps > 1 ? 2 : 1;
+    T* const Bp = caller_workspace<T>().reserve(nbuf * bp_count + nt * ap_count);
+    T* const ap_base = Bp + nbuf * bp_count;
+    step_sync* const progress = caller_sync().reset(steps);
     const unsigned csr = mxcsr();
 
 #if defined(_OPENMP)
@@ -200,49 +265,64 @@ void gemm_blis(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b,
 #endif
         T* const Ap = ap_base + t * ap_count;
 
-        for (int64_t jc = 0; jc < n; jc += NC) {
+        // Steps run jc-major, pc-minor, every member through every step in order,
+        // and a C tile belongs to one member for all of its pc steps, so its k
+        // panels still accumulate serially. No team barrier: a member waits only
+        // for the B panels it reads and for the buffer it overwrites, so one that
+        // finishes its tiles early runs up to a step ahead and packs the panels a
+        // slower member has not claimed. Measured at n = 2048, six threads, against
+        // the two-barrier schedule with the same B prefetch: the mean wait per
+        // member fell from 5.1 to 1.3 ms a call (f64) and from 3.4 to 0.8 ms (f32);
+        // f32 ran 1.8 to 3.4 percent faster in three runs, f64 from 3.0 percent
+        // faster to 0.9 percent slower, and the 1024 cells 0.3 to 5.0 percent faster.
+        for (int64_t s = 0; s < steps; ++s) {
+            const int64_t jc = s / kb * NC;
+            const int64_t pc = s % kb * KC;
             const int64_t nc = std::min(NC, n - jc);
+            const int64_t kc = std::min(KC, k - pc);
             const int64_t np = ceil_div(nc, nr_);
-            const grid g = make_grid(team, mp, np);
-            const bool computes = t < g.tm * g.tn;
-            const int64_t ti = t / g.tn;
-            const int64_t tj = t % g.tn;
-            const int64_t row0 = ti * mp / g.tm * MR;
-            const int64_t row1 = std::min((ti + 1) * mp / g.tm * MR, m);
-            const int64_t col0 = tj * np / g.tn * nr_;
-            const int64_t col1 = std::min((tj + 1) * np / g.tn * nr_, nc);
+            T* const Bs = Bp + (nbuf == 2 ? s & 1 : 0) * bp_count;
+            // The buffer last held step s - 2 (nbuf == 2); every member must be
+            // done reading it before anyone repacks it.
+            if (s >= 2) {
+                wait_until(progress[s - 2].done, team);
+            }
+            for (int64_t q = progress[s].claimed.fetch_add(1, std::memory_order_relaxed); q < np;
+                 q = progress[s].claimed.fetch_add(1, std::memory_order_relaxed)) {
+                pack_b_panels<nr_>(Bs, b + pc * rs_b + jc * cs_b, rs_b, cs_b, kc, nc, q, q + 1);
+                progress[s].packed.fetch_add(1, std::memory_order_release);
+            }
+            wait_until(progress[s].packed, np);
 
-            for (int64_t pc = 0; pc < k; pc += KC) {
-                const int64_t kc = std::min(KC, k - pc);
-                // Every member packs its share of this block's B panels; the
-                // barrier publishes the whole block before anyone reads it.
-                pack_b_panels<nr_>(Bp, b + pc * rs_b + jc * cs_b, rs_b, cs_b, kc, nc,
-                                   t * np / team, (t + 1) * np / team);
-#if defined(_OPENMP)
-#pragma omp barrier
-#endif
-                if (computes) {
-                    for (int64_t ic = row0; ic < row1; ic += MC) {
-                        const int64_t mc = std::min(MC, row1 - ic);
-                        pack_a<MR>(Ap, a + ic * rs_a + pc * cs_a, rs_a, cs_a, mc, kc);
-                        for (int64_t jr = col0; jr < col1; jr += nr_) {
-                            const int64_t nr = std::min(nr_, nc - jr);
-                            const T* bpanel = Bp + (jr / nr_) * kc * nr_;
-                            for (int64_t ir = 0; ir < mc; ir += MR) {
-                                microkernel<T>(Ap + ir * kc, bpanel, c + (ic + ir) * n + (jc + jr), kc, n,
-                                               std::min(MR, mc - ir), nr, pc == 0);
-                            }
+            const grid g = make_grid(team, mp, np);
+            if (t < g.tm * g.tn) {
+                const int64_t ti = t / g.tn;
+                const int64_t tj = t % g.tn;
+                const int64_t row0 = ti * mp / g.tm * MR;
+                const int64_t row1 = std::min((ti + 1) * mp / g.tm * MR, m);
+                const int64_t col0 = tj * np / g.tn * nr_;
+                const int64_t col1 = std::min((tj + 1) * np / g.tn * nr_, nc);
+                for (int64_t ic = row0; ic < row1; ic += MC) {
+                    const int64_t mc = std::min(MC, row1 - ic);
+                    pack_a<MR>(Ap, a + ic * rs_a + pc * cs_a, rs_a, cs_a, mc, kc);
+                    for (int64_t jr = col0; jr < col1; jr += nr_) {
+                        const int64_t nr = std::min(nr_, nc - jr);
+                        const T* bpanel = Bs + (jr / nr_) * kc * nr_;
+                        // The panel the next column reads; after the last column,
+                        // the first, where the next ic block starts. The calls of
+                        // this column fetch it slice by slice (a column of more than
+                        // B_SLICES calls starts over, and a short edge block leaves
+                        // the rest to the hardware).
+                        const T* bnext = jr + nr_ < col1 ? bpanel + kc * nr_ : Bs + (col0 / nr_) * kc * nr_;
+                        for (int64_t ir = 0; ir < mc; ir += MR) {
+                            const T* slice = bnext + (ir / MR) % B_SLICES * (kc * nr_ / B_SLICES);
+                            microkernel<T>(Ap + ir * kc, bpanel, c + (ic + ir) * n + (jc + jr), kc, n,
+                                           std::min(MR, mc - ir), nr, pc == 0, slice);
                         }
                     }
                 }
-                // Nobody repacks Bp while another member still reads it. The
-                // region's closing barrier covers the last block.
-                if (pc + KC < k || jc + NC < n) {
-#if defined(_OPENMP)
-#pragma omp barrier
-#endif
-                }
             }
+            progress[s].done.fetch_add(1, std::memory_order_release);
         }
     }
 }
