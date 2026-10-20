@@ -87,9 +87,41 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+  clean-import:
+    # The repaired Windows wheel must load and run with only the runtimes it
+    # bundles: Server Core has no Visual Studio, and the embeddable Python
+    # carries only its own C runtime.
+    needs: wheels
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      MSYS_NO_PATHCONV: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wheels-windows-2025
+          path: wheelhouse
+      - name: stage an embeddable python with numpy and the wheel
+        run: |
+          curl -sSfL -o py.zip https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
+          python -m zipfile -e py.zip w/py
+          python -m pip install --target w/site wheelhouse/*.whl
+          cp tools/smoke_import.py w/
+      - name: import and run every op in Windows Server Core
+        run: |
+          docker run --rm -v "$(cygpath -w "$PWD/w"):C:\w" mcr.microsoft.com/windows/servercore:ltsc2025 \
+            'C:\w\py\python.exe' -I 'C:\w\smoke_import.py' 'C:\w\site'
+
   release-dry-run:
     if: github.event_name == 'pull_request'
-    needs: [sdist, wheels]
+    needs: [sdist, wheels, clean-import]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -105,7 +137,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [sdist, wheels]
+    needs: [sdist, wheels, clean-import]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
