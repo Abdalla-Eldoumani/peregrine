@@ -59,7 +59,7 @@ def test_matplotlib_in_bench_not_test():
     # matplotlib belongs in the [bench] extras (plot regeneration), NOT [test]:
     # the WSL CPU-only test gate installs [test] and must stay lean (the suite
     # itself imports no matplotlib). A package-name prefix check tolerates the
-    # version pin (e.g. "matplotlib==3.9.1").
+    # version pin (e.g. "matplotlib==3.11.2").
     extras = _load_pyproject()["project"]["optional-dependencies"]
     bench = [d for d in extras.get("bench", []) if d.startswith("matplotlib")]
     test = [d for d in extras.get("test", []) if d.startswith("matplotlib")]
