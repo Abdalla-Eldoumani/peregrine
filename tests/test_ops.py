@@ -103,6 +103,25 @@ class TestTranspose:
                     bad.append((m, n))
         assert bad == []
 
+    # Outputs below 32 KiB run one thread on plain W x W tiles and scalar
+    # remainders, from 32 KiB on the blocked bands: shapes just below, at, and
+    # just above that size, with row counts under W, at a multiple of W, and
+    # odd.
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_small_path_threshold_bitwise(self, dtype, n_threads, threads):
+        threads(n_threads)
+        rng = np.random.default_rng(9)
+        elems = 32768 // np.dtype(dtype).itemsize
+        bad = []
+        for m in (5, 61, 64, 127):
+            for n in (elems // m - 1, elems // m, elems // m + 1, -(-elems // m)):
+                for shape in ((m, n), (n, m)):
+                    a = self._operand(rng, shape, dtype, bits=True)
+                    if pg.transpose(a).tobytes() != np.ascontiguousarray(a.T).tobytes():
+                        bad.append(shape)
+        assert bad == []
+
     # Legacy-killer squares, odd large shapes on both sides of the tiles, single
     # rows and columns, and outputs past 12 MiB whose rows are whole 64-byte
     # lines (the streaming-store path), with and without a column remainder.
