@@ -76,7 +76,7 @@ jobs:
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: "python {project}/tools/check_wheel_dlls.py {wheel} && delvewheel repair -w {dest_dir} {wheel}"
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel show {wheel} && auditwheel repair -w {dest_dir} {wheel}"
           CIBW_TEST_EXTRAS: test
-          CIBW_TEST_SOURCES: "tests benchmarks tools pyproject.toml README.md CHANGELOG.md"
+          CIBW_TEST_SOURCES: "tests benchmarks tools docs pyproject.toml README.md CHANGELOG.md"
           CIBW_TEST_ENVIRONMENT: "HYPOTHESIS_PROFILE=ci"
           CIBW_TEST_COMMAND: "python -m pytest tests -q -p no:cacheprovider"
       - name: wheels hold only what they may ship
