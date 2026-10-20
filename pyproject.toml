@@ -51,6 +51,9 @@ cmake.version = ">=3.26"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["python/peregrine"]
 wheel.py-api = "cp312"
+# The wheels bundle nanobind's support code and runtime libraries, whose terms
+# travel with them.
+wheel.license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 # The sdist walks the working tree, so untracked local folders would ride along
 # unless excluded; the release checks also hold it to tracked files only.
 sdist.exclude = ["paper/", "build/", "wheelhouse/", "benchmarks/results/local/"]
