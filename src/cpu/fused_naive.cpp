@@ -23,7 +23,9 @@ namespace pg::cpu {
 // bitwise-equal on MSVC: axpby's two roundings, fma3's single std::fma rounding,
 // and the NaN-checked relu. GCC may contract the AVX2 axpby into one rounding,
 // which this TU cannot (no FMA instruction without the arch flag). Threads split
-// the elements exactly as the AVX2 bodies do. All index math is int64_t.
+// the elements at the same 64-byte lines of out as the AVX2 bodies, whose team
+// is capped for DRAM-sized calls; no bit depends on the team. All index math is
+// int64_t.
 
 namespace {
 
