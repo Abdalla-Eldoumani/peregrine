@@ -20,9 +20,7 @@ namespace pg::cpu {
 //
 // Every element, the partial vectors at the ends included, goes through the same
 // vector instructions, so an element's bits never depend on where it falls
-// relative to the alignment peel or a thread boundary. That keeps the result
-// bitwise identical for every thread count on GCC too, whose default FP model
-// may contract a scalar a*x + b*y differently from the vector body.
+// relative to the alignment peel or a thread boundary.
 
 namespace {
 
@@ -113,10 +111,24 @@ struct simd<double> {
     }
 };
 
+// GCC treats these intrinsics as plain vector arithmetic, and its default FP
+// model may fuse a multiply into the add that consumes it, but only where both
+// land in one basic block: sanitizer checks split the blocks differently per
+// instantiation, so the body and the edges rounded differently and the bits
+// changed with the thread count. An empty asm on each product keeps axpby's two
+// roundings on every compiler without changing the FP model (MSVC never fuses).
+template <typename R>
+PG_FUSED_INLINE R rounded(R v) {
+#if !defined(_MSC_VER)
+    __asm__("" : "+x"(v));
+#endif
+    return v;
+}
+
 // Each op computes the vector at element i from operands read through ld, a
 // full or a masked load. Named products in a fixed order keep axpby's two
-// multiplies and one add; MSVC /fp:precise never contracts them, so it matches
-// the unfused NumPy expression and the scalar twin bit for bit.
+// multiplies and one add, so it matches the unfused NumPy expression and the
+// scalar twin bit for bit.
 //
 // When two NaNs meet in one instruction the result carries the payload of the
 // operand in the first source slot, and the compiler may commute a multiply or
@@ -145,7 +157,7 @@ struct axpby_op {
     }
     template <typename Load>
     typename S::reg plain(int64_t i, const Load& ld) const {
-        return S::add(S::mul(a, ld(x + i)), S::mul(b, ld(y + i)));
+        return S::add(rounded(S::mul(a, ld(x + i))), rounded(S::mul(b, ld(y + i))));
     }
     template <typename Load>
     typename S::reg fix(typename S::reg r, int64_t i, const Load& ld) const {
