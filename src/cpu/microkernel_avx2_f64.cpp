@@ -18,7 +18,14 @@ constexpr int64_t K_UNROLL = 4;
 // About eleven k steps of A ahead, the distance BLIS's Haswell kernels use. A is
 // the streamed operand (a fresh MR x kc panel from L2 on every call); the B
 // micro-panel is reused by every ir call of a jr column, so after the first call
-// it sits in L1 and a prefetch of it would only spend a load slot.
+// it sits in L1 and a prefetch of it would only spend a load slot. What does
+// miss is the first call of the next column, whose panel was last read one ic
+// block earlier and has left L2; b_next brings an eighth of that panel into L2
+// per call (prefetcht1, so the current panels keep L1). Measured at n = 2048
+// against no B prefetch, four runs: f64 3.1 to 5.3 percent faster at six
+// threads and 2.5 to 3.4 percent at one, f32 within noise (1.7 percent faster
+// to 1.3 percent slower); prefetcht0 was mixed at six threads and 1.0 to 1.6
+// percent slower than prefetcht1 at one.
 constexpr std::uintptr_t A_PREFETCH_BYTES = 512;
 
 // The address is formed in integer arithmetic because near the end of the last
@@ -106,13 +113,18 @@ inline void store_tile(double* c, int64_t ldc, int64_t mr, int64_t nr, bool firs
 // 64-byte aligned and zero-padded to MR/NR, so the k loop runs to kc with no
 // branch and the padded lanes add zero. _mm256_fmadd_pd is a single-rounded FMA
 // on MSVC (/fp:precise) and GCC alike.
-void microkernel_f64_6x8(const double* ap, const double* bp, double* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first) {
+void microkernel_f64_6x8(const double* ap, const double* bp, double* c, int64_t kc, int64_t ldc, int64_t mr, int64_t nr, bool first,
+                         const double* b_next) {
     // Only live elements are prefetched (row start and last live column), so no
     // address past C is formed; the two cover a row that straddles two lines.
     for (int64_t r = 0; r < mr; ++r) {
         prefetch(c + r * ldc, 0);
         prefetch(c + r * ldc + (nr - 1), 0);
     }
+    // K_UNROLL * 8 bytes per unrolled step group, kc * 8 over the loop: it ends
+    // at most one past the eighth it was handed. With GCC's unroll of 4 each line
+    // is named twice, which costs a load slot per four steps and nothing else.
+    const char* pf_b = reinterpret_cast<const char*>(b_next);
 
     __m256d c00 = _mm256_setzero_pd(), c01 = _mm256_setzero_pd();
     __m256d c10 = _mm256_setzero_pd(), c11 = _mm256_setzero_pd();
@@ -129,6 +141,8 @@ void microkernel_f64_6x8(const double* ap, const double* bp, double* c, int64_t 
         prefetch(ap, A_PREFETCH_BYTES);
         prefetch(ap, A_PREFETCH_BYTES + 64);
         prefetch(ap, A_PREFETCH_BYTES + 128);
+        _mm_prefetch(pf_b, _MM_HINT_T1);
+        pf_b += K_UNROLL * 8;
         PG_F64_STEP(0)
         PG_F64_STEP(1)
         PG_F64_STEP(2)
