@@ -43,6 +43,7 @@ dependencies = ["numpy>=2.0,<3", "platformdirs>=4.3"]
 Homepage = "https://github.com/Abdalla-Eldoumani/peregrine"
 Repository = "https://github.com/Abdalla-Eldoumani/peregrine"
 Issues = "https://github.com/Abdalla-Eldoumani/peregrine/issues"
+Changelog = "https://github.com/Abdalla-Eldoumani/peregrine/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 test = ["pytest==9.0.3", "hypothesis==6.155.2", "threadpoolctl==3.6.0"]
