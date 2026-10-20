@@ -1,7 +1,14 @@
 #include "cpu/gemm_small.hpp"
 
+#include "cpu/pack.hpp"
+#include "cpu/threads.hpp"
+
 #include <cstring>
 #include <immintrin.h>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace pg::cpu {
 
@@ -24,8 +31,39 @@ constexpr int64_t SHALLOW_KB = 32;
 // The rows of in-place B one column chunk may span, half of the 256 KiB L2.
 constexpr int64_t CHUNK_BYTES = 128 * 1024;
 
+// gemm_small splits the rows of C between two threads from 2^16 vector FMAs
+// (m * k * n / W: a float64 64-cube or a float32 81-cube, about 11 us on one
+// thread). In-process diagnostics, 6-thread setting, 100 ms samples, medians:
+// float64 64-cube 11.2 us on one thread, 7.4 on two, 5.3 on four; 96-cube 35.5,
+// 22.0, 12.8. The sample CV was 5 to 7 percent at one and two threads and 6 to
+// 11 at four, and two already put both cubes past 2x NumPy, so the team stops
+// at two; below the threshold one thread keeps cells that already pass free of
+// team noise.
+constexpr double TEAM_FROM = 65536.0;
+constexpr int TEAM_MAX = 2;
+
 inline int64_t lesser(int64_t x, int64_t y) {
     return x < y ? x : y;
+}
+
+// Whether the six-row tile of a column-major A crowds L1. A pitch that is a
+// multiple of 64 bytes reaches only 64 / gcd(pitch / 64, 64) of the 64 sets of
+// the 32 KiB 8-way L1d, and kb steps of six values touch up to 2 * kb lines (a
+// step that straddles a line touches two), so the tile evicts itself between
+// the panels that reuse it. Kernel-only, one thread, time against the C-order
+// operands: float64 at_b 64-cube 1.13 in place, 1.08 packed; 96-cube 1.15 and
+// 1.03. Where the lines fit, packing only adds its copy (float32 64-cube 1.00
+// in place, 1.10 packed; float64 32-cube 1.00 and 1.07).
+inline bool crowds_l1(int64_t pitch_bytes, int64_t kb) {
+    if (pitch_bytes <= 0 || pitch_bytes % 64 != 0) {
+        return false;
+    }
+    const int64_t lines = pitch_bytes / 64;
+    int64_t g = 1;
+    while (g < 64 && lines % (2 * g) == 0) {
+        g *= 2;
+    }
+    return 2 * kb > 8 * (64 / g);
 }
 
 template <typename T>
@@ -213,6 +251,34 @@ void pack_rows(T* dst, const T* src, int64_t rs, int64_t kb, int64_t nr) {
     }
 }
 
+// Six rows of a column-major A (rs == 1) as kb steps of six values, the panel
+// order the tile reads with strides (1, 6). A short last tile copies its mr
+// rows and zero-fills the rest, which the tile never reads.
+template <typename T>
+void pack_cols_a(T* dst, const T* a, int64_t cs, int64_t mr, int64_t kb) {
+    if (mr == 6) {
+        for (int64_t p = 0; p < kb; ++p) {
+            const T* s = a + p * cs;
+            if constexpr (sizeof(T) == 8) {
+                _mm256_storeu_pd(dst, _mm256_loadu_pd(s));
+                _mm_storeu_pd(dst + 4, _mm_loadu_pd(s + 4));
+            } else {
+                _mm_storeu_ps(dst, _mm_loadu_ps(s));
+                _mm_storel_epi64(reinterpret_cast<__m128i*>(dst + 4),
+                                 _mm_loadl_epi64(reinterpret_cast<const __m128i*>(s + 4)));
+            }
+            dst += 6;
+        }
+        return;
+    }
+    for (int64_t p = 0; p < kb; ++p) {
+        for (int64_t r = 0; r < 6; ++r) {
+            dst[r] = r < mr ? a[p * cs + r] : T(0);
+        }
+        dst += 6;
+    }
+}
+
 // Copies kb x nr of B into a panel of width columns, zero-padding the rest, so
 // the tile loads full vectors from any layout. The source is read along its
 // nearer stride: walking the far one touches a new line per element, and at a
@@ -247,13 +313,18 @@ void light_pack(T* dst, const T* src, int64_t rs, int64_t cs, int64_t kb, int64_
 // straddles two strips was fetched twice (single-call diagnostic, f64
 // (2000, 4, 2000), one thread: 1.24x the old packed path's time by strips,
 // 0.28x by chunks).
-// Strided B is light-packed one panel at a time and reused by every row tile.
+// Strided B is light-packed one panel at a time and reused by every row tile; a
+// column-major B in two-vector panels goes through the packed engine's
+// in-register transposes instead, since the element walk cost a float32
+// 64-cube 1.24x the C-order operands' time and the transposes 1.03x
+// (kernel-only, layouts interleaved, one thread).
 template <typename T, int MR, int NV>
 void drive(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b, T* c, int64_t ldc,
            int64_t m, int64_t k, int64_t n) {
     constexpr int64_t NR = NV * simd<T>::W;
     constexpr int64_t KB = PACK_BYTES / static_cast<int64_t>(sizeof(T)) / NR;
     alignas(32) T buf[KB * NR];
+    [[maybe_unused]] const int64_t pitch = (cs_a < 0 ? -cs_a : cs_a) * static_cast<int64_t>(sizeof(T));
     const int64_t depth = cs_b == 1 && m <= 4 ? lesser(KB, SHALLOW_KB) : KB;
     for (int64_t p0 = 0; p0 < k; p0 += depth) {
         const int64_t kb = lesser(depth, k - p0);
@@ -264,16 +335,34 @@ void drive(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int
             if (full < n) {
                 pack_rows<T, NV>(buf, b + p0 * rs_b + full, rs_b, kb, n - full);
             }
-            const int64_t fit = CHUNK_BYTES / (kb * static_cast<int64_t>(sizeof(T))) / NR * NR;
+            // The division is skipped when all of B fits one chunk: a 64-bit
+            // divide costs about 11 ns of a 16-cube's 250 (paired diagnostic).
+            const int64_t row_bytes = kb * static_cast<int64_t>(sizeof(T));
+            const int64_t fit = n * row_bytes <= CHUNK_BYTES ? n : CHUNK_BYTES / row_bytes / NR * NR;
             const int64_t jb = fit > NR ? fit : NR;
+            // A packed tile sits in buf behind the edge panel: a buffer of its
+            // own grew the frame and cost a float32 16-cube 11 percent.
+            [[maybe_unused]] T* abuf = buf + kb * NR;
+            [[maybe_unused]] const bool pack_a_tiles =
+                MR == 6 && rs_a == 1 && cs_a != 1 && kb * (NR + 6) <= KB * NR && crowds_l1(pitch, kb);
             for (int64_t j1 = 0; j1 < n; j1 += jb) {
                 const int64_t j2 = lesser(j1 + jb, n);
                 for (int64_t i0 = 0; i0 < m; i0 += MR) {
                     const int64_t mr = lesser(MR, m - i0);
                     const T* ai = a + i0 * rs_a + p0 * cs_a;
+                    int64_t ar = rs_a;
+                    int64_t ac = cs_a;
+                    if constexpr (MR == 6) {
+                        if (pack_a_tiles) {
+                            pack_cols_a<T>(abuf, ai, cs_a, mr, kb);
+                            ai = abuf;
+                            ar = 1;
+                            ac = 6;
+                        }
+                    }
                     for (int64_t j0 = j1; j0 < j2; j0 += NR) {
                         const bool edge = j0 >= full;
-                        rows<T, MR, NV>(mr, ai, rs_a, cs_a, edge ? buf : b + p0 * rs_b + j0, edge ? NR : rs_b,
+                        rows<T, MR, NV>(mr, ai, ar, ac, edge ? buf : b + p0 * rs_b + j0, edge ? NR : rs_b,
                                         c + i0 * ldc + j0, ldc, kb, lesser(NR, n - j0), first, last);
                     }
                 }
@@ -282,7 +371,15 @@ void drive(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int
         }
         for (int64_t j0 = 0; j0 < n; j0 += NR) {
             const int64_t nr = lesser(NR, n - j0);
-            light_pack(buf, b + p0 * rs_b + j0 * cs_b, rs_b, cs_b, kb, nr, NR);
+            if constexpr (NV == 2) {
+                if (rs_b == 1) {
+                    pack_b_panels<NR, T>(buf, b + p0 * rs_b + j0 * cs_b, rs_b, cs_b, kb, nr, 0, 1);
+                } else {
+                    light_pack(buf, b + p0 * rs_b + j0 * cs_b, rs_b, cs_b, kb, nr, NR);
+                }
+            } else {
+                light_pack(buf, b + p0 * rs_b + j0 * cs_b, rs_b, cs_b, kb, nr, NR);
+            }
             for (int64_t i0 = 0; i0 < m; i0 += MR) {
                 rows<T, MR, NV>(lesser(MR, m - i0), a + i0 * rs_a + p0 * cs_a, rs_a, cs_a, buf, NR,
                                 c + i0 * ldc + j0, ldc, kb, nr, first, last);
@@ -347,7 +444,33 @@ void gemm_small_ldc(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t 
 template <typename T>
 void gemm_small(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b, T* c, int64_t m,
                 int64_t k, int64_t n) {
-    gemm_small_ldc<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, n, m, k, n);
+    // Threads take whole six-row tiles of C, so each keeps the tile shapes a
+    // single thread would use and every element its one chain.
+    constexpr int64_t MR = 6;
+    const int64_t units = (m + MR - 1) / MR;
+    const double fmas = static_cast<double>(m) * static_cast<double>(k) * static_cast<double>(n) / simd<T>::W;
+    const int nt = team_size(fmas, TEAM_FROM, TEAM_FROM / TEAM_MAX, lesser(units, TEAM_MAX));
+    if (nt <= 1) {
+        gemm_small_ldc<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, n, m, k, n);
+        return;
+    }
+    const unsigned csr = mxcsr();
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(nt)
+#endif
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+        const int64_t t = omp_get_thread_num(), team = omp_get_num_threads();
+#else
+        const int64_t t = 0, team = 1;
+#endif
+        const int64_t i0 = units * t / team * MR;
+        const int64_t i1 = lesser(m, units * (t + 1) / team * MR);
+        if (i0 < i1) {
+            gemm_small_ldc<T>(a + i0 * rs_a, rs_a, cs_a, b, rs_b, cs_b, c + i0 * n, n, i1 - i0, k, n);
+        }
+    }
 }
 
 template void gemm_small<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t, float*, int64_t, int64_t, int64_t);
