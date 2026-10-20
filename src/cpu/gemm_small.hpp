@@ -5,14 +5,17 @@ namespace pg::cpu {
 
 // Register-blocked GEMM that reads A and B in place through element strides
 // (any sign, any value on a length-1 dimension) and overwrites the C-contiguous
-// m x n output c. No heap, no threads. Each output element is one FMA chain in
-// k order starting from +0.0 and stored as acc - (-0.0), so an accumulator that
-// underflowed to -0.0 lands as +0.0. The bits therefore depend only on the
-// operand values: not on the strides, not on the tile that computed the element,
-// and they equal the packed engine's for k up to its KC, whose first k panel is
-// the same chain. gemm_small is defined in the AVX2-flagged gemm_small_avx2.cpp;
-// gemm_small_naive is its scalar twin (std::fma, bitwise equal) in a fallback
-// TU. This header stays intrinsic-free so fallback TUs can include it.
+// m x n output c. No heap. From 2^16 vector FMAs a team of two threads (capped
+// by the thread setting) splits the rows of C on six-row tile boundaries;
+// gemm_small_ldc is always single-threaded. Each output element is one FMA
+// chain in k order starting from +0.0 and stored as acc - (-0.0), so an
+// accumulator that underflowed to -0.0 lands as +0.0. The bits therefore depend
+// only on the operand values: not on the strides, not on the tile that computed
+// the element, and they equal the packed engine's for k up to its KC, whose
+// first k panel is the same chain. gemm_small is defined in the AVX2-flagged
+// gemm_small_avx2.cpp; gemm_small_naive is its scalar twin (std::fma, bitwise
+// equal) in a fallback TU. This header stays intrinsic-free so fallback TUs can
+// include it.
 template <typename T>
 void gemm_small(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b,
                 T* c, int64_t m, int64_t k, int64_t n);
