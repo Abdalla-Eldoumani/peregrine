@@ -5,45 +5,65 @@
 ![CUDA](https://img.shields.io/badge/CUDA-optional-76B900)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-Peregrine is a heterogeneous linear algebra library for Python with a
-NumPy-compatible surface. It dispatches matrix and elementwise work across packed
-AVX2 CPU kernels and an optional cuBLAS CUDA backend behind one zero-copy API. The
-native core takes views of C-contiguous float32 and float64 arrays with no copy;
-the Python layer adds dtype promotion, contiguity normalization, clear errors, and
-a per-machine routing policy that decides CPU versus GPU from calibrated timings.
+Peregrine is a linear algebra library for Python. It covers a small set of NumPy
+operations (the matrix product, transpose, sum, mean, and three fused
+elementwise expressions) with its own AVX2 kernels, and adds an optional CUDA
+backend for float32 matrix products. It reads NumPy arrays in place, returns
+NumPy arrays, and holds every result to NumPy's within a written error bound,
+bit for bit wherever the order of operations is the same.
 
-Version 3.0.0. Windows is the primary platform (MSVC); the CPU build also runs on
-Linux.
+Version 3.1.0. Windows (MSVC) is the primary platform; Linux builds with GCC.
 
 ## What it provides
 
-- `matmul` for float32 and float64, matching `numpy.matmul` values including
-  zero-sized dimensions and NaN/Inf propagation.
-- `transpose`, `sum`, `mean` reductions with NumPy-matching results.
-- Fused elementwise ops `axpby`, `fma3`, `scaled_relu` that compute a chain in one
-  memory pass.
-- An optional CUDA backend: device-resident `pg.Array` handles, `to_device` /
-  `from_device` transfers, and an auto policy that routes a host float32 product to
-  the GPU only when the calibrated crossover says the device wins after the
-  transfer is paid. float64 never auto-routes to the GPU.
+- `matmul(a, b, *, out=None)` for float32 and float64, matching `numpy.matmul`
+  including zero-sized dimensions and NaN and Inf, for operands in any memory
+  layout (C or Fortran order, transposed or sliced views), read without a copy.
+- `transpose(a)`, `sum(a, *, axis=None)` and `mean(a, *, axis=None)`.
+- Fused elementwise operations that compute an expression in one pass:
+  `axpby(x, y, *, a, b, out=None)` for `a*x + b*y`, `fma3(x, y, z, *, out=None)`
+  for `x*y + z` with a single rounding, and `scaled_relu(x, *, scale, out=None)`
+  for `maximum(scale*x, 0)`.
+- Thread control: `set_num_threads(n)`, `get_num_threads()`, and the
+  `PEREGRINE_NUM_THREADS` environment variable.
+- An optional CUDA backend: device arrays (`to_device`, `from_device`,
+  `__dlpack__`), device-resident matmul and fused operations, and an `"auto"`
+  backend that sends a host float32 product to the GPU only when this machine's
+  calibration says the GPU wins after paying for the transfers. float64 never
+  goes to the GPU automatically.
 
-The naive reference kernel is permanent: it is the correctness oracle every result
-is checked against, and the fallback when AVX2 is absent.
+The plain reference kernel stays in the library: it is the oracle the tests
+check every kernel against, and the path taken on a CPU without AVX2.
 
 ## Install
 
-The default build is CPU-only and needs no CUDA toolkit:
+Each GitHub Release carries wheels for CPython 3.12 and later (one abi3 wheel
+per platform: Windows x86-64 and Linux x86-64, manylinux_2_28), a `SHA256SUMS`
+file, and build attestations. The wheels are CPU-only and bundle the C++ and
+OpenMP runtimes they load. Install one from its release URL:
 
 ```bash
-pip install -e .
+pip install https://github.com/Abdalla-Eldoumani/peregrine/releases/download/v3.1.0/peregrine-3.1.0-cp312-abi3-win_amd64.whl
 ```
 
-To build with the CUDA backend, enable it at configure time. This needs the
-CUDA Toolkit 12.8 (nvcc and the cuBLAS/cublasLt libraries) and an NVIDIA driver
-new enough for it; the kernels target compute capability 8.6:
+To check a downloaded file against its attestation:
 
 ```bash
-pip install -e . --config-settings=cmake.define.PG_ENABLE_CUDA=ON
+gh attestation verify peregrine-3.1.0-cp312-abi3-win_amd64.whl --repo Abdalla-Eldoumani/peregrine
+```
+
+From source, with a C++20 compiler (MSVC from Visual Studio 2022 or later, or
+GCC) and CMake 3.26 or later:
+
+```bash
+pip install .
+```
+
+The CUDA backend needs the CUDA Toolkit 12.8 and an NVIDIA driver new enough for
+it; the kernels target compute capability 8.6:
+
+```bash
+pip install . --config-settings=cmake.define.PG_ENABLE_CUDA=ON
 ```
 
 `pg.has_cuda()` reports whether a usable device is present at runtime. On a
@@ -106,7 +126,7 @@ GEMM per size and dtype and caches the crossover the auto policy reads.
 ### Output memory
 
 A large result is new memory from the operating system, and the first write to
-each 4 KiB page of it costs a page fault: about 0.4 us a page, which for a
+each 4 KiB page of it costs a page fault, which for a
 transpose or a fused op over a few MiB can take longer than the arithmetic.
 Peregrine therefore keeps the buffers of large results you have freed (512 KiB
 and up) and hands them to the next result of the same size. Results are still
@@ -115,152 +135,225 @@ The price is memory: up to 256 MiB of freed buffers stay with the process
 instead of going back to the system. Set `PEREGRINE_OUTPUT_CACHE_MB` before
 importing Peregrine to change that cap, or to `0` to turn the cache off.
 
+### Threads
+
+Peregrine runs its kernels on a thread team sized to each call's work, so a
+small call stays on one thread. The thread count comes from, in order,
+`pg.set_num_threads(n)`, the `PEREGRINE_NUM_THREADS` environment variable, the
+first entry of `OMP_NUM_THREADS`, and otherwise the number of physical cores
+the process may run on. Results are bitwise the same for every thread count.
+
+### Configuration
+
+| Variable | Effect |
+| --- | --- |
+| `PEREGRINE_NUM_THREADS` | Thread count, unless `set_num_threads` is called. |
+| `PEREGRINE_BACKEND` | Starting backend: `auto` (default), `cpu`, or `cuda`. |
+| `PEREGRINE_CACHE_DIR` | Where `calibrate()` stores this machine's timings. |
+| `PEREGRINE_OUTPUT_CACHE_MB` | Cap on kept result buffers (default 256; 0 turns it off). |
+| `PEREGRINE_ALLOW_TF32` | Lets GPU float32 products use TF32 (off by default). |
+| `PEREGRINE_DISABLE_FAST_ENTRIES` | Sends every call through the Python path (for testing). |
+| `PEREGRINE_DISABLE_AVX2` | Uses the reference kernels (for testing). |
+
+### Numerics
+
+Peregrine is never built with fast-math options. NaN and Inf land where NumPy
+puts them, results do not depend on the thread count or on operand layout, and
+reductions add in a pairwise order. Where the order of operations differs from
+NumPy's, results agree within a bound derived from the standard error analysis
+of each operation. [docs/numerics.md](docs/numerics.md) states the contract
+exactly.
+
 ## Results
 
-All numbers below are regenerated from the committed results JSON by
-`benchmarks/report.py` and the charts by `benchmarks/plots.py`; none are typed by
-hand. They include the regimes where NumPy or OpenBLAS wins, because float64
-mid-size parity is the stated target, not a win. The headline statistic is the
-floor (min over reps), for the reason given under Methodology.
+Every table in this section is generated by `benchmarks/report.py` from the
+result files in `benchmarks/results/`, and `python benchmarks/report.py --check`
+fails when a table and its file disagree. A ratio is NumPy's median time divided
+by Peregrine's on the same inputs, with both libraries limited to the same
+number of threads, so a ratio above one means Peregrine is faster. Every cell
+has a target, and cells that miss it are listed below with the reason. The full
+matrix, with spreads and minimums for every cell, is in
+[docs/benchmarks.md](docs/benchmarks.md).
 
-The CPU tables come from a CPU-only build; the GPU tables from a CUDA build on the
-same machine. The two are not directly comparable per operation, only per regime.
+### Headline
 
-### float64 matmul (CPU)
+<!-- report:headline -->
+Representative cells from the full matrix. Times are medians of the timed samples; both libraries ran at the thread count in the threads column. The ratio is the baseline's median time divided by Peregrine's, so above 1.00x Peregrine is faster; a percentage compares Peregrine with its own reference route. The auto rows come from the CUDA build, the rest from the CPU-only build.
 
-| n | Peregrine floor (GFLOP/s) | OpenBLAS floor (GFLOP/s) | floor ratio |
-| --- | --- | --- | --- |
-| 256 | 29.0 | 97.3 | 0.30 |
-| 512 | 40.9 | 93.5 | 0.44 |
-| 1024 | 65.4 | 104.2 | 0.63 |
-| 2048 | 76.2 | 112.5 | 0.68 |
+| operation | dtype | shape | threads | baseline | baseline median | Peregrine median | ratio | target | status |
+|---|---|---|---|---|---|---|---|---|---|
+| matmul a @ b | float32 | 16x16x16 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float32 | 64x64x64 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float32 | 256x256x256 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float32 | 512x512x512 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float32 | 2048x2048x2048 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float64 | 16x16x16 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float64 | 64x64x64 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float64 | 256x256x256 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float64 | 512x512x512 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float64 | 2048x2048x2048 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float32 | 1x4096x4096 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float32 | 4096x64x4096 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b | float64 | 1000x333x750 | 6 | - | - | - | - | - | not measured |
+| matmul a.T @ b | float32 | 512x512x512 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b.T | float32 | 512x512x512 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b, both F-order | float32 | 512x512x512 | 6 | - | - | - | - | - | not measured |
+| transpose | float32 | 64x64 | 6 | - | - | - | - | - | not measured |
+| transpose | float32 | 2048x2048 | 6 | - | - | - | - | - | not measured |
+| transpose | float64 | 1000x3000 | 6 | - | - | - | - | - | not measured |
+| sum, axis=None | float32 | 64x64 | 6 | - | - | - | - | - | not measured |
+| sum, axis=None | float64 | 4096x4096 | 6 | - | - | - | - | - | not measured |
+| mean, axis=0 | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
+| mean, axis=1 | float64 | 1000000x16 | 6 | - | - | - | - | - | not measured |
+| axpby, new output | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
+| axpby, out= | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
+| fma3, new output | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
+| fma3, out= | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
+| scaled_relu, new output | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
+| scaled_relu, out= | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b, auto route | float32 | 2048x2048x2048 | 6 | - | - | - | - | - | not measured |
+| matmul a @ b, auto route | float32 | 4096x4096x4096 | 6 | - | - | - | - | - | not measured |
 
-At n=2048 the fresh per-rep sweep measures 0.58 of OpenBLAS on the floor and 0.74
-on the median. float64 mid-size parity is the target; Peregrine does not beat
-OpenBLAS here.
+Not measured: `benchmarks/results/refbox_fused_cpu_v310.json` is absent.
 
-### Small-matrix float32 (CPU)
+Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
 
-The small-matrix path loses to NumPy at every tiny size: NumPy dispatches to an
-OpenBLAS small-GEMM, and the irreducible Python plus binding round-trip dominates
-at this scale.
+Not measured: `benchmarks/results/refbox_matmul_layout_cpu_v310.json` is absent.
 
-| n | speedup vs NumPy | outcome |
-| --- | --- | --- |
-| 8 | 0.52x | loses to NumPy |
-| 16 | 0.39x | loses to NumPy |
-| 32 | 0.18x | loses to NumPy |
-| 64 | 0.08x | loses to NumPy |
+Not measured: `benchmarks/results/refbox_matmul_rect_cpu_v310.json` is absent.
 
-### Thread scaling (CPU)
+Not measured: `benchmarks/results/refbox_matmul_square_cpu_v310.json` is absent.
 
-1 to 6 thread scaling at n=1024 (f64): 2.87x floor speedup, below the 4x the
-four-core plateau would give and far below linear. More threads do not help past
-four cores here.
+Not measured: `benchmarks/results/refbox_reduce_cpu_v310.json` is absent.
 
-### GPU matmul
+Not measured: `benchmarks/results/refbox_transpose_cpu_v310.json` is absent.
+<!-- /report:headline -->
 
-Device-resident float32 (without transfer), warm, versus NumPy CPU f32. CuPy is
-not installed on this machine, so the GPU baseline is NumPy CPU f32.
+### The whole matrix at a glance
 
-| n | GFLOP/s | speedup vs NumPy CPU f32 |
-| --- | --- | --- |
-| 256 | 890 | 6.83x |
-| 333 | 2282 | 11.36x |
-| 512 | 4416 | 22.76x |
-| 750 | 5531 | 26.82x |
-| 1024 | 6125 | 28.21x |
-| 2048 | 4873 | 23.54x |
+Each square is the median ratio over the cells of one operation in one size
+range, on a log color scale centered at parity. Gray squares are cells the
+protocol closed as noisy, which carry no number.
 
-With the host round-trip (to_device + matmul + from_device), warm. The small sizes
-lose to the transfer cost, which is why the auto policy keeps small host arrays on
-the CPU:
+![Ratio of NumPy time to Peregrine time by operation and size](benchmarks/results/ratio_heatmap.png)
 
-| n | speedup vs NumPy CPU f32 | outcome |
-| --- | --- | --- |
-| 256 | 0.35x | loses to transfer cost |
-| 333 | 0.35x | loses to transfer cost |
-| 512 | 0.48x | loses to transfer cost |
-| 750 | 0.44x | loses to transfer cost |
-| 1024 | 2.93x | wins after transfer |
-| 2048 | 5.29x | wins after transfer |
+### Matrix multiply throughput
 
-### Fused 3-op chain
+Square matmul throughput against size for Peregrine and NumPy on the CPU, and
+for Peregrine's device-resident GPU path, with the CPU's measured FMA peak drawn
+as a ceiling.
 
-Chain `scaled_relu(fma3(axpby(x,y,a,b),z))` at 8M float32 elements. The fused
-kernel makes one memory pass where the unfused NumPy chain makes several:
+![GFLOP/s against n for square matmul](benchmarks/results/gflops_vs_n.png)
 
-| backend | speedup vs NumPy unfused chain |
-| --- | --- |
-| CPU (floor) | 3.24x |
-| GPU device-resident | 71.37x |
+### Losses and closures
 
-### Autotuned blocking
+<!-- report:losses -->
+**Below 1.00x.** Every measured ratio below one: the baseline's median time divided by Peregrine's, both libraries at the thread count in the cell id, with the reason.
 
-Autotuned CPU blocking on this machine (from the saved sweep): mc=48, kc=192,
-nc=2048 (selected on min_gflops).
+No measured cell is below 1.00x against any baseline.
 
-### Charts
+**Closed below target.** Cells that miss their target and are closed at a measured ceiling or deferred; every number is computed from the results files.
 
-The three charts are regenerated from the same JSON by `benchmarks/plots.py`.
+None.
 
-GFLOP/s vs n per backend:
+**Below target, not closed.**
 
-![GFLOP/s vs n per backend](benchmarks/results/gflops_vs_n.png)
+None.
 
-Speedup per regime, wins and losses:
+**Noisy.** These cells stayed above the CV limit on every attempt, including the fresh-process retry, so the protocol publishes no number for them.
 
-![Speedup per regime](benchmarks/results/speedup_bars.png)
+None.
 
-The host float32 crossover, CPU compute vs GPU compute plus transfer, showing the
-size where the device wins for a host array:
+Not measured: `benchmarks/results/refbox_matmul_square_cpu_v310.json` is absent.
 
-![Host float32 crossover](benchmarks/results/crossover.png)
+Not measured: `benchmarks/results/refbox_matmul_rect_cpu_v310.json` is absent.
 
-## Methodology
+Not measured: `benchmarks/results/refbox_matmul_layout_cpu_v310.json` is absent.
 
-Every contender in a series takes an ndarray in and returns an ndarray out, on
-both sides, with the same dtype, layout, and data; inputs are built once with a
-seeded generator outside the timed region, so no conversion time is counted. CPU
-timing uses `perf_counter_ns`; GPU device work is timed with CUDA event pairs after
-a stream sync, never a wall clock around an asynchronous launch. The host
-round-trip series is the one wall-clocked GPU case, because the transfer
-synchronizes at the boundary. Each series is checked against the NumPy oracle on
-the same inputs before any time is recorded, so an unverified series never reaches
-a table; the published `verified` flag is set only after that toleranced check
-passes.
+Not measured: `benchmarks/results/refbox_transpose_cpu_v310.json` is absent.
 
-The statistic reported depends on the regime, because the timers differ:
+Not measured: `benchmarks/results/refbox_reduce_cpu_v310.json` is absent.
 
-- CPU regimes (float64 matmul, small-matrix, thread scaling): the floor (min over
-  reps) of Peregrine against the floor of NumPy. On this machine a background
-  antivirus preempts an OpenMP worker at the fork/join barrier, which inflates the
-  median and maximum of every multi-threaded CPU series; the floor is the
-  noise-free best case, and the coefficient of variation, recorded alongside,
-  documents the residual rather than hiding it.
-- GPU device-resident (the without-transfer headline): the warm cudaEvent-timed
-  mean over reps for the device, against the NumPy CPU f32 median. cudaEvent
-  timing reports an averaged warm figure, so this regime quotes the device mean
-  rather than a per-rep min.
-- GPU with-transfer (the host round-trip): the warm wall-clock floor of the full
-  to_device + matmul + from_device round-trip, against the NumPy CPU f32 floor.
+Not measured: `benchmarks/results/refbox_fused_cpu_v310.json` is absent.
 
-Median, IQR, and coefficient of variation are recorded alongside every regime as a
-noise readout. The size grid includes non-multiples of the vector width so a
-kernel cannot hide its tail path.
+Not measured: `benchmarks/results/refbox_overhead_cpu_v310.json` is absent.
+
+Not measured: `benchmarks/results/refbox_gemm_1t_cpu_v310.json` is absent.
+
+Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
+
+Not measured: `benchmarks/results/refbox_overhead_cuda_v310.json` is absent.
+<!-- /report:losses -->
+
+### v3.0.0 to v3.1.0
+
+<!-- report:compare -->
+Not measured: `benchmarks/results/refbox_quick_cpu_v300.json` is absent.
+
+Not measured: `benchmarks/results/refbox_quick_cpu_v310.json` is absent.
+
+Not measured: `benchmarks/results/refbox_quick_cuda_v300.json` is absent.
+
+Not measured: `benchmarks/results/refbox_quick_cuda_v310.json` is absent.
+<!-- /report:compare -->
+
+## Method
+
+Both libraries run in one process on the same ndarray inputs, built once per
+seed outside the timed region. Samples interleave in short blocks of one library
+then the other, mirrored so neither always goes first, and each sample is a
+batch of calls through the same timing loop for both. After every switch the
+incoming library runs untimed for a short rewarm. Every sample's output is
+checked bit for bit against the first output, which is itself checked against
+the test suite's oracle. A cell whose spread exceeds the coefficient-of-variation
+limit is retried, then run once more in a fresh process, and if it is still
+noisy it is reported as noisy with no number. The process runs at high priority
+on one logical CPU per physical core, and samples taken while the processor
+clock sits outside a band set from the ceiling tool are discarded. The exact
+settings are below; the full method and the commands to reproduce every file
+are in [docs/benchmarks.md](docs/benchmarks.md).
+
+<!-- report:environment -->
+Not measured: `benchmarks/results/refbox_matmul_square_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_matmul_rect_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_matmul_layout_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_transpose_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_reduce_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_fused_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_overhead_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_gemm_1t_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_overhead_cuda_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_quick_cpu_v300.json` is absent.
+Not measured: `benchmarks/results/refbox_quick_cpu_v310.json` is absent.
+Not measured: `benchmarks/results/refbox_quick_cuda_v300.json` is absent.
+Not measured: `benchmarks/results/refbox_quick_cuda_v310.json` is absent.
+<!-- /report:environment -->
 
 ## Hardware
 
-| Component | Value |
-| --- | --- |
-| Platform | Windows-10-10.0.19045-SP0 |
-| CPU | Intel64 Family 6 Model 165 Stepping 2, GenuineIntel |
-| GPU | NVIDIA GeForce RTX 3060 Laptop GPU |
-| CUDA driver | 610.47 |
-| Python | 3.12.4 |
-| NumPy | 2.4.6 |
-| BLAS | openblas 0.3.31.188.0 |
+The ceilings below come from a small measurement tool in `tools/ceilings`, run
+on the same machine as the benchmarks.
+
+<!-- report:hardware -->
+Not measured: `benchmarks/results/refbox_ceilings.json` is absent.
+<!-- /report:hardware -->
+
+## Development
+
+```bash
+pip install -e ".[test]"
+python -m pytest tests -q
+```
+
+`PEREGRINE_DISABLE_FAST_ENTRIES=1` runs the suite through the Python path and
+`PEREGRINE_DISABLE_AVX2=1` through the reference kernels; CI runs both, plus GCC
+on Linux and a build under AddressSanitizer and UndefinedBehaviorSanitizer.
+[docs/architecture.md](docs/architecture.md) describes how the pieces fit, and
+[docs/benchmarks.md](docs/benchmarks.md) how the numbers above are measured and
+how to reproduce them.
 
 ## License
 
-MIT. See LICENSE.
+MIT; see LICENSE. The wheels include third-party code and runtimes listed in
+THIRD_PARTY_NOTICES.md.
