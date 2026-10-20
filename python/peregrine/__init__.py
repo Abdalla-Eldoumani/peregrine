@@ -118,7 +118,7 @@ else:
 try:
     __version__ = _version("peregrine")
 except PackageNotFoundError:
-    __version__ = "3.0.0"
+    __version__ = "3.1.0"
 __all__ = [
     "matmul",
     "transpose",
