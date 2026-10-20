@@ -708,6 +708,122 @@ def test_nan_payload_is_the_first_nan_operand(op, dtype, scalar_nan):
 
 
 # ---------------------------------------------------------------------------
+# Loop direction. From 4 KiB of out the AVX2 kernels run descending when out
+# sits up to 512 bytes past an input modulo 4 KiB and not that close before any
+# other (an ascending loop would stall there on 4K aliasing), and ascending
+# otherwise. The direction must never change a bit. The inputs share one page
+# offset and out sits at a chosen distance past it: inside the window, on its
+# edges, outside, before the inputs, and, with two inputs, past one and before
+# the other. Sizes cover the small ones that never test the direction, every
+# remainder of the four-vector groups from 4 KiB (no peel), and a few past the
+# serial size (peel, then a team of two and up), with NaN payloads and
+# infinities spread over every vector position. -k "direction"
+# ---------------------------------------------------------------------------
+
+_PAGE = 4096
+
+
+def _special_operands(op, dtype, n, seed):
+    u, exp, q = _QUIET[dtype]
+    k = {"axpby": 2, "fma3": 3, "scaled_relu": 1}[op]
+    rng = np.random.default_rng(seed)
+    xs = [rng.standard_normal(n).astype(dtype) for _ in range(k)]
+    # every fifth element a NaN with its own payload (alternately signaling),
+    # every eleventh an infinity, the operand cycling with the position
+    nan_at, inf_at = np.arange(2, n, 5), np.arange(3, n, 11)
+    for j in range(k):
+        p = nan_at[nan_at % k == j]
+        xs[j].view(u)[p] = (exp | np.where(p % 2 == 1, q, 0) | (p + 1)).astype(u)
+        xs[j][inf_at[(inf_at + 1) % k == j]] = np.inf
+    return xs
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("op", ["axpby", "fma3", "scaled_relu"])
+def test_direction_never_changes_bits(op, dtype):
+    item = np.dtype(dtype).itemsize
+    w = 32 // item
+    k = {"axpby": 2, "fma3": 3, "scaled_relu": 1}[op]
+    serial = 32768 // item
+    tested = 4096 // item
+    sizes = [1, 2, w - 1, w, w + 1, 4 * w - 1, 4 * w, 4 * w + 1, tested - 1]
+    sizes += [tested + r for r in range(8 * w + 3)]
+    sizes += [serial, serial + 1, serial + w - 1, serial + 4 * w + 3]
+    gaps = [item, 40, 200, 448, 504, 512, 520, 2048, _PAGE - 512, _PAGE - 504, _PAGE - 40, _PAGE - item]
+    span = (max(sizes) * item // _PAGE + 2) * _PAGE
+    raw = np.zeros((k + 3) * span + _PAGE, np.uint8)
+    base = -raw.ctypes.data % _PAGE
+
+    def at(offset, n):
+        return raw[base + offset:base + offset + n * item].view(dtype).reshape(1, n)
+
+    saved = pg.get_num_threads()
+    bad = []
+    try:
+        for n in sizes:
+            given = _special_operands(op, dtype, n, n)
+            pg.set_num_threads(1)
+            ref = _call_fused(op, [x.reshape(1, n) for x in given], 0.75, None).tobytes()
+            for threads in (1, 6):
+                pg.set_num_threads(threads)
+                for gap in gaps:
+                    for mixed in ([False, True] if k > 1 else [False]):
+                        xs = []
+                        for j, x in enumerate(given):
+                            # mixed: the second input sits 2 * gap past the first, so out
+                            # is gap past one input and gap before the other
+                            v = at(j * span + (2 * gap % _PAGE if mixed and j == 1 else 0), n)
+                            v[...] = x
+                            xs.append(v)
+                        out = at(k * span + gap, n)
+                        out[...] = 0
+                        _call_fused(op, xs, 0.75, out)
+                        if out.tobytes() != ref:
+                            bad.append((n, threads, gap, mixed))
+    finally:
+        pg.set_num_threads(saved)
+    assert bad == []
+
+
+# ---------------------------------------------------------------------------
+# DRAM-sized calls. Past 24 MiB of inputs and out the team is capped at 12 /
+# arrays members (fma3 3, axpby 4, scaled_relu 6) and the inputs are prefetched
+# a little ahead, also past the end of each member's range. Sizes at the cap,
+# one past it, and past it with a tail, at 1, 2, 3, and 6 threads, bitwise equal
+# to each other and, where NumPy rounds the same way, to NumPy. -k "dram"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("op", ["axpby", "fma3", "scaled_relu"])
+def test_dram_team_cap_never_changes_bits(op, dtype):
+    item = np.dtype(dtype).itemsize
+    arrays = {"axpby": 3, "fma3": 4, "scaled_relu": 2}[op]
+    cap = 24 * 2**20 // (arrays * item)
+    gcc = pg._core._build_info()["compiler"].startswith("GNU")
+    saved = pg.get_num_threads()
+    try:
+        for n in (cap, cap + 1, cap + 4 * (32 // item) + 3):
+            xs = [x.reshape(1, n) for x in _special_operands(op, dtype, n, n)]
+            results = []
+            for threads in (1, 2, 3, 6):
+                pg.set_num_threads(threads)
+                results.append(_call_fused(op, xs, 0.75, None).tobytes())
+            assert results[1:] == results[:1] * 3, n
+            got = np.frombuffer(results[0], dtype)
+            # the signaling NaNs raise NumPy's invalid flag, which is expected here
+            with np.errstate(invalid="ignore"):
+                if op == "scaled_relu":
+                    want = np.maximum(dtype(0.75) * xs[0], dtype(0.0))
+                    assert np.array_equal(got, want.ravel(), equal_nan=True)
+                if op == "axpby" and not gcc:
+                    want = dtype(0.75) * xs[0] + dtype(-1.5) * xs[1]
+                    assert np.array_equal(got, want.ravel(), equal_nan=True)
+    finally:
+        pg.set_num_threads(saved)
+
+
+# ---------------------------------------------------------------------------
 # Hypothesis property over drawn shapes + the legacy-killer @example
 # pins + an explicit large @example. -k "property"
 # ---------------------------------------------------------------------------
