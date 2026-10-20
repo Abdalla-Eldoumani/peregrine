@@ -251,7 +251,8 @@ def _build_matmul(cell: Cell):
     meta = {"flop": 2 * m * k * n}
     if cell.variant == "auto" and hasattr(pg, "_host_backend_for"):
         meta["route"] = pg._host_backend_for(a, b)
-        if pg.has_cuda():
+        # v3.0.0 has no forced CPU entry, so its auto cells time auto and NumPy.
+        if pg.has_cuda() and hasattr(pg, "_matmul_cpu"):
             # The routing target is auto within 5 percent of the faster forced
             # route, so both forced routes run in the same cell.
             contenders[0].gpu = True
