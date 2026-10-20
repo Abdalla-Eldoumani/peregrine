@@ -31,6 +31,14 @@ namespace pg::cpu {
 
 namespace {
 
+// small() below runs its tiles inlined: as calls, f32 32x32 took 113.8 ns and
+// 64x64 460 against 81.8 and 288.6 (8x8 13.1 against 16.7).
+#if defined(_MSC_VER)
+#define PG_TRANSPOSE_INLINE __forceinline
+#else
+#define PG_TRANSPOSE_INLINE inline __attribute__((always_inline))
+#endif
+
 template <bool Stream>
 void put(float* p, __m256 v) {
     if constexpr (Stream) {
@@ -132,7 +140,7 @@ constexpr int64_t width() {
 // The W-row form serves a row remainder of W or more with regular stores, since
 // each row of out then gets half a line.
 template <bool Stream, bool Two, typename T>
-void tile(const T* a, T* out, int64_t m, int64_t n, int64_t i, int64_t j) {
+PG_TRANSPOSE_INLINE void tile(const T* a, T* out, int64_t m, int64_t n, int64_t i, int64_t j) {
     constexpr int64_t H = width<T>() / 2;
     const T* p = a + i * n + j;
     T* o = out + j * m + i;
@@ -196,6 +204,31 @@ void band(const T* a, T* out, int64_t m, int64_t n, int64_t j0, int64_t j1, bool
     }
 }
 
+// A one-thread call: W x W tiles straight down a, then the scalar remainders,
+// without band's column blocks, two-tile rows, and prefault, which only pay
+// off past L1 (MSVC kept band's loop state on the stack). Kernel alone, C
+// loop, band -> this, ns: f32 8x8 24.0 -> 16.7, 32x32 115.6 -> 81.8, 64x64
+// 417.6 -> 288.6; f64 8x8 24.2 -> 18.4, 32x32 142.3 -> 111.5, 45x45 830 -> 462;
+// f32 90x90 and f64 63x63, the largest below the threshold, within noise. The
+// bare 8x8 tile is 4.1 ns (f32) and 6.4 (f64).
+template <typename T>
+void small(const T* a, T* out, int64_t m, int64_t n) {
+    constexpr int64_t W = width<T>();
+    const int64_t mw = m - m % W;
+    const int64_t nw = n - n % W;
+    for (int64_t i = 0; i < mw; i += W) {
+        for (int64_t j = 0; j < nw; j += W) {
+            tile<false, false>(a, out, m, n, i, j);
+        }
+    }
+    if (mw < m) {
+        scalar_block(a, out, m, n, mw, m, int64_t{0}, nw);
+    }
+    if (nw < n) {
+        scalar_block(a, out, m, n, int64_t{0}, m, nw, n);
+    }
+}
+
 // Streaming stores are weakly ordered; the fence orders them before the
 // caller, or the region's closing barrier, hands the result on.
 template <typename T>
@@ -222,6 +255,12 @@ void transpose_avx2(const T* a, T* out, int64_t m, int64_t n) {
     }
     constexpr int64_t W = width<T>();
     const double bytes = static_cast<double>(m) * static_cast<double>(n) * static_cast<double>(sizeof(T));
+    // team_size gives one thread here, and nothing below this size streams
+    // or prefaults, so the size alone picks the path.
+    if (bytes < TRANSPOSE_SERIAL_BELOW_BYTES) {
+        small(a, out, m, n);
+        return;
+    }
     const int64_t units = (n + W - 1) / W;
     const int nt = team_size(bytes, TRANSPOSE_SERIAL_BELOW_BYTES, TRANSPOSE_PER_THREAD_BYTES, units);
     // Streaming needs every tile row of out on a 64-byte line boundary, which
