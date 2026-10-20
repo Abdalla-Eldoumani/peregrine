@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import subprocess
 import sys
 
 import numpy as np
@@ -802,6 +803,17 @@ def test_auto_matmul_cell_runs_both_forced_routes():
     assert [c.name for c in contenders] == ["peregrine", "numpy", "peregrine_cpu", "peregrine_gpu"]
     check({c.name: c.fn() for c in contenders})
     assert meta["route"] in ("cpu", "cuda")
+
+
+def test_importing_the_oracles_leaves_the_calibration_alone():
+    # The benchmarks import conftest for its oracles; only a pytest run may
+    # point PEREGRINE_CACHE_DIR at an empty directory, or auto cells would
+    # route without the machine's calibration.
+    env = {k: v for k, v in os.environ.items() if k != "PEREGRINE_CACHE_DIR"}
+    code = "import sys, os; sys.path.insert(0, 'tests'); import conftest; print(os.environ.get('PEREGRINE_CACHE_DIR'))"
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert out.stdout.strip() == "None"
 
 
 def test_spin_settle_from_quantized_trace():
