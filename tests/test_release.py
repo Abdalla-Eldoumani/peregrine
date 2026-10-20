@@ -1,9 +1,9 @@
-"""Release-readiness checks for the 3.0.0 cut. Pure-Python and ungated: no GPU,
+"""Release-readiness checks for the 3.1.0 cut. Pure-Python and ungated: no GPU,
 no native build, so this file runs on every build including the WSL CPU-only
 clone (it is the release-readiness unit coverage the fresh-clone gate leans on).
 
 The version single-source proof: pg.__version__ must equal both the literal
-"3.0.0" and importlib.metadata.version("peregrine"), so a drift between
+"3.1.0" and importlib.metadata.version("peregrine"), so a drift between
 pyproject and the package would fail here rather than ship. pyproject is read
 with tomllib (stdlib 3.11+), json.load's TOML sibling, never eval'd.
 """
@@ -37,15 +37,15 @@ def test_version_single_source():
     # The genuine single source: __version__ is read from importlib.metadata in
     # __init__.py, so it must equal both the released literal and the installed
     # package metadata. If pyproject and the package ever drift, this fails.
-    assert pg.__version__ == "3.0.0"
+    assert pg.__version__ == "3.1.0"
     assert pg.__version__ == _metadata_version("peregrine")
 
 
 def test_pyproject_version():
     # pyproject is the one place the version is typed; the metadata read above
-    # resolves against it. The [project] table version must be the 3.0.0 release.
+    # resolves against it. The [project] table version must be the 3.1.0 release.
     data = _load_pyproject()
-    assert data["project"]["version"] == "3.0.0"
+    assert data["project"]["version"] == "3.1.0"
 
 
 def test_pyproject_readme_key():
