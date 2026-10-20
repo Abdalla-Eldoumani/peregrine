@@ -119,6 +119,7 @@ def test_wheel_allowlist_names_only_the_strays(tmp_path):
         "peregrine.libs/libgomp-a34b3233.so.1.0.0",
         "peregrine-3.1.0.dist-info/RECORD",
         "peregrine-3.1.0.dist-info/licenses/LICENSE",
+        "peregrine-3.1.0.dist-info/sboms/auditwheel.cdx.json",
     ]
     strays = ["peregrine/_core.pdb", "peregrine.libs/libomp140.x86_64-" + "0" * 32 + ".dll", "notes/todo.txt"]
     whl = tmp_path / "w.whl"
