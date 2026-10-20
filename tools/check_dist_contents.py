@@ -31,6 +31,8 @@ WHEEL_ALLOWED = [
     r"peregrine\.libs/libgomp-[0-9a-f]{8}\.so(\.[0-9]+)*",
     r"peregrine-[0-9][0-9.]*(\.dev[0-9]+)?\.dist-info/(METADATA|WHEEL|RECORD|DELVEWHEEL)",
     r"peregrine-[0-9][0-9.]*(\.dev[0-9]+)?\.dist-info/licenses/[A-Za-z_.-]+",
+    # auditwheel records the libraries it bundles in a software bill of materials.
+    r"peregrine-[0-9][0-9.]*(\.dev[0-9]+)?\.dist-info/sboms/[A-Za-z0-9_.-]+\.json",
 ]
 
 
