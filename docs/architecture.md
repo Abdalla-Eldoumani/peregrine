@@ -102,10 +102,9 @@ sm_86. It keeps one CUDA stream per process for allocation, compute, and
 frees, so device operations queue and return without host waits, plus two side
 streams that the staged host product uses to overlap uploads and downloads
 with compute. Device memory comes from a stream-ordered pool. Host results of
-GPU work are written into page-locked buffers lent to NumPy, because
-device-to-host copies into page-locked memory run at a multiple of the rate
-into pageable memory (the measured rates are in the README's hardware
-section). Requests of 256 MiB and
+GPU work are written into page-locked buffers lent to NumPy, so the copy goes
+straight from the device into the result instead of through the driver's
+staging buffer into freshly allocated, not yet faulted-in pageable memory. Requests of 256 MiB and
 more are checked against free device memory first, so an oversized request
 raises an error instead of spilling into shared system memory.
 
