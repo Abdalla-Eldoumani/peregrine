@@ -171,69 +171,21 @@ def test_cpu_oracle_rectangular(op_id, call, oracle, n_operands, dtype):
     assert_fused_close(np.asarray(got), ref)
 
 
-def _ulp_distance(got, ref):
-    # Representable-step distance between two same-dtype float arrays: reinterpret
-    # the bits as signed ints and remap to a monotone ordering (negatives mirrored
-    # below +0.0), so |mono(got) - mono(ref)| counts the float ladder rungs between
-    # them. One rung is one ULP. Used to prove a contracting-build divergence is a
-    # single legitimate rounding, not arbitrary error. Inputs are strictly positive
-    # finite here, so the negative branch never runs, but it keeps the helper total.
-    int_t = np.int64 if got.dtype == np.float64 else np.int32
-    g = np.ascontiguousarray(got).view(int_t).astype(np.int64)
-    r = np.ascontiguousarray(ref).view(int_t).astype(np.int64)
-    floor = np.int64(np.iinfo(np.int64).min)
-    g = np.where(g < 0, floor - g, g)
-    r = np.where(r < 0, floor - r, r)
-    return np.abs(g - r)
-
-
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 def test_cpu_axpby_bitwise_equals_unfused(dtype):
-    # axpby's vector body is add(mul(a,x), mul(b,y)) -- written as two roundings to
-    # match the unfused NumPy expression a*x + b*y (the axpby contract; fma3 is the
-    # one op that contracts to a single rounding). Whether those two roundings
-    # SURVIVE to the result depends on the compiler's sanctioned FP model, and the
-    # honest claim differs per platform:
-    #
-    #   MSVC /fp:precise stops emitting FMA contractions (VS 2022; conftest header),
-    #   so the kernel keeps both roundings and is BITWISE-equal to the unfused NumPy
-    #   reference -- the strong claim, asserted with assert_array_equal.
-    #
-    #   GCC's DEFAULT FP model allows FMA contraction, so it contracts add(mul,mul)
-    #   into a single fmadd even from explicit intrinsics, and the kernel rounds
-    #   once. That is the more accurate single-rounding FMA, legitimately differing
-    #   from the always-two-rounding NumPy reference by at most one ULP -- exactly
-    #   the fma3-class contraction the numeric policy sanctions, NOT a kernel bug.
-    #
-    # Detect which world we are in at runtime from the kernel's OWN output rather
-    # than guessing by os.name: the NumPy reference is always two-rounding (separate
-    # ufuncs never fuse), so if the kernel reproduces it bit-for-bit the build does
-    # not contract and the strong bitwise claim holds; if it does not, the build
-    # contracted, and we assert the divergence is a single legitimate rounding (<= 1
-    # ULP) and stays within the fused tolerance contract (assert_fused_close, the
-    # same sanctioned path the rest of the suite uses -- the contract is NOT
-    # loosened). The size spans many AVX2 blocks (8 f32 / 4 f64) AND a scalar tail
-    # (+5 is not a multiple of either width). Strictly positive operands (no
-    # cancellation), so this is a rounding-form claim, not an accuracy claim.
+    # axpby's vector body is add(mul(a,x), mul(b,y)): two roundings, to match the
+    # unfused NumPy expression a*x + b*y (fma3 is the one op that rounds once).
+    # MSVC /fp:precise never fuses them, and on GCC, whose default FP model may
+    # fuse a multiply into the add that consumes it, an empty asm on each product
+    # keeps them apart. So every build is bitwise equal to the NumPy reference.
+    # The size spans many AVX2 blocks (8 f32 / 4 f64) AND a partial tail (+5 is
+    # not a multiple of either width).
     n = 8 * 1000 + 5
     rng = np.random.default_rng(11)
     x = (np.abs(rng.standard_normal((1, n))) + 0.5).astype(dtype)
     y = (np.abs(rng.standard_normal((1, n))) + 0.5).astype(dtype)
     got = np.asarray(pg.axpby(x, y, a=2.0, b=3.0))
-    ref = dtype(2.0) * x + dtype(3.0) * y
-    if (got == ref).all():
-        # Non-contracting build (MSVC /fp:precise): the two roundings survive, so
-        # the strongest true claim is exact bitwise equality.
-        np.testing.assert_array_equal(got, ref)
-    else:
-        # Contracting build (GCC default model): the kernel rounded once. Prove the
-        # divergence is a single legitimate FMA rounding -- at most one ULP from the
-        # two-rounding reference -- and within the sanctioned fused tolerance.
-        assert int(_ulp_distance(got, ref).max()) <= 1, (
-            "axpby diverges from the unfused reference by more than one ULP: the "
-            "difference is not a single FMA contraction"
-        )
-        assert_fused_close(got, ref)
+    np.testing.assert_array_equal(got, dtype(2.0) * x + dtype(3.0) * y)
 
 
 @pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS, ids=OP_IDS)
@@ -502,8 +454,6 @@ L3 = 12 * 2**20
 ARRAYS = {"axpby": 3, "fma3": 4, "scaled_relu": 2}
 INPUTS = {"axpby": 2, "fma3": 3, "scaled_relu": 1}
 SMALL = [1, 2, 3, 5, 7, 8, 9, 15, 16, 17, 31, 33, 64, 65]
-# GCC may contract the AVX2 axpby into one rounding (see the twin test below).
-GCC = pg._core._build_info()["compiler"].startswith("GNU")
 
 
 def sizes(op, dt):
@@ -566,7 +516,7 @@ def run_case(op, dt, n, off, where, given, csr):
     x1 = x0 if where == "xx" else given[-1]
     if csr == MXCSR_DEFAULT and op == "scaled_relu":
         assert np.array_equal(r, np.maximum(dt(1.25) * x0, dt(0.0)), equal_nan=True)
-    if csr == MXCSR_DEFAULT and op == "axpby" and not GCC:
+    if csr == MXCSR_DEFAULT and op == "axpby":
         assert np.array_equal(r, dt(0.75) * x0 + dt(-1.5) * x1, equal_nan=True)
     canon = np.where(np.isnan(r), np.nan, r)
     return hashlib.blake2b(r.tobytes()).hexdigest(), hashlib.blake2b(canon.tobytes()).hexdigest()
@@ -628,14 +578,9 @@ def test_edges_thread_count_does_not_change_bits(edge_digests, twin):
 def test_edges_avx2_equals_scalar_twin(edge_digests):
     avx2, twin = edge_digests[(6, False)], edge_digests[(6, True)]
     assert avx2.keys() == twin.keys()
-    # GCC's default FP model contracts the AVX2 axpby into one rounding, which the
-    # twin cannot do; test_cpu_axpby_bitwise_equals_unfused holds that kernel to
-    # one ULP of the two-rounding expression the twin computes exactly. NaN
-    # payloads are compared positionally: the twin's std::fma may come from the
-    # C runtime, which need not produce the payload the FMA instruction does.
-    gcc = pg._core._build_info()["compiler"].startswith("GNU")
-    keys = [k for k in avx2 if not (gcc and " axpby " in k)]
-    assert [k for k in keys if avx2[k][1] != twin[k][1]] == []
+    # NaN payloads are compared positionally: the twin's std::fma may come from
+    # the C runtime, which need not produce the payload the FMA instruction does.
+    assert [k for k in avx2 if avx2[k][1] != twin[k][1]] == []
 
 
 # NaN payloads. Two NaNs meeting in one instruction give the payload of the
@@ -800,7 +745,6 @@ def test_dram_team_cap_never_changes_bits(op, dtype):
     item = np.dtype(dtype).itemsize
     arrays = {"axpby": 3, "fma3": 4, "scaled_relu": 2}[op]
     cap = 24 * 2**20 // (arrays * item)
-    gcc = pg._core._build_info()["compiler"].startswith("GNU")
     saved = pg.get_num_threads()
     try:
         for n in (cap, cap + 1, cap + 4 * (32 // item) + 3):
@@ -816,7 +760,7 @@ def test_dram_team_cap_never_changes_bits(op, dtype):
                 if op == "scaled_relu":
                     want = np.maximum(dtype(0.75) * xs[0], dtype(0.0))
                     assert np.array_equal(got, want.ravel(), equal_nan=True)
-                if op == "axpby" and not gcc:
+                if op == "axpby":
                     want = dtype(0.75) * xs[0] + dtype(-1.5) * xs[1]
                     assert np.array_equal(got, want.ravel(), equal_nan=True)
     finally:
