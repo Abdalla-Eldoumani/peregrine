@@ -1,296 +1,203 @@
-"""Generate the three README charts from the committed results JSON, headless.
+"""Draw the results charts from the committed results JSON, headless.
 
-bench-protocol rule 19: the report carries three plots with fixed series colors,
-GFLOP/s vs n per backend, speedup bars per regime, and a crossover chart. This
-module produces exactly those three, reading only committed
-benchmarks/results/*.json (rule 17, the same round-trip rule the table renderer
-obeys) and writing PNGs back to benchmarks/results/.
+    python benchmarks/plots.py    writes gflops_vs_n.png, ratio_heatmap.png and crossover.png
+                                  to benchmarks/results/
 
-The Agg backend is selected BEFORE importing pyplot so the figures render with no
-display (verified headless: savefig writes a non-empty PNG with no DISPLAY). The
-four series colors are the fixed palette, consistent across every chart; the cupy
-color stays defined for consistency even though cupy is absent on this machine
-(the GPU baseline is NumPy CPU, so no cupy series is plotted).
-
-json.load only (Security V5): every source file is first-party data read with
-json, never eval or pickle. The matmul / gpu / fused / scaling files go through
-report.load_series (manifest + verified gate); the calibration file is the
-calibration-cache shape (schema / signature / cpu / gpu / transfer, no manifest),
-read with a plain json.load plus a schema check.
+Every point comes from report.py's reading of the same files, so a chart and
+its table cannot disagree. A cell the protocol closed as noisy is never drawn as
+a number: it is left out of the line charts and drawn gray in the heatmap. A
+missing results file draws a "not measured" note instead of a chart.
 """
 
 from __future__ import annotations
 
-import json
+import math
 import os
+import statistics
 
 import matplotlib
 
-matplotlib.use("Agg")  # headless; MUST precede the pyplot import (rule 19 / Agg)
+matplotlib.use("Agg")  # before pyplot, so no display is ever needed
 
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib import colors, patches  # noqa: E402
 
 import report  # noqa: E402
 
-# The fixed series colors. Consistent across every chart. cupy stays defined for
-# consistency though no cupy series is plotted (cupy is absent; the GPU baseline
-# is NumPy CPU).
-SERIES_COLORS = {
-    "cpu": "#1f77b4",
-    "cuda": "#2ca02c",
-    "numpy": "#7f7f7f",
-    "cupy": "#ff7f0e",
-}
+SERIES_COLORS = {"cpu": "#1f77b4", "cuda": "#2ca02c", "numpy": "#7f7f7f", "cupy": "#ff7f0e"}
+NOISY_COLOR = "#c8c8c8"
+NOTE = "Medians; noisy cells are not drawn."
 
-RESULTS_DIR = report.RESULTS_DIR
+# Heatmap rows: (label, group, filter). Out of every ratio a cell carries, the
+# heatmap shows the like-for-like one: out= against preallocated NumPy.
+HEAT_ROWS = (
+    ("matmul f32", "matmul_square", lambda r: r["dtype"] == "float32"),
+    ("matmul f64", "matmul_square", lambda r: r["dtype"] == "float64"),
+    ("matmul rect", "matmul_rect", lambda r: True),
+    ("matmul layouts", "matmul_layout", lambda r: r["layout"] != "c"),
+    ("transpose", "transpose", lambda r: True),
+    ("sum", "reduce", lambda r: r["op"] == "sum"),
+    ("mean", "reduce", lambda r: r["op"] == "mean"),
+) + tuple(
+    (f"{op}{' out=' if v == 'out' else ''}", "fused", lambda r, op=op, v=v: r["op"] == op and r["variant"] == v)
+    for op in report.FUSED_OPS for v in ("alloc", "out")
+)
+# Size is the geometric mean of the dimensions (n for a square matmul); the
+# edges follow the square matmul regimes.
+BUCKETS = ((16, "≤ 16"), (96, "24 to 96"), (384, "128 to 384"), (768, "512 to 768"), (math.inf, "≥ 1000"))
 
 
-def _results_path(*parts: str) -> str:
-    return os.path.join(RESULTS_DIR, *parts)
+def _note(ax, text: str) -> None:
+    ax.text(0.5, 0.5, text, ha="center", va="center", transform=ax.transAxes, fontsize=9, wrap=True)
 
 
-def plot_gflops_vs_n(out_path: str) -> str:
-    """GFLOP/s vs n per backend: CPU f64, GPU device-resident f32, NumPy CPU f64.
+def _ok(rows: dict | None, keep) -> list:
+    return sorted((r for r in (rows or {}).values() if r["status"] == "ok" and keep(r)), key=lambda r: r["shape"])
 
-    CPU floor GFLOP/s comes from the f64 refbox cases (gflop / peregrine.min_s),
-    NumPy floor from the same cases (gflop / numpy.min_s), and the GPU
-    device-resident warm GFLOP/s from the committed gpu matrix without-transfer
-    warm series. Every value is read from JSON; the colors are the fixed series
-    palette.
 
-    Returns the out_path on success, or None when either input is absent (the
-    chart is skipped with a clear reason rather than crashing a partial-results
-    run, mirroring the crossover chart's os.path.exists skip).
-    """
-    cpu_path = _results_path("refbox_matmul_f64_v300_vs_openblas.json")
-    gpu_path = _results_path("refbox_gpu_matrix.json")
-    if not (os.path.exists(cpu_path) and os.path.exists(gpu_path)):
-        return None
-    cpu = report.load_series(cpu_path)
-    gpu = report.load_series(gpu_path)
+def plot_gflops_vs_n(path: str) -> str:
+    cpu = report.matrix_rows("matmul_square", "cpu")
+    gpu = report.matrix_rows("gpu", "cuda")
+    ceil = report.load(report.CEILINGS)
+    fig, axes = plt.subplots(1, len(report.DTYPES), figsize=(10, 4.2))
+    for ax, dt in zip(axes, report.DTYPES):
+        drawn = False
+        for rows, keep, name, color, label in (
+            (cpu, lambda r: r["op"] == "matmul", "peregrine", SERIES_COLORS["cpu"], "Peregrine CPU"),
+            (cpu, lambda r: r["op"] == "matmul", "numpy", SERIES_COLORS["numpy"], "NumPy CPU"),
+            (gpu, lambda r: r["op"] == "gpu_matmul", "peregrine", SERIES_COLORS["cuda"], "Peregrine GPU, device-resident"),
+            (gpu, lambda r: r["op"] == "gpu_matmul", "cupy", SERIES_COLORS["cupy"], "CuPy, device-resident"),
+        ):
+            pts = [(r["shape"][0], r["rate"]["gflops"][name]) for r in _ok(rows, lambda r: keep(r) and r["dtype"] == dt)
+                   if name in r["rate"].get("gflops", {})]
+            if pts:
+                threads = {r["threads"] for r in _ok(rows, lambda r: keep(r) and r["dtype"] == dt)}
+                ax.plot(*zip(*pts), marker="o", ms=3, color=color,
+                        label=f"{label}, {'/'.join(map(str, sorted(threads)))} threads" if rows is cpu else label)
+                drawn = True
+        if ceil is not None:
+            top = max(f["threads"] for f in ceil["fma"])
+            peak = next(f["total_gflops"] for f in ceil["fma"] if f["dtype"] == dt and f["threads"] == top)
+            ax.axhline(peak, color=SERIES_COLORS["cpu"], linestyle="--", linewidth=1)
+            ax.text(1, peak * 1.08, f"{top}-thread FMA peak {peak:.0f} GF/s", color=SERIES_COLORS["cpu"], fontsize=8)
+        missing = [f for f, d in ((report.matrix_file("matmul_square", "cpu"), cpu),
+                                  (report.matrix_file("gpu", "cuda"), gpu), (report.CEILINGS, ceil)) if d is None]
+        if missing:
+            ax.text(0.02, 0.02, "not measured: " + ", ".join(missing), transform=ax.transAxes, fontsize=7)
+        if drawn:
+            ax.set_xscale("log", base=2)
+            ax.set_yscale("log")
+            ax.legend(fontsize=7, loc="lower right")
+        ax.set_title(f"square matmul, {dt}")
+        ax.set_xlabel("n")
+        ax.set_ylabel("GF/s (2n³ / median time)")
+        ax.grid(True, which="both", alpha=0.3)
+    fig.text(0.01, 0.01, NOTE, fontsize=7)
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
 
-    cpu_n = [c["n"] for c in cpu["cases"]]
-    cpu_gflops = [c["gflop"] / c["peregrine"]["min_s"] for c in cpu["cases"]]
-    numpy_gflops = [c["gflop"] / c["numpy"]["min_s"] for c in cpu["cases"]]
 
-    warm = sorted(
-        (
-            c
-            for c in gpu["gpu_cases"]
-            if c["label"] == "without-transfer" and c["phase"] == "warm"
-        ),
-        key=lambda c: c["n"],
-    )
-    gpu_n = [c["n"] for c in warm]
-    gpu_gflops = [c["gflops"] for c in warm]
+def _bucket(shape: tuple) -> int:
+    size = round(math.prod(shape) ** (1 / len(shape)), 6)
+    return next(i for i, (edge, _) in enumerate(BUCKETS) if size <= edge)
 
+
+def _heat_ratio(row: dict) -> float:
+    return row["ratio"]["numpy_noalloc" if row["variant"] == "out" else "numpy"]
+
+
+def plot_ratio_heatmap(path: str) -> str:
+    groups = {g: report.matrix_rows(g, "cpu") for g in dict.fromkeys(g for _, g, _ in HEAT_ROWS)}
+    fig, ax = plt.subplots(figsize=(7.5, 6.4))
+    cmap = plt.get_cmap("RdBu")
+    values = {}
+    for i, (label, group, keep) in enumerate(HEAT_ROWS):
+        rows = [r for r in (groups[group] or {}).values() if keep(r)]
+        for j in range(len(BUCKETS)):
+            cell = [r for r in rows if _bucket(r["shape"]) == j]
+            ok = [_heat_ratio(r) for r in cell if r["status"] == "ok"]
+            if ok:
+                values[i, j] = statistics.median(ok)
+            elif cell:
+                values[i, j] = None
+    span = max([abs(math.log10(v)) for v in values.values() if v] + [math.log10(4)])
+    norm = colors.Normalize(-span, span)
+    for i, (label, group, _) in enumerate(HEAT_ROWS):
+        for j in range(len(BUCKETS)):
+            if (i, j) not in values:
+                text, face, ink = ("not measured" if groups[group] is None else ""), "white", "black"
+            elif values[i, j] is None:
+                text, face, ink = "noisy", NOISY_COLOR, "black"
+            else:
+                level = norm(math.log10(values[i, j]))
+                text, face = report.fmt_ratio(values[i, j]), cmap(level)
+                ink = "white" if abs(level - 0.5) > 0.32 else "black"
+            ax.add_patch(patches.Rectangle((j, i), 1, 1, facecolor=face, edgecolor="white"))
+            ax.text(j + 0.5, i + 0.5, text, ha="center", va="center", fontsize=8, color=ink)
+    ax.set_xlim(0, len(BUCKETS))
+    ax.set_ylim(len(HEAT_ROWS), 0)
+    ax.set_xticks([j + 0.5 for j in range(len(BUCKETS))], [b for _, b in BUCKETS], fontsize=8)
+    ax.set_yticks([i + 0.5 for i in range(len(HEAT_ROWS))], [r[0] for r in HEAT_ROWS], fontsize=8)
+    ax.set_xlabel("size: n for square matmul, geometric mean of the dimensions otherwise")
+    ax.set_title("NumPy time / Peregrine time, median per bucket (CPU-only build)", fontsize=10)
+    bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04)
+    ticks = [t for t in (0.25, 0.5, 1, 2, 4, 8, 16, 32) if abs(math.log10(t)) <= span]
+    bar.set_ticks([math.log10(t) for t in ticks], labels=[f"{t:g}x" for t in ticks])
+    fig.text(0.01, 0.01, "Out= rows against preallocated NumPy, the rest against the NumPy expression; "
+             "gray buckets hold only noisy cells.", fontsize=7)
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
+def plot_crossover(path: str) -> str:
+    gpu = report.matrix_rows("gpu", "cuda")
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.plot(
-        cpu_n, cpu_gflops, marker="o", color=SERIES_COLORS["cpu"],
-        label="Peregrine CPU f64 (floor)",
-    )
-    ax.plot(
-        cpu_n, numpy_gflops, marker="s", color=SERIES_COLORS["numpy"],
-        label="NumPy CPU f64 (floor)",
-    )
-    ax.plot(
-        gpu_n, gpu_gflops, marker="^", color=SERIES_COLORS["cuda"],
-        label="Peregrine GPU f32 (device-resident, warm)",
-    )
-    ax.set_xlabel("matrix size n")
-    ax.set_ylabel("GFLOP/s")
-    ax.set_title("GFLOP/s vs n per backend")
-    ax.set_yscale("log")
-    ax.legend()
+    square = lambda r: r["variant"] == "auto" and len(set(r["shape"])) == 1  # noqa: E731
+    rows = _ok(gpu, square)
+    drawn = False
+    for name, label, color, style in (
+        ("peregrine_cpu", "forced CPU", SERIES_COLORS["cpu"], "-"),
+        ("peregrine_gpu", "forced GPU, transfers staged", SERIES_COLORS["cuda"], "-"),
+        ("peregrine", "auto", "black", "--"),
+        ("numpy", "NumPy", SERIES_COLORS["numpy"], "-"),
+        ("cupy", "CuPy", SERIES_COLORS["cupy"], "-"),
+    ):
+        pts = [(r["shape"][0], r["stats"][name]["median"]) for r in rows if name in r["stats"]]
+        if pts:
+            ax.plot(*zip(*pts), marker="o", ms=3, color=color, linestyle=style, label=label)
+            drawn = True
+    if gpu is None:
+        _note(ax, f"not measured: {report.matrix_file('gpu', 'cuda')}")
+    elif not drawn:
+        _note(ax, "every auto-routed cell in this file is noisy, so none is drawn")
+    else:
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log")
+        ax.legend(fontsize=8)
+    ax.set_xlabel("n (square float32 host arrays)")
+    ax.set_ylabel("median time per call (s)")
+    ax.set_title("Host float32 matmul: auto route against both forced routes (CUDA build)", fontsize=10)
     ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
+    fig.text(0.01, 0.01, NOTE, fontsize=7)
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.savefig(path, dpi=120)
     plt.close(fig)
-    return out_path
-
-
-def plot_speedup_bars(out_path: str) -> str:
-    """Speedup bars per regime, wins and losses side by side.
-
-    Each bar is a regime's headline speedup read from JSON: the f64 floor at
-    n=2048 (a loss, below 1.0), the small-matrix loss at n=64, the GPU
-    device-resident win, the GPU with-transfer small loss, and the fused CPU and
-    GPU wins. The 1.0 parity line marks win vs loss; loss bars are not hidden.
-
-    Returns the out_path on success, or None when any input is absent (the chart
-    is skipped with a clear reason rather than crashing a partial-results run,
-    mirroring the crossover chart's os.path.exists skip).
-    """
-    paths = {
-        "f64": _results_path("refbox_matmul_f64_v300_vs_openblas.json"),
-        "small": _results_path("refbox_small_matmul_f32_v300.json"),
-        "gpu": _results_path("refbox_gpu_matrix.json"),
-        "fuse_cpu": _results_path("refbox_fused_chain_cpu_f32_v300.json"),
-        "fuse_gpu": _results_path("refbox_fused_chain_gpu_f32_v300.json"),
-    }
-    if not all(os.path.exists(p) for p in paths.values()):
-        return None
-    f64 = report.load_series(paths["f64"])
-    small = report.load_series(paths["small"])
-    gpu = report.load_series(paths["gpu"])
-    fuse_cpu = report.load_series(paths["fuse_cpu"])
-    fuse_gpu = report.load_series(paths["fuse_gpu"])
-
-    f64_2048 = report._case_by_n(f64["cases"], 2048)
-    f64_floor = (
-        f64_2048["numpy"]["min_s"] / f64_2048["peregrine"]["min_s"]
-    )
-    small_64 = report._case_by_n(small["cases"], 64)["speedup_vs_numpy"]
-    gpu08 = report._gpu08_ratio(gpu)
-    transfer_small = report._case_by_n(
-        [c for c in gpu["with_transfer_cases"] if c["phase"] == "warm"], 256
-    )["ratio_vs_numpy_cpu_f32"]
-    fuse_cpu_floor = fuse_cpu["cpu_cases"][0]["speedup_floor"]
-    fuse_gpu_ratio = fuse_gpu["gpu_cases"][0]["ratio_vs_numpy_cpu_f32"]
-
-    labels = [
-        "CPU f64\nn=2048",
-        "CPU small\nn=64",
-        "GPU f32\ndevice",
-        "GPU f32\n+transfer n=256",
-        "Fused\nCPU",
-        "Fused\nGPU",
-    ]
-    values = [
-        f64_floor,
-        small_64,
-        gpu08,
-        transfer_small,
-        fuse_cpu_floor,
-        fuse_gpu_ratio,
-    ]
-    # Color a bar by backend: CPU regimes cpu-blue, GPU regimes cuda-green.
-    colors = [
-        SERIES_COLORS["cpu"],
-        SERIES_COLORS["cpu"],
-        SERIES_COLORS["cuda"],
-        SERIES_COLORS["cuda"],
-        SERIES_COLORS["cpu"],
-        SERIES_COLORS["cuda"],
-    ]
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.bar(labels, values, color=colors)
-    ax.axhline(1.0, color=SERIES_COLORS["numpy"], linestyle="--", label="parity")
-    ax.set_ylabel("speedup vs NumPy (x)")
-    ax.set_title("Speedup per regime (wins and losses)")
-    ax.set_yscale("log")
-    ax.legend()
-    ax.grid(True, axis="y", which="both", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
-    return out_path
-
-
-def _load_calibration(path: str) -> dict:
-    """Read the calibration-cache JSON (the crossover source); json.load only.
-
-    The calibration cache is a different shape from the results files: it carries
-    schema / signature / cpu / gpu / transfer, NOT a manifest + cases, so
-    report.load_series does not apply. Validate the fields the crossover needs are
-    present. json.load only (Security V5): a cache file is data, never code.
-    """
-    with open(path, encoding="utf-8") as handle:
-        data = json.load(handle)
-    assert "cpu" in data and "gpu" in data and "transfer" in data, (
-        "calibration cache missing cpu/gpu/transfer (crossover source)"
-    )
-    return data
-
-
-def plot_crossover(out_path: str, calibration_path: str | None = None):
-    """Crossover chart: host CPU time vs GPU compute + host transfer, per n (f32).
-
-    Shows the n where the GPU wins for a HOST float32 array once the H2D+D2H
-    transfer is paid, which is the decision the auto policy makes. CPU time is the
-    calibrated cpu.float32 curve; the GPU host cost is gpu.float32 compute plus the
-    modeled transfer time (bytes / h2d_gbps + bytes / d2h_gbps + fixed_overhead),
-    all read from the committed calibration cache.
-
-    Returns the out_path on success, or None when the calibration cache is absent
-    (the chart is skipped with a clear reason rather than fabricating data).
-    """
-    if calibration_path is None:
-        calibration_path = _results_path("refbox_calibration.json")
-    if not os.path.exists(calibration_path):
-        # No calibration cache committed: skip rather than invent a curve. The
-        # caller logs the skip; a fabricated crossover would be an orphan number.
-        return None
-    cal = _load_calibration(calibration_path)
-
-    cpu_pts = sorted(cal["cpu"]["float32"], key=lambda p: p[0])
-    gpu_pts = sorted(cal["gpu"]["float32"], key=lambda p: p[0])
-    transfer = cal["transfer"]
-    h2d = transfer["h2d_gbps"]
-    d2h = transfer["d2h_gbps"]
-    fixed = transfer["fixed_overhead_s"]
-
-    ns = [n for n, _ in cpu_pts]
-    cpu_t = [t for _, t in cpu_pts]
-    gpu_by_n = {n: t for n, t in gpu_pts}
-    gpu_host_t = []
-    for n in ns:
-        # f32 square: two input matrices in, one out; bytes moved is the H2D of
-        # both operands plus the D2H of the result. 4 bytes per f32 element.
-        in_bytes = 2 * n * n * 4
-        out_bytes = n * n * 4
-        transfer_s = (
-            in_bytes / (h2d * 1e9) + out_bytes / (d2h * 1e9) + fixed
-        )
-        gpu_host_t.append(gpu_by_n.get(n, float("nan")) + transfer_s)
-
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.plot(
-        ns, cpu_t, marker="o", color=SERIES_COLORS["cpu"],
-        label="CPU compute (host)",
-    )
-    ax.plot(
-        ns, gpu_host_t, marker="^", color=SERIES_COLORS["cuda"],
-        label="GPU compute + host transfer",
-    )
-    ax.set_xlabel("matrix size n")
-    ax.set_ylabel("time per matmul (s)")
-    ax.set_title("Host float32 crossover: CPU vs GPU (with transfer)")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.legend()
-    ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
-    return out_path
+    return path
 
 
 def generate_all(out_dir: str | None = None) -> list:
-    """Write the available charts to out_dir (default benchmarks/results/).
-
-    Returns the list of PNG paths actually written. Any chart whose input result
-    files are absent is omitted from the list with a printed reason rather than
-    crashing the run, so a fresh clone or a partial-results run still produces the
-    charts it can.
-    """
-    if out_dir is None:
-        out_dir = RESULTS_DIR
-    written = []
-    charts = [
-        (plot_gflops_vs_n(os.path.join(out_dir, "gflops_vs_n.png")), "gflops_vs_n"),
-        (plot_speedup_bars(os.path.join(out_dir, "speedup_bars.png")), "speedup_bars"),
-        (plot_crossover(os.path.join(out_dir, "crossover.png")), "crossover"),
+    out_dir = out_dir or report.RESULTS_DIR
+    return [
+        plot_gflops_vs_n(os.path.join(out_dir, "gflops_vs_n.png")),
+        plot_ratio_heatmap(os.path.join(out_dir, "ratio_heatmap.png")),
+        plot_crossover(os.path.join(out_dir, "crossover.png")),
     ]
-    for path, name in charts:
-        if path is None:
-            print(f"{name} chart skipped: required result files not found in results/")
-        else:
-            written.append(path)
-    return written
 
 
 if __name__ == "__main__":
-    for path in generate_all():
-        print(f"wrote {path}")
+    for p in generate_all():
+        print(f"wrote {p}")
