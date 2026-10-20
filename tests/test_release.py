@@ -9,8 +9,13 @@ with tomllib (stdlib 3.11+), json.load's TOML sibling, never eval'd.
 """
 
 from importlib.metadata import version as _metadata_version
+import hashlib
+import importlib.util
 import os
 import tomllib
+import zipfile
+
+import pytest
 
 import peregrine as pg
 
@@ -60,3 +65,86 @@ def test_matplotlib_in_bench_not_test():
     test = [d for d in extras.get("test", []) if d.startswith("matplotlib")]
     assert bench, "matplotlib must be pinned in the [bench] extras"
     assert not test, "matplotlib must not be in [test] (keep the WSL gate lean)"
+
+
+# The release tools are scripts, not package modules, so they load by path.
+_TOOLS = os.path.join(os.path.dirname(_PYPROJECT), "tools")
+
+
+def _tool(name):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(_TOOLS, name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_changelog_has_a_section_for_this_version():
+    release = _tool("release")
+    body = release.changelog_section(release.project_version())
+    assert body.strip() and "\n## " not in body
+
+
+def test_release_prepare_writes_notes_and_checksums(tmp_path):
+    release = _tool("release")
+    v = release.project_version()
+    files = [tmp_path / f"peregrine-{v}-cp312-abi3-win_amd64.whl", tmp_path / f"peregrine-{v}.tar.gz"]
+    for i, f in enumerate(files):
+        f.write_bytes(bytes([i]) * 100)
+    cmd = release.prepare(str(tmp_path), f"v{v}")
+    assert cmd[:4] == ["gh", "release", "create", f"v{v}"] and "--verify-tag" in cmd
+    sums = (tmp_path / "SHA256SUMS").read_text().splitlines()
+    want = sorted(f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.name}" for f in files)
+    assert sorted(sums) == want
+    assert (tmp_path / "RELEASE_NOTES.md").read_text(encoding="utf-8") == release.changelog_section(v)
+
+
+def test_release_refuses_a_mismatched_tag_or_file(tmp_path):
+    release = _tool("release")
+    v = release.project_version()
+    (tmp_path / f"peregrine-{v}.tar.gz").write_bytes(b"x")
+    with pytest.raises(SystemExit, match="does not match"):
+        release.prepare(str(tmp_path), "v0.0.1")
+    (tmp_path / "peregrine-0.0.1-cp312-abi3-win_amd64.whl").write_bytes(b"x")
+    with pytest.raises(SystemExit, match="does not carry version"):
+        release.prepare(str(tmp_path), None)
+
+
+def test_wheel_allowlist_names_only_the_strays(tmp_path):
+    check = _tool("check_dist_contents")
+    ok = [
+        "peregrine/__init__.py",
+        "peregrine/_core.pyd",
+        "peregrine/_core.abi3.so",
+        "peregrine.libs/vcomp140-" + "0" * 32 + ".dll",
+        "peregrine.libs/libgomp-a34b3233.so.1.0.0",
+        "peregrine-3.1.0.dist-info/RECORD",
+        "peregrine-3.1.0.dist-info/licenses/LICENSE",
+    ]
+    strays = ["peregrine/_core.pdb", "peregrine.libs/libomp140.x86_64-" + "0" * 32 + ".dll", "notes/todo.txt"]
+    whl = tmp_path / "w.whl"
+    with zipfile.ZipFile(whl, "w") as z:
+        for name in ok + strays:
+            z.writestr(name, b"")
+        z.writestr("peregrine/", b"")
+    assert check.check_wheel(str(whl)) == strays
+
+
+_SHOW = """Analyzing peregrine-3.1.0-cp312-abi3-win_amd64.whl
+
+The following DLLs will be copied into the wheel.
+    msvcp140.dll (C:/Windows/System32/msvcp140.dll)
+    vcomp140.dll (C:/Windows/System32/vcomp140.dll)
+{extra}
+The following DLLs are assumed to be present in the end user's environment and will not be copied into the wheel.
+    kernel32.dll
+    python3.dll
+"""
+
+
+def test_dll_check_allows_only_the_redistributable_runtimes():
+    check = _tool("check_wheel_dlls")
+    assert check.offending(_SHOW.format(extra="")) == []
+    llvm = "    libomp140.x86_64.dll (C:/Windows/System32/libomp140.x86_64.dll)\n"
+    assert check.offending(_SHOW.format(extra=llvm)) == [llvm.strip()]
+    missing = "    vcomp140d.dll (Error: Not Found)\n"
+    assert check.offending(_SHOW.format(extra=missing)) == [missing.strip()]
