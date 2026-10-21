@@ -242,6 +242,79 @@ def test_one_and_six_threads_bitwise(dtype, case):
     assert one.tobytes() == six.tobytes() == c_order.tobytes()
 
 
+# The small kernel's two-thread team (from 2^16 vector FMAs, m * k * n / W)
+# splits C into runs of six-row tiles, or into runs of B panels (8 float64 or 16
+# float32 columns) when an operand is column-major and the panels split evenly.
+# The shapes straddle the threshold (float64 63/64 rows, float32 80/81 cubes)
+# and take both splits: odd panel counts (float64 n = 72 and 81, float32 65 and
+# 80) stay on rows, even ones split panels, some with a partial edge panel
+# (float64 93, float32 81 and 93), and row counts sit off the tile grid.
+SMALL_TEAM_SHAPES = {
+    np.float64: [(63, 64, 64), (64, 64, 64), (65, 64, 64), (64, 64, 72), (64, 64, 81), (95, 96, 93), (96, 96, 96)],
+    np.float32: [(80, 80, 80), (81, 81, 81), (90, 96, 65), (96, 96, 80), (95, 96, 93), (96, 96, 96)],
+}
+SMALL_TEAM_VIEWS = {
+    **LAYOUTS,
+    # column-major with its columns walked backwards: a negative column stride
+    "F-rev": lambda x: np.asfortranarray(x[:, ::-1])[:, ::-1],
+}
+SMALL_TEAM_PAIRS = [("C", "C"), ("C", "F"), ("F", "F"), ("T", "F"), ("C", "F-rev"), ("T", "C"), ("F-rev", "C"),
+                    ("C", "T")]
+
+
+def _vector_fmas(m, k, n, dtype):
+    return m * k * n // (4 if dtype == np.float64 else 8)
+
+
+def test_small_team_shapes_straddle_the_team_threshold():
+    assert _vector_fmas(63, 64, 64, np.float64) < 2**16 <= _vector_fmas(64, 64, 64, np.float64)
+    assert _vector_fmas(80, 80, 80, np.float32) < 2**16 <= _vector_fmas(81, 81, 81, np.float32)
+    for dtype, shapes in SMALL_TEAM_SHAPES.items():
+        assert all(max(s) <= 96 for s in shapes)  # dispatch takes the small path
+        assert sum(_vector_fmas(*s, dtype) >= 2**16 for s in shapes) == len(shapes) - 1
+
+
+def _assert_views_give_the_c_order_bits(dtype, shapes, pairs, threads):
+    for m, k, n in shapes:
+        a, b = _operands(dtype, m, k, n)
+        pg.set_num_threads(1)
+        ref = pg.matmul(a, b)
+        for la, lb in pairs:
+            va, vb = SMALL_TEAM_VIEWS[la](a), SMALL_TEAM_VIEWS[lb](b)
+            assert np.array_equal(va, a) and np.array_equal(vb, b)
+            for t in threads:
+                pg.set_num_threads(t)
+                # NaN-filled, so an element no member wrote cannot pass
+                out = np.full((m, n), np.nan, dtype)
+                pg.matmul(va, vb, out=out)
+                assert out.tobytes() == ref.tobytes(), (m, k, n, la, lb, t)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_small_team_splits_give_the_c_order_bits(dtype):
+    assert SMALL_TEAM_VIEWS["F-rev"](np.zeros((3, 2), dtype)).strides[1] < 0
+    _assert_views_give_the_c_order_bits(dtype, SMALL_TEAM_SHAPES[dtype], SMALL_TEAM_PAIRS, (2, 6, 1))
+
+
+# A column-major A whose column pitch reaches few L1 sets (float64 32, 64, and
+# 96 rows, float32 64) reads in place over packed B panels with its next
+# columns prefetched, from one k step past the line-count bound (2 * k against
+# 8 ways of the reached sets); one step short keeps the in-place B rows. Edge
+# panels, a one-vector float32 panel (n = 7, 8), and row counts off the tile
+# grid ride along.
+CROWDED_A_SHAPES = {
+    np.float64: [(64, 32, 24), (64, 33, 24), (96, 64, 20), (96, 65, 20), (32, 64, 40), (32, 65, 40),
+                 (64, 64, 64), (64, 96, 93), (96, 96, 96)],
+    np.float32: [(64, 64, 40), (64, 65, 40), (64, 96, 8), (64, 96, 7), (64, 96, 64)],
+}
+CROWDED_A_PAIRS = [("T", "C"), ("F", "F"), ("F-rev", "C"), ("T", "F-rev"), ("F", "T")]
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_crowded_column_major_a_gives_the_c_order_bits(dtype):
+    _assert_views_give_the_c_order_bits(dtype, CROWDED_A_SHAPES[dtype], CROWDED_A_PAIRS, (1, 6))
+
+
 def _digest(r):
     return r.dtype.str, r.shape, hashlib.blake2b(r.tobytes()).hexdigest()
 
