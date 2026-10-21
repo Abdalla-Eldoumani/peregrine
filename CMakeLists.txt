@@ -32,7 +32,9 @@ find_package(OpenMP REQUIRED)
 
 # NOMINSIZE: without it nanobind adds /Os in Release on MSVC, and favoring size
 # turns off MSVC's auto-vectorization of the scalar twins (gemm_small, reduce).
-nanobind_add_module(_core STABLE_ABI NB_STATIC NOMINSIZE
+# PROTECT_STACK: nanobind otherwise turns off the compiler's stack protection
+# (/GS- on MSVC since 3.0) for every source in the module, the kernels included.
+nanobind_add_module(_core STABLE_ABI NB_STATIC NOMINSIZE PROTECT_STACK
   src/bindings/module.cpp
   src/bindings/fast_entry.cpp
   src/bindings/output_cache.cpp
