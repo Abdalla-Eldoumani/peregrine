@@ -6,8 +6,9 @@ namespace pg::cpu {
 // Register-blocked GEMM that reads A and B in place through element strides
 // (any sign, any value on a length-1 dimension) and overwrites the C-contiguous
 // m x n output c. No heap. From 2^16 vector FMAs a team of two threads (capped
-// by the thread setting) splits the rows of C on six-row tile boundaries;
-// gemm_small_ldc is always single-threaded. Each output element is one FMA
+// by the thread setting) splits the rows of C on six-row tile boundaries, or
+// its columns on two-vector panel boundaries when an operand is column-major and
+// the panels split evenly; gemm_small_ldc is always single-threaded. Each output element is one FMA
 // chain in k order starting from +0.0 and stored as acc - (-0.0), so an
 // accumulator that underflowed to -0.0 lands as +0.0. The bits therefore depend
 // only on the operand values: not on the strides, not on the tile that computed
