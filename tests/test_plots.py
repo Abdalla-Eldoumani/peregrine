@@ -13,12 +13,14 @@ from __future__ import annotations
 import ast
 import json
 import os
+import pathlib
 import re
 import sys
 
 import pytest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT_PATH = pathlib.Path(_REPO_ROOT)
 _BENCH_DIR = os.path.join(_REPO_ROOT, "benchmarks")
 if _BENCH_DIR not in sys.path:
     sys.path.insert(0, _BENCH_DIR)
@@ -155,6 +157,23 @@ def test_missing_files_render_not_measured(synthetic):
 
 
 # --- Target rules on synthetic files. ---
+
+
+def test_a_failing_render_leaves_the_docs_untouched(tmp_path, monkeypatch):
+    for rel in report.DOCS:
+        dest = tmp_path / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes((_REPO_ROOT_PATH / rel).read_bytes())
+    before = {rel: (tmp_path / rel).read_bytes() for rel in report.DOCS}
+    monkeypatch.setattr(report, "ROOT", str(tmp_path))
+
+    def boom(name):
+        raise ValueError("a loss without a reason")
+
+    monkeypatch.setattr(report, "render", boom)
+    with pytest.raises(ValueError):
+        report.main(["--write"])
+    assert {rel: (tmp_path / rel).read_bytes() for rel in report.DOCS} == before
 
 
 def test_square_regime_boundaries(synthetic):
