@@ -179,15 +179,14 @@ def test_a_failing_render_leaves_the_docs_untouched(tmp_path, monkeypatch):
 def test_square_regime_boundaries(synthetic):
     # Each ratio passes under the cell's own regime and fails under the next
     # regime's target, or the reverse, so a shifted boundary flips a status.
-    cases = {16: (2.9, "below"), 24: (1.6, "met"), 96: (1.4, "below"), 128: (1.2, "met"),
+    cases = {16: (2.9, "deferred"), 24: (1.6, "met"), 96: (1.4, "below"), 128: (1.2, "met"),
              384: (1.1, "below"), 512: (1.1, "met"), 768: (1.0, "below"), 1000: (1.0, "met")}
-    # float32, because the float64 n = 12 and 16 cells carry a deferral closure.
+    # n = 16 carries the small-call deferral, which a cell reaches only below its
+    # target, so "deferred" there still marks the boundary.
     _write(synthetic, "refbox_matmul_square_cpu_v310.json",
-           [_cell("matmul", "float32", (n, n, n), {"peregrine": 1.0, "numpy": r}) for n, (r, _) in cases.items()]
-           + [_cell("matmul", "float64", (16, 16, 16), {"peregrine": 1.0, "numpy": 2.9})])
+           [_cell("matmul", "float32", (n, n, n), {"peregrine": 1.0, "numpy": r}) for n, (r, _) in cases.items()])
     got = _statuses("matmul_square")
     assert {n: got[f"matmul/float32/{n}x{n}x{n}/c/-/t6"] for n in cases} == {n: s for n, (_, s) in cases.items()}
-    assert got["matmul/float64/16x16x16/c/-/t6"] == "deferred"
 
 
 def test_other_regimes(synthetic):
