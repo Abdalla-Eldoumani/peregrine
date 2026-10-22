@@ -50,20 +50,54 @@ never count as met.
 ## Conditions
 
 <!-- report:environment -->
-Not measured: `benchmarks/results/refbox_matmul_square_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_matmul_rect_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_matmul_layout_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_transpose_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_reduce_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_fused_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_overhead_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_gemm_1t_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_overhead_cuda_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_quick_cpu_v300.json` is absent.
-Not measured: `benchmarks/results/refbox_quick_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_quick_cuda_v300.json` is absent.
-Not measured: `benchmarks/results/refbox_quick_cuda_v310.json` is absent.
+Each results file and the run that wrote it:
+
+| results file | build | Peregrine | commit | date | priority |
+|---|---|---|---|---|---|
+| `refbox_matmul_square_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T14:06 | high |
+| `refbox_matmul_rect_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T16:43 | high |
+| `refbox_matmul_layout_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T17:48 | high |
+| `refbox_transpose_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T20:27 | high |
+| `refbox_reduce_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T22:32 | high |
+| `refbox_fused_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-22T01:56 | high |
+| `refbox_overhead_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-22T10:52 | high |
+| `refbox_gemm_1t_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-22T10:41 | high |
+| `refbox_gpu_cuda_v310.json` | CUDA | 3.1.0 | 4e21f991b096 | 2026-10-21T03:01 | high |
+| `refbox_overhead_cuda_v310.json` | CUDA | 3.1.0 | 4e21f991b096 | 2026-10-21T06:06 | high |
+| `refbox_quick_cpu_v300.json` | CPU-only | 3.0.0 | unknown | 2026-10-21T08:10 | high |
+| `refbox_quick_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-22T11:37 | high |
+| `refbox_quick_cuda_v300.json` | CUDA | 3.0.0 | unknown | 2026-10-21T10:49 | high |
+| `refbox_quick_cuda_v310.json` | CUDA | 3.1.0 | 4e21f991b096 | 2026-10-21T06:54 | high |
+
+Measurement conditions recorded in the manifests of the matrix files (one value means every file agrees):
+
+| condition | value |
+|---|---|
+| Peregrine threads | 6, 1 |
+| OpenBLAS threads | 6 |
+| OMP_NUM_THREADS at start | 6 |
+| process priority | high |
+| affinity mask (one logical CPU per core) | 0x555 |
+| CPU | Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz |
+| OS | Windows-10-10.0.19045-SP0 |
+| power plan | Ultimate Performance |
+| Python | 3.12.4 |
+| NumPy | 2.5.4 |
+| OpenBLAS | 0.3.34.106.0 (Haswell kernels) |
+| compiler | MSVC 19.42.34436.0 |
+| compiler flags | `/DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG /bigobj /MP /O2 /permissive- /W4 SHELL:-openmp` |
+| OpenMP runtime | vcomp140.dll |
+| GPU and driver (CUDA build) | NVIDIA GeForce RTX 3060 Laptop GPU, driver 617.14 |
+| samples per contender | 30 |
+| warmup samples | 5 |
+| samples per ABBA block | 5 |
+| batch target per sample | 100 ms |
+| rewarm after a switch | 200 ms |
+| rewarm after a switch, GPU contenders | 3.00 s |
+| idle gap at a switch | 300 ms |
+| CV limit | 5% |
+| attempts before the fresh-process retry | 3 |
+| clock-discard band | 42.0 to 200.0 percent processor performance |
 <!-- /report:environment -->
 
 ## Reproducing
@@ -127,13 +161,62 @@ longer matches its file.
 ## v3.0.0 to v3.1.0
 
 <!-- report:compare_full -->
-Not measured: `benchmarks/results/refbox_quick_cpu_v300.json` is absent.
+Peregrine's median time in the v3.0.0 and v3.1.0 runs of the quick subset, same harness and machine, with NumPy's median in each run as a check that the machine state matched. The speedup is the v3.0.0 time divided by the v3.1.0 time; both libraries ran at the thread count in the threads column.
 
-Not measured: `benchmarks/results/refbox_quick_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_quick_cuda_v300.json` is absent.
-
-Not measured: `benchmarks/results/refbox_quick_cuda_v310.json` is absent.
+| operation | dtype | shape | threads | NumPy, v3.0.0 run | NumPy, v3.1.0 run | Peregrine v3.0.0 | Peregrine v3.1.0 | speedup |
+|---|---|---|---|---|---|---|---|---|
+| axpby, new output | float32 | 32x32 | 6 | 2.71 us | 2.71 us | 7.88 us | 474 ns | 16.64x |
+| axpby, new output | float32 | 2896x2896 | 6 | 30.2 ms | 27.1 ms | 7.88 ms | 2.74 ms | 2.87x |
+| axpby, out= | float32 | 32x32 | 6 | unsupported | 2.62 us | unsupported | 312 ns | - |
+| axpby, out= | float32 | 2896x2896 | 6 | unsupported | 27.2 ms | unsupported | 2.74 ms | - |
+| axpby, new output | float64 | 32x32 | 6 | 3.09 us | 3.13 us | 7.94 us | 706 ns | 11.26x |
+| axpby, new output | float64 | 2896x2896 | 6 | 56.2 ms | 55.3 ms | 15.1 ms | 5.64 ms | 2.68x |
+| axpby, out= | float64 | 32x32 | 6 | unsupported | 3.13 us | unsupported | 424 ns | - |
+| axpby, out= | float64 | 2896x2896 | 6 | unsupported | 57.6 ms | unsupported | 5.64 ms | - |
+| matmul a @ b | float32 | 4x4x4 | 6 | 1.29 us | 1.29 us | 2.98 us | 339 ns | 8.78x |
+| matmul a @ b | float32 | 16x16x16 | 6 | 1.68 us | 1.67 us | 4.82 us | 493 ns | 9.76x |
+| matmul a @ b | float32 | 64x64x64 | 6 | 9.45 us | 9.13 us | 119 us | 5.21 us | 22.81x |
+| matmul a @ b | float32 | 1x4096x4096 | 6 | noisy | noisy | noisy | noisy | - |
+| matmul a @ b | float32 | 256x256x256 | 6 | 121 us | noisy | 307 us | noisy | - |
+| matmul a.T @ b | float32 | 512x512x512 | 6 | noisy | 837 us | noisy | 555 us | - |
+| matmul a @ b | float32 | 1024x1024x1024 | 6 | 4.92 ms | noisy | 8.12 ms | noisy | - |
+| matmul a @ b | float32 | 2048x2048x2048 | 6 | 36.6 ms | 36.5 ms | 57.7 ms | 32.8 ms | 1.76x |
+| matmul a @ b | float64 | 4x4x4 | 6 | 1.27 us | 1.27 us | 2.78 us | 331 ns | 8.40x |
+| matmul a @ b | float64 | 16x16x16 | 6 | 1.71 us | 1.74 us | 4.68 us | 596 ns | 7.86x |
+| matmul a @ b | float64 | 64x64x64 | 6 | 15.2 us | 15.1 us | 121 us | 7.56 us | 15.99x |
+| matmul a @ b | float64 | 1x4096x4096 | 6 | noisy | noisy | noisy | noisy | - |
+| matmul a @ b | float64 | 256x256x256 | 6 | 211 us | 213 us | 750 us | 155 us | 4.84x |
+| matmul a.T @ b | float64 | 512x512x512 | 6 | 1.56 ms | noisy | 3.58 ms | noisy | - |
+| matmul a @ b | float64 | 1024x1024x1024 | 6 | noisy | noisy | noisy | noisy | - |
+| matmul a @ b | float64 | 2048x2048x2048 | 6 | 79.8 ms | noisy | 135 ms | noisy | - |
+| sum, axis=0 | float32 | 64x64 | 6 | 3.64 us | 3.65 us | 5.11 us | 596 ns | 8.56x |
+| sum, axis=0 | float32 | 4096x4096 | 6 | 4.34 ms | 4.68 ms | 7.99 ms | 1.92 ms | 4.15x |
+| sum, axis=None | float32 | 64x64 | 6 | 2.67 us | 2.64 us | 4.61 us | 671 ns | 6.88x |
+| sum, axis=None | float32 | 4096x4096 | 6 | 9.31 ms | 9.18 ms | 15.2 ms | 2.58 ms | 5.89x |
+| sum, axis=0 | float64 | 64x64 | 6 | 3.77 us | 3.87 us | 5.07 us | 863 ns | 5.88x |
+| sum, axis=0 | float64 | 4096x4096 | 6 | 9.16 ms | 9.01 ms | 11.9 ms | 4.07 ms | 2.92x |
+| sum, axis=None | float64 | 64x64 | 6 | 2.84 us | 2.84 us | 3.73 us | 912 ns | 4.10x |
+| sum, axis=None | float64 | 4096x4096 | 6 | 24.1 ms | 23.4 ms | 23.7 ms | 7.10 ms | 3.33x |
+| transpose | float32 | 64x64 | 6 | 2.54 us | 2.63 us | 5.22 us | 1.08 us | 4.82x |
+| transpose | float32 | 2048x2048 | 6 | noisy | 47.9 ms | noisy | 1.24 ms | - |
+| transpose | float64 | 64x64 | 6 | 3.18 us | 3.15 us | 5.42 us | 1.41 us | 3.85x |
+| transpose | float64 | 2048x2048 | 6 | 56.2 ms | noisy | 22.5 ms | noisy | - |
+| fused chain, device-resident | float32 | 1024x1024 | 6 | 7.24 ms | not measured | 155 us | not measured | - |
+| fused chain, device-resident | float32 | 2048x2048 | 6 | 29.3 ms | not measured | 595 us | not measured | - |
+| fused chain, device-resident | float32 | 4096x4096 | 6 | 130 ms | not measured | 2.37 ms | not measured | - |
+| fused chain, device-resident | float32 | 4096x8192 | 6 | 275 ms | not measured | 4.73 ms | not measured | - |
+| matmul, device-resident | float32 | 256x256x256 | 6 | noisy | not measured | noisy | not measured | - |
+| matmul, device-resident | float32 | 512x512x512 | 6 | 886 us | not measured | 57.4 us | not measured | - |
+| matmul, device-resident | float32 | 1024x1024x1024 | 6 | 5.84 ms | not measured | 402 us | not measured | - |
+| matmul, device-resident | float32 | 2048x2048x2048 | 6 | noisy | not measured | noisy | not measured | - |
+| matmul, device-resident | float32 | 4096x4096x4096 | 6 | noisy | not measured | noisy | not measured | - |
+| matmul, device-resident | float64 | 256x256x256 | 6 | noisy | not measured | noisy | not measured | - |
+| matmul, device-resident | float64 | 512x512x512 | 6 | noisy | not measured | noisy | not measured | - |
+| matmul, device-resident | float64 | 1024x1024x1024 | 6 | 11.4 ms | not measured | 12.3 ms | not measured | - |
+| matmul, device-resident | float64 | 2048x2048x2048 | 6 | 81.0 ms | not measured | 99.6 ms | not measured | - |
+| matmul, device-resident | float64 | 4096x4096x4096 | 6 | noisy | not measured | noisy | not measured | - |
+| matmul a @ b, auto route | float32 | 256x256x256 | 6 | 124 us | 126 us | 54.2 ms | 79.8 us | 679.17x |
+| matmul a @ b, auto route | float32 | 2048x2048x2048 | 6 | noisy | noisy | noisy | noisy | - |
 <!-- /report:compare_full -->
 
 ## Full matrix
@@ -141,13 +224,93 @@ Not measured: `benchmarks/results/refbox_quick_cuda_v310.json` is absent.
 ### matmul, square
 
 <!-- report:matrix_matmul_square_cpu -->
-Not measured: `benchmarks/results/refbox_matmul_square_cpu_v310.json` is absent.
+matmul, square, CPU-only build, from `refbox_matmul_square_cpu_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| matmul | float32 | 1x1x1 | c | - | 6 | 1/1 | 1.06 us | 4.46 ns | 1.05 us | 363 ns | 3.01 ns | 361 ns | 2.91x | >= 3.00x NumPy | deferred |
+| matmul | float32 | 2x2x2 | c | - | 6 | 1/1 | 1.29 us | 20.9 ns | 1.27 us | 368 ns | 3.89 ns | 363 ns | 3.51x | >= 3.00x NumPy | met |
+| matmul | float32 | 4x4x4 | c | - | 6 | 1/1 | 1.32 us | 27.0 ns | 1.29 us | 393 ns | 21.3 ns | 376 ns | 3.35x | >= 3.00x NumPy | met |
+| matmul | float32 | 8x8x8 | c | - | 6 | 1/1 | 1.39 us | 17.8 ns | 1.37 us | 392 ns | 2.71 ns | 387 ns | 3.54x | >= 3.00x NumPy | met |
+| matmul | float32 | 12x12x12 | c | - | 6 | 1/1 | 1.50 us | 17.8 ns | 1.47 us | 470 ns | 3.52 ns | 458 ns | 3.18x | >= 3.00x NumPy | met |
+| matmul | float32 | 16x16x16 | c | - | 6 | 3/3 | 1.70 us | 11.4 ns | 1.66 us | 533 ns | 7.28 ns | 520 ns | 3.17x | >= 3.00x NumPy | met |
+| matmul | float32 | 24x24x24 | c | - | 6 | 1/1 | 2.35 us | 21.3 ns | 2.31 us | 873 ns | 35.1 ns | 856 ns | 2.69x | >= 1.50x NumPy | met |
+| matmul | float32 | 32x32x32 | c | - | 6 | 1/1 | 3.30 us | 34.8 ns | 3.27 us | 1.24 us | 16.2 ns | 1.24 us | 2.65x | >= 1.50x NumPy | met |
+| matmul | float32 | 48x48x48 | c | - | 6 | 1/1 | 5.37 us | 36.1 ns | 5.33 us | 2.58 us | 31.8 ns | 2.56 us | 2.08x | >= 1.50x NumPy | met |
+| matmul | float32 | 64x64x64 | c | - | 6 | 3/3 | 9.40 us | 188 ns | 9.07 us | 5.29 us | 67.7 ns | 5.13 us | 1.78x | >= 1.50x NumPy | met |
+| matmul | float32 | 96x96x96 | c | - | 6 | 1/1 | 35.6 us | 651 ns | 34.6 us | 9.58 us | 275 ns | 9.24 us | 3.71x | >= 1.50x NumPy | met |
+| matmul | float32 | 128x128x128 | c | - | 6 | 1/1 | 55.9 us | 442 ns | 55.4 us | 16.8 us | 533 ns | 15.9 us | 3.34x | >= 1.15x NumPy | met |
+| matmul | float32 | 192x192x192 | c | - | 6 | 1/1 | 79.2 us | 2.04 us | 77.7 us | 34.9 us | 890 ns | 33.2 us | 2.27x | >= 1.15x NumPy | met |
+| matmul | float32 | 250x250x250 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.15x NumPy | noisy |
+| matmul | float32 | 256x256x256 | c | - | 6 | 2/3 | 122 us | 3.05 us | 120 us | 76.0 us | 2.36 us | 73.2 us | 1.61x | >= 1.15x NumPy | met |
+| matmul | float32 | 333x333x333 | c | - | 6 | 1/1 | 227 us | 6.21 us | 220 us | 161 us | 3.01 us | 157 us | 1.41x | >= 1.15x NumPy | met |
+| matmul | float32 | 384x384x384 | c | - | 6 | 1/1 | 290 us | 8.55 us | 277 us | 238 us | 4.69 us | 222 us | 1.22x | >= 1.15x NumPy | met |
+| matmul | float32 | 512x512x512 | c | - | 6 | 2/3 | 813 us | 23.2 us | 774 us | 519 us | 12.0 us | 496 us | 1.57x | >= 1.05x NumPy | met |
+| matmul | float32 | 640x640x640 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.05x NumPy | noisy |
+| matmul | float32 | 750x750x750 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.05x NumPy | noisy |
+| matmul | float32 | 1000x1000x1000 | c | - | 6 | 1/1 | 4.58 ms | 150 us | 4.42 ms | 3.83 ms | 78.1 us | 3.51 ms | 1.19x | >= 0.97x NumPy | met |
+| matmul | float32 | 1024x1024x1024 | c | - | 6 | 1/1 | 4.73 ms | 80.7 us | 4.60 ms | 4.05 ms | 103 us | 3.82 ms | 1.17x | >= 0.97x NumPy | met |
+| matmul | float32 | 1500x1500x1500 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 0.97x NumPy | noisy |
+| matmul | float32 | 2048x2048x2048 | c | - | 6 | 0/3 | - | - | - | - | - | - | noisy | >= 0.97x NumPy | noisy |
+| matmul | float32 | 3000x3000x3000 | c | - | 6 | 1/1 | 105 ms | 2.77 ms | 101 ms | 99.8 ms | 1.84 ms | 96.4 ms | 1.05x | >= 0.97x NumPy | met |
+| matmul | float32 | 4096x4096x4096 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 0.97x NumPy | noisy |
+| matmul | float64 | 1x1x1 | c | - | 6 | 1/1 | 1.03 us | 8.25 ns | 1.02 us | 348 ns | 5.50 ns | 343 ns | 2.97x | >= 3.00x NumPy | deferred |
+| matmul | float64 | 2x2x2 | c | - | 6 | 1/1 | 1.27 us | 38.3 ns | 1.25 us | 344 ns | 2.85 ns | 342 ns | 3.68x | >= 3.00x NumPy | met |
+| matmul | float64 | 4x4x4 | c | - | 6 | 1/1 | 1.31 us | 33.9 ns | 1.28 us | 348 ns | 9.32 ns | 344 ns | 3.77x | >= 3.00x NumPy | met |
+| matmul | float64 | 8x8x8 | c | - | 6 | 1/1 | 1.39 us | 13.8 ns | 1.38 us | 392 ns | 4.33 ns | 388 ns | 3.54x | >= 3.00x NumPy | met |
+| matmul | float64 | 12x12x12 | c | - | 6 | 1/1 | 1.60 us | 34.6 ns | 1.58 us | 541 ns | 11.9 ns | 537 ns | 2.96x | >= 3.00x NumPy | deferred |
+| matmul | float64 | 16x16x16 | c | - | 6 | 3/3 | 1.76 us | 18.3 ns | 1.73 us | 613 ns | 19.4 ns | 602 ns | 2.87x | >= 3.00x NumPy | deferred |
+| matmul | float64 | 24x24x24 | c | - | 6 | 1/1 | 2.74 us | 58.5 ns | 2.71 us | 1.06 us | 19.2 ns | 1.05 us | 2.59x | >= 1.50x NumPy | met |
+| matmul | float64 | 32x32x32 | c | - | 6 | 1/1 | 4.02 us | 37.9 ns | 3.98 us | 1.94 us | 29.0 ns | 1.93 us | 2.07x | >= 1.50x NumPy | met |
+| matmul | float64 | 48x48x48 | c | - | 6 | 1/1 | 8.00 us | 85.4 ns | 7.91 us | 4.92 us | 414 ns | 4.76 us | 1.63x | >= 1.50x NumPy | met |
+| matmul | float64 | 64x64x64 | c | - | 6 | 3/3 | 15.1 us | 280 ns | 14.9 us | 6.98 us | 269 ns | 6.37 us | 2.19x | >= 1.50x NumPy | met |
+| matmul | float64 | 96x96x96 | c | - | 6 | 1/1 | 44.0 us | 551 ns | 43.4 us | 18.5 us | 737 ns | 17.5 us | 2.39x | >= 1.50x NumPy | met |
+| matmul | float64 | 128x128x128 | c | - | 6 | 1/1 | 66.2 us | 748 ns | 65.4 us | 24.2 us | 573 ns | 23.5 us | 2.74x | >= 1.15x NumPy | met |
+| matmul | float64 | 192x192x192 | c | - | 6 | 1/1 | 116 us | 2.28 us | 114 us | 70.7 us | 1.71 us | 68.5 us | 1.65x | >= 1.15x NumPy | met |
+| matmul | float64 | 250x250x250 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.15x NumPy | noisy |
+| matmul | float64 | 256x256x256 | c | - | 6 | 1/3 | 209 us | 3.66 us | 202 us | 153 us | 6.10 us | 148 us | 1.36x | >= 1.15x NumPy | met |
+| matmul | float64 | 333x333x333 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.15x NumPy | noisy |
+| matmul | float64 | 384x384x384 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.15x NumPy | noisy |
+| matmul | float64 | 512x512x512 | c | - | 6 | 1/3 | 1.55 ms | 26.3 us | 1.47 ms | 1.11 ms | 28.3 us | 1.07 ms | 1.40x | >= 1.05x NumPy | met |
+| matmul | float64 | 640x640x640 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.05x NumPy | noisy |
+| matmul | float64 | 750x750x750 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.05x NumPy | noisy |
+| matmul | float64 | 1000x1000x1000 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 0.97x NumPy | noisy |
+| matmul | float64 | 1024x1024x1024 | c | - | 6 | 1/1 | 11.1 ms | 496 us | 10.1 ms | 8.84 ms | 181 us | 8.61 ms | 1.26x | >= 0.97x NumPy | met |
+| matmul | float64 | 1500x1500x1500 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 0.97x NumPy | noisy |
+| matmul | float64 | 2048x2048x2048 | c | - | 6 | 2/3 | 77.6 ms | 2.65 ms | 74.4 ms | 68.6 ms | 1.33 ms | 65.9 ms | 1.13x | >= 0.97x NumPy | met |
+| matmul | float64 | 3000x3000x3000 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 0.97x NumPy | noisy |
+| matmul | float64 | 4096x4096x4096 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 0.97x NumPy | noisy |
 <!-- /report:matrix_matmul_square_cpu -->
 
 ### matmul, rectangular and skinny
 
 <!-- report:matrix_matmul_rect_cpu -->
-Not measured: `benchmarks/results/refbox_matmul_rect_cpu_v310.json` is absent.
+matmul, rectangular, CPU-only build, from `refbox_matmul_rect_cpu_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| matmul | float32 | 1x4096x4096 | c | - | 6 | 0/3 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float32 | 64x4096x64 | c | - | 6 | 1/1 | 208 us | 2.37 us | 204 us | 113 us | 4.95 us | 108 us | 1.84x | >= 1.00x NumPy | met |
+| matmul | float32 | 4096x4096x1 | c | - | 6 | 1/1 | 1.76 ms | 30.0 us | 1.73 ms | 1.62 ms | 45.6 us | 1.57 ms | 1.09x | >= 1.00x NumPy | met |
+| matmul | float32 | 4x4096x4096 | c | - | 6 | 1/1 | 4.02 ms | 193 us | 3.90 ms | 1.90 ms | 111 us | 1.84 ms | 2.11x | >= 1.00x NumPy | met |
+| matmul | float32 | 4096x4096x4 | c | - | 6 | 1/1 | 3.43 ms | 57.5 us | 3.38 ms | 3.04 ms | 27.2 us | 2.99 ms | 1.13x | >= 1.00x NumPy | met |
+| matmul | float32 | 65536x32x32 | c | - | 6 | 1/1 | 1.93 ms | 21.3 us | 1.88 ms | 800 us | 30.4 us | 768 us | 2.41x | >= 1.00x NumPy | met |
+| matmul | float32 | 1000x333x750 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float32 | 256x256x4096 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float32 | 256x4096x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float32 | 4096x256x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float32 | 4096x64x4096 | c | - | 6 | 2/3 | 19.2 ms | 686 us | 18.2 ms | 4.89 ms | 138 us | 4.75 ms | 3.92x | >= 1.00x NumPy | met |
+| matmul | float64 | 1x4096x4096 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float64 | 64x4096x64 | c | - | 6 | 1/1 | 347 us | 9.27 us | 339 us | 211 us | 9.03 us | 200 us | 1.65x | >= 1.00x NumPy | met |
+| matmul | float64 | 4096x4096x1 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float64 | 4x4096x4096 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float64 | 4096x4096x4 | c | - | 6 | 1/1 | 7.96 ms | 198 us | 7.86 ms | 6.08 ms | 274 us | 5.27 ms | 1.31x | >= 1.00x NumPy | met |
+| matmul | float64 | 65536x32x32 | c | - | 6 | 1/1 | 4.05 ms | 56.2 us | 3.98 ms | 1.62 ms | 36.1 us | 1.58 ms | 2.50x | >= 1.00x NumPy | met |
+| matmul | float64 | 1000x333x750 | c | - | 6 | 3/3 | 2.90 ms | 59.6 us | 2.75 ms | 2.06 ms | 38.7 us | 1.97 ms | 1.41x | >= 1.00x NumPy | met |
+| matmul | float64 | 256x256x4096 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float64 | 256x4096x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float64 | 4096x256x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul | float64 | 4096x64x4096 | c | - | 6 | 1/1 | 37.9 ms | 1.52 ms | 35.1 ms | 10.1 ms | 708 us | 9.71 ms | 3.74x | >= 1.00x NumPy | met |
 <!-- /report:matrix_matmul_rect_cpu -->
 
 ### matmul, operand layouts
@@ -157,19 +320,174 @@ C-contiguous target for its shape and stays within 10 percent of Peregrine's
 own C-contiguous time for that shape.
 
 <!-- report:matrix_matmul_layout_cpu -->
-Not measured: `benchmarks/results/refbox_matmul_layout_cpu_v310.json` is absent.
+matmul, operand layouts, CPU-only build, from `refbox_matmul_layout_cpu_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | time vs own C | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| matmul | float32 | 64x64x64 | c | - | 6 | 3/3 | 9.15 us | 168 ns | 9.03 us | 5.21 us | 38.4 ns | 5.08 us | 1.76x | - | >= 1.50x NumPy | met |
+| matmul | float32 | 64x64x64 | at_b | - | 6 | 3/3 | 9.86 us | 87.3 ns | 9.71 us | 5.32 us | 113 ns | 5.17 us | 1.84x | +2.2% | >= 1.50x NumPy; within 10% of own C-layout time | met |
+| matmul | float32 | 64x64x64 | a_bt | - | 6 | 3/3 | 9.21 us | 64.0 ns | 9.09 us | 5.59 us | 185 ns | 5.50 us | 1.64x | +7.3% | >= 1.50x NumPy; within 10% of own C-layout time | met |
+| matmul | float32 | 64x64x64 | ff | - | 6 | 3/3 | 9.83 us | 101 ns | 9.74 us | 5.61 us | 125 ns | 5.52 us | 1.76x | +7.7% | >= 1.50x NumPy; within 10% of own C-layout time | met |
+| matmul | float32 | 512x512x512 | c | - | 6 | 2/3 | 799 us | 25.7 us | 772 us | 506 us | 10.2 us | 487 us | 1.58x | - | >= 1.05x NumPy | met |
+| matmul | float32 | 512x512x512 | at_b | - | 6 | 1/3 | 817 us | 21.5 us | 788 us | 524 us | 8.66 us | 507 us | 1.56x | +3.5% | >= 1.05x NumPy; within 10% of own C-layout time | met |
+| matmul | float32 | 512x512x512 | a_bt | - | 6 | 0/3 | - | - | - | - | - | - | noisy | noisy | >= 1.05x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 512x512x512 | ff | - | 6 | 0/3 | - | - | - | - | - | - | noisy | noisy | >= 1.05x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 1000x333x750 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | - | >= 1.00x NumPy | noisy |
+| matmul | float32 | 1000x333x750 | at_b | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 1000x333x750 | a_bt | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 1000x333x750 | ff | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 4096x256x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | - | >= 1.00x NumPy | noisy |
+| matmul | float32 | 4096x256x256 | at_b | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 4096x256x256 | a_bt | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 4096x256x256 | ff | - | 6 | 1/1 | 1.65 ms | 66.6 us | 1.61 ms | 1.01 ms | 19.9 us | 992 us | 1.63x | - | >= 1.00x NumPy; within 10% of own C-layout time | reference noisy |
+| matmul | float32 | 2048x2048x2048 | c | - | 6 | 1/1 | 36.7 ms | 1.38 ms | 34.5 ms | 32.3 ms | 764 us | 31.4 ms | 1.14x | - | >= 0.97x NumPy | met |
+| matmul | float32 | 2048x2048x2048 | at_b | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 0.97x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 2048x2048x2048 | a_bt | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 0.97x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float32 | 2048x2048x2048 | ff | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 0.97x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 64x64x64 | c | - | 6 | 3/3 | 15.1 us | 121 ns | 14.9 us | 6.73 us | 307 ns | 6.40 us | 2.25x | - | >= 1.50x NumPy | met |
+| matmul | float64 | 64x64x64 | at_b | - | 6 | 3/3 | 16.4 us | 254 ns | 16.2 us | 7.99 us | 188 ns | 6.86 us | 2.05x | +18.7% | >= 1.50x NumPy; within 10% of own C-layout time | deferred |
+| matmul | float64 | 64x64x64 | a_bt | - | 6 | 3/3 | 15.0 us | 168 ns | 14.8 us | 6.60 us | 193 ns | 6.20 us | 2.27x | -1.8% | >= 1.50x NumPy; within 10% of own C-layout time | met |
+| matmul | float64 | 64x64x64 | ff | - | 6 | 3/3 | 16.3 us | 89.7 ns | 16.2 us | 7.18 us | 133 ns | 6.80 us | 2.27x | +6.7% | >= 1.50x NumPy; within 10% of own C-layout time | met |
+| matmul | float64 | 512x512x512 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | - | >= 1.05x NumPy | noisy |
+| matmul | float64 | 512x512x512 | at_b | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.05x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 512x512x512 | a_bt | - | 6 | 1/1 | 1.52 ms | 46.3 us | 1.46 ms | 1.07 ms | 29.7 us | 1.02 ms | 1.42x | - | >= 1.05x NumPy; within 10% of own C-layout time | reference noisy |
+| matmul | float64 | 512x512x512 | ff | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.05x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 1000x333x750 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | - | >= 1.00x NumPy | noisy |
+| matmul | float64 | 1000x333x750 | at_b | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 1000x333x750 | a_bt | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 1000x333x750 | ff | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 4096x256x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | - | >= 1.00x NumPy | noisy |
+| matmul | float64 | 4096x256x256 | at_b | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 4096x256x256 | a_bt | - | 6 | 1/1 | 3.11 ms | 59.9 us | 3.03 ms | 2.15 ms | 49.4 us | 2.06 ms | 1.45x | - | >= 1.00x NumPy; within 10% of own C-layout time | reference noisy |
+| matmul | float64 | 4096x256x256 | ff | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 1.00x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 2048x2048x2048 | c | - | 6 | 1/1 | 77.1 ms | 3.35 ms | 74.0 ms | 67.4 ms | 1.71 ms | 64.7 ms | 1.14x | - | >= 0.97x NumPy | met |
+| matmul | float64 | 2048x2048x2048 | at_b | - | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | >= 0.97x NumPy; within 10% of own C-layout time | noisy |
+| matmul | float64 | 2048x2048x2048 | a_bt | - | 6 | 1/1 | 77.7 ms | 2.21 ms | 74.0 ms | 67.9 ms | 1.47 ms | 64.3 ms | 1.14x | +0.7% | >= 0.97x NumPy; within 10% of own C-layout time | met |
+| matmul | float64 | 2048x2048x2048 | ff | - | 6 | 1/1 | 77.7 ms | 3.40 ms | 74.9 ms | 68.1 ms | 1.35 ms | 65.0 ms | 1.14x | +1.0% | >= 0.97x NumPy; within 10% of own C-layout time | met |
 <!-- /report:matrix_matmul_layout_cpu -->
 
 ### transpose
 
 <!-- report:matrix_transpose_cpu -->
-Not measured: `benchmarks/results/refbox_transpose_cpu_v310.json` is absent.
+transpose, CPU-only build, from `refbox_transpose_cpu_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| transpose | float32 | 8x8 | c | - | 6 | 1/1 | 458 ns | 11.6 ns | 453 ns | 256 ns | 7.50 ns | 253 ns | 1.79x | >= 2.00x NumPy | deferred |
+| transpose | float32 | 32x32 | c | - | 6 | 1/1 | 1.18 us | 16.3 ns | 1.18 us | 413 ns | 6.31 ns | 403 ns | 2.86x | >= 2.00x NumPy | met |
+| transpose | float32 | 64x64 | c | - | 6 | 2/3 | 2.57 us | 49.3 ns | 2.48 us | 1.12 us | 53.3 ns | 1.01 us | 2.29x | >= 2.00x NumPy | met |
+| transpose | float32 | 128x128 | c | - | 6 | 1/1 | 11.6 us | 82.8 ns | 11.4 us | 1.81 us | 88.5 ns | 1.73 us | 6.40x | >= 2.00x NumPy | met |
+| transpose | float32 | 256x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 2.00x NumPy | noisy |
+| transpose | float32 | 512x512 | c | - | 6 | 1/1 | 540 us | 8.37 us | 525 us | 17.1 us | 651 ns | 16.4 us | 31.62x | >= 4.00x NumPy | met |
+| transpose | float32 | 4096x64 | c | - | 6 | 1/1 | 559 us | 5.57 us | 548 us | 26.3 us | 688 ns | 25.4 us | 21.29x | >= 2.00x NumPy | met |
+| transpose | float32 | 1024x1024 | c | - | 6 | 1/1 | 2.21 ms | 58.6 us | 2.14 ms | 137 us | 5.75 us | 129 us | 16.17x | >= 4.00x NumPy | met |
+| transpose | float32 | 1000x3000 | c | - | 6 | 1/1 | 5.34 ms | 215 us | 5.10 ms | 1.04 ms | 25.4 us | 1.01 ms | 5.11x | >= 4.00x NumPy | met |
+| transpose | float32 | 2048x2048 | c | - | 6 | 1/3 | 43.7 ms | 1.15 ms | 41.2 ms | 1.22 ms | 30.2 us | 1.18 ms | 35.80x | >= 4.00x NumPy | met |
+| transpose | float32 | 4096x4096 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 4.00x NumPy | noisy |
+| transpose | float64 | 8x8 | c | - | 6 | 1/1 | 478 ns | 7.53 ns | 466 ns | 267 ns | 2.89 ns | 265 ns | 1.79x | >= 2.00x NumPy | deferred |
+| transpose | float64 | 32x32 | c | - | 6 | 1/1 | 1.34 us | 4.39 ns | 1.33 us | 556 ns | 18.9 ns | 549 ns | 2.41x | >= 2.00x NumPy | met |
+| transpose | float64 | 64x64 | c | - | 6 | 1/1 | 3.16 us | 29.1 ns | 3.11 us | 1.45 us | 77.3 ns | 1.36 us | 2.18x | >= 2.00x NumPy | met |
+| transpose | float64 | 128x128 | c | - | 6 | 1/1 | 13.6 us | 125 ns | 13.4 us | 2.49 us | 38.7 ns | 2.44 us | 5.44x | >= 2.00x NumPy | met |
+| transpose | float64 | 256x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 2.00x NumPy | noisy |
+| transpose | float64 | 512x512 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 4.00x NumPy | noisy |
+| transpose | float64 | 4096x64 | c | - | 6 | 1/1 | 729 us | 6.03 us | 721 us | 34.2 us | 1.21 us | 33.3 us | 21.31x | >= 2.00x NumPy | met |
+| transpose | float64 | 1024x1024 | c | - | 6 | 1/1 | 5.22 ms | 224 us | 4.88 ms | 675 us | 13.9 us | 659 us | 7.72x | >= 4.00x NumPy | met |
+| transpose | float64 | 1000x3000 | c | - | 6 | 3/3 | 9.61 ms | 434 us | 8.70 ms | 1.84 ms | 44.6 us | 1.66 ms | 5.28x | >= 4.00x NumPy | met |
+| transpose | float64 | 2048x2048 | c | - | 6 | 1/1 | 53.5 ms | 2.60 ms | 47.7 ms | 2.71 ms | 73.6 us | 2.45 ms | 19.69x | >= 4.00x NumPy | met |
+| transpose | float64 | 4096x4096 | c | - | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 4.00x NumPy | noisy |
 <!-- /report:matrix_transpose_cpu -->
 
 ### sum and mean
 
 <!-- report:matrix_reduce_cpu -->
-Not measured: `benchmarks/results/refbox_reduce_cpu_v310.json` is absent.
+sum and mean, CPU-only build, from `refbox_reduce_cpu_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| mean | float32 | 8x8 | c | axis=0 | 6 | 1/1 | 6.37 us | 37.3 ns | 6.32 us | 308 ns | 2.32 ns | 306 ns | 20.71x | >= 3.00x NumPy | met |
+| mean | float32 | 64x64 | c | axis=0 | 6 | 1/1 | 7.92 us | 54.7 ns | 7.82 us | 636 ns | 22.5 ns | 603 ns | 12.46x | >= 3.00x NumPy | met |
+| mean | float32 | 256x256 | c | axis=0 | 6 | 1/1 | 16.8 us | 114 ns | 16.6 us | 3.49 us | 75.4 ns | 3.44 us | 4.79x | >= 1.50x NumPy | met |
+| mean | float32 | 1024x1024 | c | axis=0 | 6 | 2/3 | 103 us | 1.52 us | 97.4 us | 24.9 us | 911 ns | 23.3 us | 4.14x | >= 1.50x NumPy | met |
+| mean | float32 | 16x1000000 | c | axis=0 | 6 | 1/1 | 7.34 ms | 75.1 us | 7.28 ms | 2.34 ms | 34.3 us | 2.31 ms | 3.13x | >= 1.50x NumPy | met |
+| mean | float32 | 1000000x16 | c | axis=0 | 6 | 1/1 | 16.0 ms | 427 us | 15.7 ms | 1.61 ms | 42.4 us | 1.59 ms | 9.94x | >= 1.50x NumPy | met |
+| mean | float32 | 4096x4096 | c | axis=0 | 6 | 1/1 | 4.36 ms | 105 us | 3.99 ms | 1.94 ms | 60.7 us | 1.89 ms | 2.26x | >= 1.50x NumPy | met |
+| mean | float32 | 8x8 | c | axis=1 | 6 | 1/1 | 6.52 us | 44.1 ns | 6.45 us | 306 ns | 10.4 ns | 292 ns | 21.27x | >= 3.00x NumPy | met |
+| mean | float32 | 64x64 | c | axis=1 | 6 | 1/1 | 8.25 us | 74.9 ns | 8.17 us | 749 ns | 55.0 ns | 688 ns | 11.01x | >= 3.00x NumPy | met |
+| mean | float32 | 256x256 | c | axis=1 | 6 | 1/1 | 23.3 us | 335 ns | 23.0 us | 3.63 us | 122 ns | 3.45 us | 6.42x | >= 1.50x NumPy | met |
+| mean | float32 | 1024x1024 | c | axis=1 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| mean | float32 | 16x1000000 | c | axis=1 | 6 | 1/1 | 7.91 ms | 52.1 us | 7.81 ms | 2.51 ms | 76.2 us | 2.34 ms | 3.15x | >= 1.50x NumPy | met |
+| mean | float32 | 1000000x16 | c | axis=1 | 6 | 1/1 | 14.5 ms | 346 us | 14.2 ms | 2.61 ms | 61.5 us | 2.57 ms | 5.56x | >= 1.50x NumPy | met |
+| mean | float32 | 4096x4096 | c | axis=1 | 6 | 1/1 | 8.89 ms | 92.8 us | 8.72 ms | 2.73 ms | 80.5 us | 2.34 ms | 3.26x | >= 1.50x NumPy | met |
+| mean | float32 | 8x8 | c | axis=None | 6 | 1/1 | 4.68 us | 68.4 ns | 4.64 us | 196 ns | 4.22 ns | 186 ns | 23.88x | >= 3.00x NumPy | met |
+| mean | float32 | 64x64 | c | axis=None | 6 | 1/1 | 5.95 us | 25.6 ns | 5.90 us | 679 ns | 9.80 ns | 675 ns | 8.76x | >= 3.00x NumPy | met |
+| mean | float32 | 256x256 | c | axis=None | 6 | 1/1 | 21.9 us | 96.7 ns | 21.4 us | 3.00 us | 163 ns | 2.84 us | 7.31x | >= 1.50x NumPy | met |
+| mean | float32 | 1024x1024 | c | axis=None | 6 | 1/1 | 264 us | 2.14 us | 260 us | 32.1 us | 1.83 us | 31.2 us | 8.20x | >= 1.50x NumPy | met |
+| mean | float32 | 16x1000000 | c | axis=None | 6 | 1/1 | 7.90 ms | 98.6 us | 7.85 ms | 2.50 ms | 63.6 us | 2.22 ms | 3.16x | >= 1.50x NumPy | met |
+| mean | float32 | 1000000x16 | c | axis=None | 6 | 1/1 | 7.86 ms | 40.1 us | 7.71 ms | 2.56 ms | 24.0 us | 2.33 ms | 3.06x | >= 1.50x NumPy | met |
+| mean | float32 | 4096x4096 | c | axis=None | 6 | 1/1 | 9.14 ms | 187 us | 8.97 ms | 2.61 ms | 73.2 us | 2.48 ms | 3.51x | >= 1.50x NumPy | met |
+| mean | float64 | 8x8 | c | axis=0 | 6 | 1/1 | 4.47 us | 52.9 ns | 4.39 us | 316 ns | 3.39 ns | 314 ns | 14.15x | >= 3.00x NumPy | met |
+| mean | float64 | 64x64 | c | axis=0 | 6 | 1/1 | 6.21 us | 39.9 ns | 6.08 us | 829 ns | 14.7 ns | 813 ns | 7.49x | >= 3.00x NumPy | met |
+| mean | float64 | 256x256 | c | axis=0 | 6 | 1/1 | 19.4 us | 141 ns | 18.5 us | 5.24 us | 150 ns | 5.16 us | 3.69x | >= 1.50x NumPy | met |
+| mean | float64 | 1024x1024 | c | axis=0 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| mean | float64 | 16x1000000 | c | axis=0 | 6 | 1/1 | 13.9 ms | 395 us | 12.5 ms | 4.74 ms | 193 us | 4.66 ms | 2.93x | >= 1.50x NumPy | met |
+| mean | float64 | 1000000x16 | c | axis=0 | 6 | 1/1 | 17.0 ms | 1.47 ms | 16.5 ms | 3.26 ms | 33.8 us | 3.20 ms | 5.22x | >= 1.50x NumPy | met |
+| mean | float64 | 4096x4096 | c | axis=0 | 6 | 1/1 | 9.41 ms | 279 us | 8.12 ms | 4.03 ms | 50.5 us | 3.96 ms | 2.33x | >= 1.50x NumPy | met |
+| mean | float64 | 8x8 | c | axis=1 | 6 | 1/1 | 4.40 us | 54.9 ns | 4.36 us | 305 ns | 7.87 ns | 301 ns | 14.44x | >= 3.00x NumPy | met |
+| mean | float64 | 64x64 | c | axis=1 | 6 | 1/1 | 6.22 us | 32.7 ns | 6.15 us | 945 ns | 21.4 ns | 932 ns | 6.58x | >= 3.00x NumPy | met |
+| mean | float64 | 256x256 | c | axis=1 | 6 | 1/1 | 23.7 us | 455 ns | 23.1 us | 3.27 us | 113 ns | 3.05 us | 7.26x | >= 1.50x NumPy | met |
+| mean | float64 | 1024x1024 | c | axis=1 | 6 | 1/1 | 485 us | 21.2 us | 428 us | 56.0 us | 2.02 us | 54.3 us | 8.65x | >= 1.50x NumPy | met |
+| mean | float64 | 16x1000000 | c | axis=1 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| mean | float64 | 1000000x16 | c | axis=1 | 6 | 3/3 | 15.3 ms | 142 us | 14.9 ms | 5.16 ms | 107 us | 5.06 ms | 2.97x | >= 1.50x NumPy | met |
+| mean | float64 | 4096x4096 | c | axis=1 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| mean | float64 | 8x8 | c | axis=None | 6 | 1/1 | 2.70 us | 60.0 ns | 2.66 us | 180 ns | 2.79 ns | 179 ns | 15.01x | >= 3.00x NumPy | met |
+| mean | float64 | 64x64 | c | axis=None | 6 | 1/1 | 4.13 us | 22.7 ns | 4.09 us | 865 ns | 19.5 ns | 856 ns | 4.78x | >= 3.00x NumPy | met |
+| mean | float64 | 256x256 | c | axis=None | 6 | 1/1 | 22.3 us | 327 ns | 21.5 us | 3.98 us | 146 ns | 3.79 us | 5.60x | >= 1.50x NumPy | met |
+| mean | float64 | 1024x1024 | c | axis=None | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| mean | float64 | 16x1000000 | c | axis=None | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| mean | float64 | 1000000x16 | c | axis=None | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| mean | float64 | 4096x4096 | c | axis=None | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float32 | 8x8 | c | axis=0 | 6 | 1/1 | 2.33 us | 25.5 ns | 2.30 us | 296 ns | 2.35 ns | 294 ns | 7.88x | >= 3.00x NumPy | met |
+| sum | float32 | 64x64 | c | axis=0 | 6 | 1/1 | 3.64 us | 59.6 ns | 3.57 us | 579 ns | 6.57 ns | 571 ns | 6.29x | >= 3.00x NumPy | met |
+| sum | float32 | 256x256 | c | axis=0 | 6 | 1/1 | 10.6 us | 117 ns | 10.5 us | 2.84 us | 59.7 ns | 2.78 us | 3.71x | >= 1.50x NumPy | met |
+| sum | float32 | 1024x1024 | c | axis=0 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float32 | 16x1000000 | c | axis=0 | 6 | 1/1 | 6.00 ms | 141 us | 5.56 ms | 2.04 ms | 34.7 us | 2.00 ms | 2.95x | >= 1.50x NumPy | met |
+| sum | float32 | 1000000x16 | c | axis=0 | 6 | 1/1 | 16.0 ms | 605 us | 15.8 ms | 1.62 ms | 72.3 us | 1.57 ms | 9.86x | >= 1.50x NumPy | met |
+| sum | float32 | 4096x4096 | c | axis=0 | 6 | 1/1 | 4.41 ms | 121 us | 3.89 ms | 1.91 ms | 35.4 us | 1.89 ms | 2.30x | >= 1.50x NumPy | met |
+| sum | float32 | 8x8 | c | axis=1 | 6 | 1/1 | 2.32 us | 22.8 ns | 2.28 us | 286 ns | 1.71 ns | 285 ns | 8.09x | >= 3.00x NumPy | met |
+| sum | float32 | 64x64 | c | axis=1 | 6 | 1/1 | 3.74 us | 10.9 ns | 3.68 us | 634 ns | 15.0 ns | 626 ns | 5.90x | >= 3.00x NumPy | met |
+| sum | float32 | 256x256 | c | axis=1 | 6 | 1/1 | 17.9 us | 111 ns | 17.7 us | 3.52 us | 63.5 ns | 3.36 us | 5.09x | >= 1.50x NumPy | met |
+| sum | float32 | 1024x1024 | c | axis=1 | 6 | 1/1 | 249 us | 722 ns | 247 us | 30.0 us | 726 ns | 29.2 us | 8.31x | >= 1.50x NumPy | met |
+| sum | float32 | 16x1000000 | c | axis=1 | 6 | 1/1 | 7.88 ms | 41.1 us | 7.75 ms | 2.53 ms | 61.6 us | 2.17 ms | 3.11x | >= 1.50x NumPy | met |
+| sum | float32 | 1000000x16 | c | axis=1 | 6 | 1/1 | 12.8 ms | 222 us | 12.7 ms | 2.30 ms | 53.4 us | 2.24 ms | 5.55x | >= 1.50x NumPy | met |
+| sum | float32 | 4096x4096 | c | axis=1 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float32 | 8x8 | c | axis=None | 6 | 1/1 | 1.53 us | 38.9 ns | 1.51 us | 182 ns | 1.72 ns | 178 ns | 8.45x | >= 3.00x NumPy | met |
+| sum | float32 | 64x64 | c | axis=None | 6 | 3/3 | 2.64 us | 52.8 ns | 2.62 us | 684 ns | 26.4 ns | 673 ns | 3.86x | >= 3.00x NumPy | met |
+| sum | float32 | 256x256 | c | axis=None | 6 | 1/1 | 17.5 us | 103 ns | 17.4 us | 3.07 us | 94.4 ns | 2.95 us | 5.71x | >= 1.50x NumPy | met |
+| sum | float32 | 1024x1024 | c | axis=None | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float32 | 16x1000000 | c | axis=None | 6 | 1/1 | 7.88 ms | 73.0 us | 7.73 ms | 2.50 ms | 70.6 us | 2.31 ms | 3.15x | >= 1.50x NumPy | met |
+| sum | float32 | 1000000x16 | c | axis=None | 6 | 1/1 | 7.88 ms | 65.9 us | 7.78 ms | 2.46 ms | 84.0 us | 2.28 ms | 3.20x | >= 1.50x NumPy | met |
+| sum | float32 | 4096x4096 | c | axis=None | 6 | 1/1 | 9.11 ms | 55.5 us | 8.57 ms | 2.60 ms | 106 us | 2.33 ms | 3.50x | >= 1.50x NumPy | met |
+| sum | float64 | 8x8 | c | axis=0 | 6 | 1/1 | 2.35 us | 21.8 ns | 2.34 us | 298 ns | 8.36 ns | 294 ns | 7.89x | >= 3.00x NumPy | met |
+| sum | float64 | 64x64 | c | axis=0 | 6 | 1/1 | 3.82 us | 56.6 ns | 3.76 us | 750 ns | 28.9 ns | 728 ns | 5.10x | >= 3.00x NumPy | met |
+| sum | float64 | 256x256 | c | axis=0 | 6 | 1/1 | 17.1 us | 465 ns | 16.5 us | 5.57 us | 174 ns | 5.45 us | 3.06x | >= 1.50x NumPy | met |
+| sum | float64 | 1024x1024 | c | axis=0 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float64 | 16x1000000 | c | axis=0 | 6 | 1/1 | 13.3 ms | 367 us | 11.8 ms | 4.21 ms | 77.3 us | 4.14 ms | 3.15x | >= 1.50x NumPy | met |
+| sum | float64 | 1000000x16 | c | axis=0 | 6 | 1/1 | 16.6 ms | 463 us | 16.5 ms | 3.28 ms | 72.5 us | 3.24 ms | 5.06x | >= 1.50x NumPy | met |
+| sum | float64 | 4096x4096 | c | axis=0 | 6 | 1/1 | 9.04 ms | 179 us | 7.91 ms | 4.10 ms | 59.6 us | 3.95 ms | 2.21x | >= 1.50x NumPy | met |
+| sum | float64 | 8x8 | c | axis=1 | 6 | 1/1 | 2.33 us | 26.7 ns | 2.30 us | 296 ns | 6.09 ns | 294 ns | 7.86x | >= 3.00x NumPy | met |
+| sum | float64 | 64x64 | c | axis=1 | 6 | 1/1 | 3.84 us | 36.5 ns | 3.81 us | 841 ns | 8.56 ns | 832 ns | 4.57x | >= 3.00x NumPy | met |
+| sum | float64 | 256x256 | c | axis=1 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float64 | 1024x1024 | c | axis=1 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float64 | 16x1000000 | c | axis=1 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float64 | 1000000x16 | c | axis=1 | 6 | 1/1 | 14.6 ms | 313 us | 14.4 ms | 4.74 ms | 107 us | 4.64 ms | 3.08x | >= 1.50x NumPy | met |
+| sum | float64 | 4096x4096 | c | axis=1 | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float64 | 8x8 | c | axis=None | 6 | 1/1 | 1.56 us | 6.78 ns | 1.55 us | 180 ns | 3.96 ns | 177 ns | 8.64x | >= 3.00x NumPy | met |
+| sum | float64 | 64x64 | c | axis=None | 6 | 1/1 | 2.77 us | 34.7 ns | 2.75 us | 905 ns | 11.1 ns | 898 ns | 3.06x | >= 3.00x NumPy | met |
+| sum | float64 | 256x256 | c | axis=None | 6 | 1/1 | 21.1 us | 104 ns | 20.8 us | 3.93 us | 105 ns | 3.81 us | 5.35x | >= 1.50x NumPy | met |
+| sum | float64 | 1024x1024 | c | axis=None | 6 | 1/1 | 449 us | 15.5 us | 430 us | 52.1 us | 1.69 us | 50.0 us | 8.61x | >= 1.50x NumPy | met |
+| sum | float64 | 16x1000000 | c | axis=None | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float64 | 1000000x16 | c | axis=None | 6 | 0/1 | - | - | - | - | - | - | noisy | >= 1.50x NumPy | noisy |
+| sum | float64 | 4096x4096 | c | axis=None | 6 | 1/3 | 23.2 ms | 136 us | 19.9 ms | 6.85 ms | 172 us | 6.04 ms | 3.39x | >= 1.50x NumPy | met |
 <!-- /report:matrix_reduce_cpu -->
 
 ### Fused elementwise operations
@@ -181,19 +499,165 @@ allocation work: `out=` to the preallocated sequence, a new output to the
 expression. Both ratios are reported either way.
 
 <!-- report:matrix_fused_cpu -->
-Not measured: `benchmarks/results/refbox_fused_cpu_v310.json` is absent.
+fused elementwise ops, CPU-only build, from `refbox_fused_cpu_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | NumPy prealloc median | NumPy prealloc IQR | NumPy prealloc min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | ratio vs prealloc | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| axpby | float32 | 8x8 | c | alloc | 6 | 1/1 | 1.79 us | 17.1 ns | 1.78 us | 1.76 us | 79.2 ns | 1.69 us | 345 ns | 6.64 ns | 340 ns | 5.20x | 5.12x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float32 | 32x32 | c | alloc | 6 | 1/1 | 2.71 us | 88.3 ns | 2.64 us | 2.37 us | 84.6 ns | 2.29 us | 496 ns | 5.29 ns | 489 ns | 5.47x | 4.79x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float32 | 128x128 | c | alloc | 6 | 1/1 | 10.2 us | 644 ns | 9.55 us | 7.25 us | 64.1 ns | 7.20 us | 1.88 us | 65.3 ns | 1.83 us | 5.44x | 3.85x | >= 2.00x NumPy | met |
+| axpby | float32 | 512x512 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| axpby | float32 | 1024x1024 | c | alloc | 6 | 0/3 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| axpby | float32 | 2896x2896 | c | alloc | 6 | 1/1 | 24.6 ms | 356 us | 24.1 ms | 11.2 ms | 253 us | 10.2 ms | 2.73 ms | 45.4 us | 2.66 ms | 9.00x | 4.11x | >= 2.00x NumPy | met |
+| axpby | float32 | 5793x5793 | c | alloc | 6 | 1/1 | 114 ms | 4.33 ms | 109 ms | 45.9 ms | 843 us | 41.6 ms | 11.7 ms | 388 us | 11.4 ms | 9.69x | 3.92x | >= 2.00x NumPy | met |
+| axpby | float32 | 8x8 | c | out | 6 | 1/1 | 1.78 us | 34.9 ns | 1.77 us | 1.76 us | 9.50 ns | 1.75 us | 226 ns | 3.30 ns | 221 ns | 7.90x | 7.79x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float32 | 32x32 | c | out | 6 | 1/1 | 2.66 us | 13.6 ns | 2.64 us | 2.36 us | 18.8 ns | 2.34 us | 319 ns | 7.58 ns | 313 ns | 8.33x | 7.40x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float32 | 128x128 | c | out | 6 | 1/1 | 9.94 us | 136 ns | 9.59 us | 7.24 us | 56.3 ns | 7.04 us | 1.42 us | 25.9 ns | 1.40 us | 6.98x | 5.08x | >= 2.00x NumPy, preallocated | met |
+| axpby | float32 | 512x512 | c | out | 6 | 1/1 | 648 us | 9.43 us | 635 us | 110 us | 680 ns | 109 us | 13.9 us | 370 ns | 13.5 us | 46.78x | 7.97x | >= 2.00x NumPy, preallocated | met |
+| axpby | float32 | 1024x1024 | c | out | 6 | 0/3 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy, preallocated | noisy |
+| axpby | float32 | 2896x2896 | c | out | 6 | 1/1 | 27.0 ms | 576 us | 26.8 ms | 11.4 ms | 196 us | 10.4 ms | 2.72 ms | 73.0 us | 2.64 ms | 9.94x | 4.21x | >= 2.00x NumPy, preallocated | met |
+| axpby | float32 | 5793x5793 | c | out | 6 | 1/1 | 119 ms | 2.34 ms | 115 ms | 45.5 ms | 849 us | 41.7 ms | 11.7 ms | 327 us | 11.2 ms | 10.14x | 3.89x | >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 8x8 | c | alloc | 6 | 1/1 | 1.79 us | 12.9 ns | 1.78 us | 1.79 us | 26.3 ns | 1.76 us | 352 ns | 3.13 ns | 351 ns | 5.08x | 5.08x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 32x32 | c | alloc | 6 | 1/1 | 3.10 us | 23.4 ns | 3.07 us | 2.74 us | 54.3 ns | 2.69 us | 714 ns | 13.5 ns | 700 ns | 4.34x | 3.83x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 128x128 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| axpby | float64 | 512x512 | c | alloc | 6 | 1/1 | 1.76 ms | 32.4 us | 1.75 ms | 270 us | 10.5 us | 257 us | 29.1 us | 537 ns | 28.4 us | 60.64x | 9.28x | >= 2.00x NumPy | met |
+| axpby | float64 | 1024x1024 | c | alloc | 6 | 1/1 | 6.22 ms | 47.2 us | 6.18 ms | 2.35 ms | 54.0 us | 2.26 ms | 487 us | 16.5 us | 473 us | 12.77x | 4.82x | >= 2.00x NumPy | met |
+| axpby | float64 | 2896x2896 | c | alloc | 6 | 1/1 | 56.0 ms | 848 us | 55.4 ms | 22.5 ms | 601 us | 20.7 ms | 5.65 ms | 116 us | 5.51 ms | 9.92x | 3.98x | >= 2.00x NumPy | met |
+| axpby | float64 | 5793x5793 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| axpby | float64 | 8x8 | c | out | 6 | 1/1 | 1.80 us | 14.7 ns | 1.78 us | 1.77 us | 48.2 ns | 1.74 us | 232 ns | 9.48 ns | 228 ns | 7.75x | 7.62x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 32x32 | c | out | 6 | 1/1 | 3.10 us | 34.4 ns | 3.08 us | 2.77 us | 34.3 ns | 2.74 us | 430 ns | 3.58 ns | 422 ns | 7.22x | 6.45x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 128x128 | c | out | 6 | 1/1 | 18.5 us | 278 ns | 18.1 us | 15.5 us | 404 ns | 15.2 us | 1.78 us | 26.5 ns | 1.74 us | 10.41x | 8.72x | >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 512x512 | c | out | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy, preallocated | noisy |
+| axpby | float64 | 1024x1024 | c | out | 6 | 1/1 | 6.20 ms | 54.3 us | 6.13 ms | 2.52 ms | 38.0 us | 2.49 ms | 480 us | 21.3 us | 469 us | 12.91x | 5.24x | >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 2896x2896 | c | out | 6 | 1/1 | 58.8 ms | 4.49 ms | 54.2 ms | 23.0 ms | 576 us | 20.7 ms | 5.62 ms | 119 us | 5.50 ms | 10.47x | 4.09x | >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 5793x5793 | c | out | 6 | 1/1 | 229 ms | 5.52 ms | 226 ms | 91.0 ms | 1.89 ms | 84.2 ms | 22.9 ms | 503 us | 22.4 ms | 10.00x | 3.97x | >= 2.00x NumPy, preallocated | met |
+| fma3 | float32 | 8x8 | c | alloc | 6 | 1/1 | 901 ns | 5.28 ns | 895 ns | 961 ns | 8.41 ns | 952 ns | 329 ns | 2.00 ns | 325 ns | 2.74x | 2.92x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | deferred |
+| fma3 | float32 | 32x32 | c | alloc | 6 | 1/1 | 1.43 us | 41.8 ns | 1.41 us | 1.29 us | 9.82 ns | 1.28 us | 491 ns | 5.32 ns | 484 ns | 2.92x | 2.63x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | deferred |
+| fma3 | float32 | 128x128 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| fma3 | float32 | 512x512 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| fma3 | float32 | 1024x1024 | c | alloc | 6 | 1/3 | 2.31 ms | 123 us | 2.22 ms | 666 us | 10.1 us | 628 us | 228 us | 7.64 us | 217 us | 10.13x | 2.92x | >= 2.00x NumPy | met |
+| fma3 | float32 | 2896x2896 | c | alloc | 6 | 1/1 | 18.6 ms | 989 us | 17.6 ms | 8.81 ms | 218 us | 8.17 ms | 3.79 ms | 136 us | 3.65 ms | 4.91x | 2.33x | >= 2.00x NumPy | met |
+| fma3 | float32 | 5793x5793 | c | alloc | 6 | 1/1 | 81.2 ms | 5.94 ms | 75.0 ms | 36.5 ms | 643 us | 32.0 ms | 16.0 ms | 468 us | 15.4 ms | 5.09x | 2.29x | >= 2.00x NumPy | met |
+| fma3 | float32 | 8x8 | c | out | 6 | 1/1 | 907 ns | 33.6 ns | 897 ns | 1.01 us | 9.99 ns | 1.00 us | 212 ns | 6.28 ns | 211 ns | 4.28x | 4.76x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| fma3 | float32 | 32x32 | c | out | 6 | 1/1 | 1.43 us | 13.8 ns | 1.42 us | 1.36 us | 55.4 ns | 1.31 us | 305 ns | 3.57 ns | 301 ns | 4.71x | 4.46x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| fma3 | float32 | 128x128 | c | out | 6 | 1/1 | 7.26 us | 323 ns | 7.01 us | 5.29 us | 20.6 ns | 5.21 us | 1.44 us | 73.6 ns | 1.38 us | 5.04x | 3.67x | >= 2.00x NumPy, preallocated | met |
+| fma3 | float32 | 512x512 | c | out | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy, preallocated | noisy |
+| fma3 | float32 | 1024x1024 | c | out | 6 | 1/3 | 2.22 ms | 15.6 us | 2.20 ms | 647 us | 19.5 us | 628 us | 223 us | 7.32 us | 213 us | 9.94x | 2.90x | >= 2.00x NumPy, preallocated | met |
+| fma3 | float32 | 2896x2896 | c | out | 6 | 1/1 | 18.7 ms | 257 us | 18.3 ms | 8.95 ms | 207 us | 7.79 ms | 3.76 ms | 95.0 us | 3.67 ms | 4.96x | 2.38x | >= 2.00x NumPy, preallocated | met |
+| fma3 | float32 | 5793x5793 | c | out | 6 | 1/1 | 82.4 ms | 844 us | 80.8 ms | 36.4 ms | 455 us | 32.3 ms | 15.9 ms | 351 us | 15.3 ms | 5.17x | 2.28x | >= 2.00x NumPy, preallocated | met |
+| fma3 | float64 | 8x8 | c | alloc | 6 | 1/1 | 886 ns | 8.09 ns | 877 ns | 934 ns | 18.6 ns | 922 ns | 331 ns | 4.21 ns | 324 ns | 2.68x | 2.83x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | deferred |
+| fma3 | float64 | 32x32 | c | alloc | 6 | 1/1 | 1.78 us | 17.4 ns | 1.76 us | 1.49 us | 23.8 ns | 1.47 us | 698 ns | 23.0 ns | 686 ns | 2.55x | 2.13x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | deferred |
+| fma3 | float64 | 128x128 | c | alloc | 6 | 1/1 | 14.2 us | 128 ns | 13.9 us | 11.9 us | 204 ns | 11.7 us | 2.31 us | 94.0 ns | 2.22 us | 6.15x | 5.17x | >= 2.00x NumPy | met |
+| fma3 | float64 | 512x512 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| fma3 | float64 | 1024x1024 | c | alloc | 6 | 1/1 | 4.36 ms | 42.3 us | 4.32 ms | 1.74 ms | 50.3 us | 1.56 ms | 747 us | 18.7 us | 718 us | 5.84x | 2.33x | >= 2.00x NumPy | met |
+| fma3 | float64 | 2896x2896 | c | alloc | 6 | 1/1 | 38.4 ms | 682 us | 37.9 ms | 18.1 ms | 423 us | 15.9 ms | 7.74 ms | 175 us | 7.53 ms | 4.97x | 2.34x | >= 2.00x NumPy | met |
+| fma3 | float64 | 5793x5793 | c | alloc | 6 | 1/1 | 159 ms | 2.30 ms | 152 ms | 72.6 ms | 986 us | 68.9 ms | 47.0 ms | 688 us | 46.4 ms | 3.39x | 1.54x | >= 2.00x NumPy | met |
+| fma3 | float64 | 8x8 | c | out | 6 | 1/1 | 889 ns | 11.4 ns | 880 ns | 941 ns | 34.8 ns | 927 ns | 208 ns | 2.48 ns | 207 ns | 4.27x | 4.52x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| fma3 | float64 | 32x32 | c | out | 6 | 1/1 | 1.82 us | 15.0 ns | 1.79 us | 1.58 us | 37.4 ns | 1.55 us | 492 ns | 8.37 ns | 486 ns | 3.69x | 3.21x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| fma3 | float64 | 128x128 | c | out | 6 | 1/1 | 14.2 us | 205 ns | 13.9 us | 11.6 us | 133 ns | 11.5 us | 1.90 us | 38.4 ns | 1.80 us | 7.48x | 6.13x | >= 2.00x NumPy, preallocated | met |
+| fma3 | float64 | 512x512 | c | out | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy, preallocated | noisy |
+| fma3 | float64 | 1024x1024 | c | out | 6 | 1/1 | 4.33 ms | 43.2 us | 4.28 ms | 1.81 ms | 94.9 us | 1.62 ms | 737 us | 13.5 us | 715 us | 5.88x | 2.46x | >= 2.00x NumPy, preallocated | met |
+| fma3 | float64 | 2896x2896 | c | out | 6 | 1/1 | 40.5 ms | 483 us | 40.1 ms | 18.1 ms | 192 us | 17.6 ms | 7.71 ms | 136 us | 7.49 ms | 5.26x | 2.35x | >= 2.00x NumPy, preallocated | met |
+| fma3 | float64 | 5793x5793 | c | out | 6 | 1/1 | 166 ms | 1.94 ms | 163 ms | 72.8 ms | 725 us | 64.8 ms | 32.0 ms | 518 us | 30.3 ms | 5.18x | 2.27x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float32 | 8x8 | c | alloc | 6 | 1/1 | 1.35 us | 31.2 ns | 1.34 us | 1.35 us | 37.6 ns | 1.32 us | 315 ns | 8.60 ns | 310 ns | 4.27x | 4.28x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float32 | 32x32 | c | alloc | 6 | 1/1 | 2.09 us | 16.7 ns | 2.07 us | 1.88 us | 21.2 ns | 1.86 us | 474 ns | 5.19 ns | 469 ns | 4.40x | 3.98x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float32 | 128x128 | c | alloc | 6 | 1/1 | 8.58 us | 296 ns | 8.34 us | 7.41 us | 66.4 ns | 7.32 us | 1.78 us | 46.6 ns | 1.73 us | 4.81x | 4.16x | >= 2.00x NumPy | met |
+| scaled_relu | float32 | 512x512 | c | alloc | 6 | 1/1 | 441 us | 4.62 us | 432 us | 107 us | 798 ns | 105 us | 10.8 us | 332 ns | 10.3 us | 40.97x | 9.93x | >= 2.00x NumPy | met |
+| scaled_relu | float32 | 1024x1024 | c | alloc | 6 | 1/3 | 1.98 ms | 44.3 us | 1.92 ms | 461 us | 3.49 us | 457 us | 86.6 us | 5.68 us | 80.7 us | 22.91x | 5.32x | >= 2.00x NumPy | met |
+| scaled_relu | float32 | 2896x2896 | c | alloc | 6 | 1/1 | 15.7 ms | 307 us | 14.3 ms | 6.67 ms | 82.7 us | 6.61 ms | 1.74 ms | 26.3 us | 1.71 ms | 8.99x | 3.82x | >= 2.00x NumPy | met |
+| scaled_relu | float32 | 5793x5793 | c | alloc | 6 | 1/1 | 67.6 ms | 3.73 ms | 63.4 ms | 27.6 ms | 217 us | 27.3 ms | 7.66 ms | 270 us | 7.45 ms | 8.82x | 3.60x | >= 2.00x NumPy | met |
+| scaled_relu | float32 | 8x8 | c | out | 6 | 1/1 | 1.40 us | 42.7 ns | 1.36 us | 1.38 us | 33.0 ns | 1.36 us | 195 ns | 8.10 ns | 194 ns | 7.17x | 7.05x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float32 | 32x32 | c | out | 6 | 1/1 | 2.12 us | 43.1 ns | 2.11 us | 1.98 us | 46.9 ns | 1.95 us | 289 ns | 7.38 ns | 286 ns | 7.35x | 6.84x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float32 | 128x128 | c | out | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy, preallocated | noisy |
+| scaled_relu | float32 | 512x512 | c | out | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy, preallocated | noisy |
+| scaled_relu | float32 | 1024x1024 | c | out | 6 | 1/3 | 1.96 ms | 40.3 us | 1.90 ms | 461 us | 3.77 us | 457 us | 41.6 us | 1.36 us | 39.5 us | 47.03x | 11.08x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float32 | 2896x2896 | c | out | 6 | 1/1 | 16.7 ms | 246 us | 15.4 ms | 6.89 ms | 151 us | 6.79 ms | 1.73 ms | 28.7 us | 1.69 ms | 9.69x | 4.00x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float32 | 5793x5793 | c | out | 6 | 1/1 | 73.1 ms | 1.94 ms | 72.3 ms | 27.7 ms | 301 us | 27.3 ms | 7.52 ms | 155 us | 7.28 ms | 9.71x | 3.68x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 8x8 | c | alloc | 6 | 1/1 | 1.43 us | 5.72 ns | 1.42 us | 1.40 us | 12.4 ns | 1.39 us | 334 ns | 4.69 ns | 329 ns | 4.30x | 4.18x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 32x32 | c | alloc | 6 | 1/1 | 2.53 us | 27.2 ns | 2.49 us | 2.27 us | 14.5 ns | 2.26 us | 607 ns | 3.28 ns | 603 ns | 4.17x | 3.74x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 128x128 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| scaled_relu | float64 | 512x512 | c | alloc | 6 | 1/1 | 874 us | 3.62 us | 868 us | 181 us | 2.34 us | 180 us | 21.2 us | 783 ns | 20.2 us | 41.15x | 8.54x | >= 2.00x NumPy | met |
+| scaled_relu | float64 | 1024x1024 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| scaled_relu | float64 | 2896x2896 | c | alloc | 6 | 1/1 | 35.6 ms | 1.08 ms | 34.9 ms | 12.8 ms | 148 us | 12.7 ms | 3.63 ms | 64.9 us | 3.58 ms | 9.80x | 3.51x | >= 2.00x NumPy | met |
+| scaled_relu | float64 | 5793x5793 | c | alloc | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | noisy | >= 2.00x NumPy | noisy |
+| scaled_relu | float64 | 8x8 | c | out | 6 | 1/1 | 1.39 us | 13.0 ns | 1.38 us | 1.38 us | 13.7 ns | 1.36 us | 196 ns | 1.16 ns | 195 ns | 7.09x | 7.01x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 32x32 | c | out | 6 | 1/1 | 2.44 us | 39.9 ns | 2.42 us | 2.24 us | 36.2 ns | 2.21 us | 372 ns | 15.2 ns | 366 ns | 6.54x | 6.03x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 128x128 | c | out | 6 | 1/1 | 14.8 us | 692 ns | 14.1 us | 12.6 us | 46.8 ns | 12.5 us | 1.75 us | 34.4 ns | 1.71 us | 8.49x | 7.19x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 512x512 | c | out | 6 | 1/1 | 863 us | 2.88 us | 856 us | 183 us | 4.04 us | 180 us | 20.4 us | 512 ns | 19.5 us | 42.24x | 8.96x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 1024x1024 | c | out | 6 | 1/1 | 3.89 ms | 88.0 us | 3.74 ms | 1.26 ms | 11.0 us | 1.24 ms | 213 us | 6.78 us | 209 us | 18.22x | 5.92x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 2896x2896 | c | out | 6 | 1/1 | 38.4 ms | 1.77 ms | 34.5 ms | 13.4 ms | 226 us | 13.0 ms | 3.68 ms | 55.8 us | 3.63 ms | 10.45x | 3.64x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 5793x5793 | c | out | 6 | 1/1 | 158 ms | 12.2 ms | 145 ms | 52.5 ms | 1.24 ms | 50.9 ms | 15.5 ms | 759 us | 14.8 ms | 10.18x | 3.38x | >= 2.00x NumPy, preallocated | met |
 <!-- /report:matrix_fused_cpu -->
 
 ### Per-call overhead, CPU-only build
 
 <!-- report:matrix_overhead_cpu -->
-Not measured: `benchmarks/results/refbox_overhead_cpu_v310.json` is absent.
+per-call overhead, CPU-only build, from `refbox_overhead_cpu_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | NumPy prealloc median | NumPy prealloc IQR | NumPy prealloc min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | ratio vs prealloc | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| axpby | float32 | 8x8 | c | alloc | 6 | 1/1 | 1.87 us | 57.6 ns | 1.83 us | 1.72 us | 49.8 ns | 1.70 us | 352 ns | 4.10 ns | 349 ns | 5.30x | 4.89x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float32 | 8x8 | c | out | 6 | 1/1 | 1.87 us | 35.1 ns | 1.85 us | 1.71 us | 16.5 ns | 1.69 us | 214 ns | 1.79 ns | 213 ns | 8.74x | 7.98x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 8x8 | c | alloc | 6 | 1/1 | 1.89 us | 87.2 ns | 1.87 us | 1.76 us | 40.5 ns | 1.73 us | 365 ns | 9.48 ns | 360 ns | 5.17x | 4.81x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| axpby | float64 | 8x8 | c | out | 6 | 1/1 | 1.88 us | 8.68 ns | 1.86 us | 1.76 us | 44.1 ns | 1.73 us | 220 ns | 2.47 ns | 219 ns | 8.55x | 8.00x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| fma3 | float32 | 8x8 | c | alloc | 6 | 1/1 | 918 ns | 20.7 ns | 907 ns | 941 ns | 35.1 ns | 911 ns | 331 ns | 5.48 ns | 323 ns | 2.78x | 2.84x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | deferred |
+| fma3 | float32 | 8x8 | c | out | 6 | 1/1 | 913 ns | 3.25 ns | 907 ns | 919 ns | 6.16 ns | 910 ns | 204 ns | 2.63 ns | 201 ns | 4.48x | 4.51x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| fma3 | float64 | 8x8 | c | alloc | 6 | 1/1 | 928 ns | 14.4 ns | 922 ns | 929 ns | 21.9 ns | 922 ns | 340 ns | 2.51 ns | 334 ns | 2.73x | 2.73x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | deferred |
+| fma3 | float64 | 8x8 | c | out | 6 | 1/1 | 930 ns | 18.2 ns | 920 ns | 929 ns | 6.94 ns | 922 ns | 207 ns | 2.18 ns | 206 ns | 4.50x | 4.49x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| matmul | float32 | 1x1x1 | c | - | 6 | 1/1 | 1.12 us | 18.9 ns | 1.10 us | - | - | - | 359 ns | 2.96 ns | 353 ns | 3.12x | - | >= 3.00x NumPy | met |
+| matmul | float32 | 2x2x2 | c | - | 6 | 1/1 | 1.33 us | 9.33 ns | 1.32 us | - | - | - | 361 ns | 3.29 ns | 358 ns | 3.68x | - | >= 3.00x NumPy | met |
+| matmul | float32 | 4x4x4 | c | - | 6 | 1/1 | 1.28 us | 21.4 ns | 1.27 us | - | - | - | 368 ns | 2.81 ns | 365 ns | 3.49x | - | >= 3.00x NumPy | met |
+| matmul | float32 | 8x8x8 | c | - | 6 | 1/1 | 1.36 us | 38.4 ns | 1.34 us | - | - | - | 383 ns | 13.1 ns | 378 ns | 3.54x | - | >= 3.00x NumPy | met |
+| matmul | float64 | 1x1x1 | c | - | 6 | 1/1 | 1.12 us | 15.2 ns | 1.10 us | - | - | - | 360 ns | 8.30 ns | 356 ns | 3.10x | - | >= 3.00x NumPy | met |
+| matmul | float64 | 2x2x2 | c | - | 6 | 1/1 | 1.33 us | 14.0 ns | 1.32 us | - | - | - | 359 ns | 3.12 ns | 355 ns | 3.70x | - | >= 3.00x NumPy | met |
+| matmul | float64 | 4x4x4 | c | - | 6 | 1/1 | 1.34 us | 38.5 ns | 1.32 us | - | - | - | 357 ns | 5.55 ns | 352 ns | 3.76x | - | >= 3.00x NumPy | met |
+| matmul | float64 | 8x8x8 | c | - | 6 | 1/1 | 1.42 us | 20.0 ns | 1.40 us | - | - | - | 404 ns | 15.3 ns | 397 ns | 3.51x | - | >= 3.00x NumPy | met |
+| mean | float32 | 8x8 | c | axis=0 | 6 | 1/1 | 5.83 us | 45.0 ns | 5.76 us | - | - | - | 336 ns | 1.62 ns | 333 ns | 17.35x | - | >= 3.00x NumPy | met |
+| mean | float32 | 8x8 | c | axis=1 | 6 | 1/1 | 5.87 us | 45.3 ns | 5.80 us | - | - | - | 327 ns | 3.47 ns | 323 ns | 17.96x | - | >= 3.00x NumPy | met |
+| mean | float32 | 8x8 | c | axis=None | 6 | 1/1 | 5.05 us | 57.6 ns | 4.97 us | - | - | - | 185 ns | 6.22 ns | 183 ns | 27.34x | - | >= 3.00x NumPy | met |
+| mean | float64 | 8x8 | c | axis=0 | 6 | 1/1 | 4.53 us | 53.3 ns | 4.46 us | - | - | - | 341 ns | 4.23 ns | 337 ns | 13.28x | - | >= 3.00x NumPy | met |
+| mean | float64 | 8x8 | c | axis=1 | 6 | 1/1 | 4.56 us | 54.7 ns | 4.47 us | - | - | - | 351 ns | 10.7 ns | 335 ns | 12.97x | - | >= 3.00x NumPy | met |
+| mean | float64 | 8x8 | c | axis=None | 6 | 1/1 | 2.81 us | 42.4 ns | 2.77 us | - | - | - | 183 ns | 3.38 ns | 181 ns | 15.34x | - | >= 3.00x NumPy | met |
+| scaled_relu | float32 | 8x8 | c | alloc | 6 | 1/1 | 1.39 us | 7.60 ns | 1.38 us | 1.33 us | 21.9 ns | 1.33 us | 318 ns | 3.69 ns | 315 ns | 4.36x | 4.18x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float32 | 8x8 | c | out | 6 | 1/1 | 1.39 us | 37.1 ns | 1.38 us | 1.33 us | 42.2 ns | 1.32 us | 184 ns | 7.37 ns | 183 ns | 7.56x | 7.21x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 8x8 | c | alloc | 6 | 1/1 | 1.41 us | 6.71 ns | 1.40 us | 1.35 us | 22.6 ns | 1.35 us | 325 ns | 5.18 ns | 322 ns | 4.33x | 4.15x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| scaled_relu | float64 | 8x8 | c | out | 6 | 1/1 | 1.41 us | 5.88 ns | 1.41 us | 1.35 us | 10.0 ns | 1.35 us | 187 ns | 6.30 ns | 185 ns | 7.57x | 7.24x | >= 3.00x NumPy; >= 2.00x NumPy, preallocated | met |
+| sum | float32 | 8x8 | c | axis=0 | 6 | 1/1 | 2.36 us | 24.3 ns | 2.33 us | - | - | - | 327 ns | 2.52 ns | 324 ns | 7.21x | - | >= 3.00x NumPy | met |
+| sum | float32 | 8x8 | c | axis=1 | 6 | 1/1 | 2.38 us | 17.0 ns | 2.35 us | - | - | - | 334 ns | 16.5 ns | 317 ns | 7.12x | - | >= 3.00x NumPy | met |
+| sum | float32 | 8x8 | c | axis=None | 6 | 1/1 | 1.55 us | 11.4 ns | 1.54 us | - | - | - | 180 ns | 1.42 ns | 179 ns | 8.63x | - | >= 3.00x NumPy | met |
+| sum | float64 | 8x8 | c | axis=0 | 6 | 1/1 | 2.39 us | 10.2 ns | 2.38 us | - | - | - | 332 ns | 4.78 ns | 329 ns | 7.20x | - | >= 3.00x NumPy | met |
+| sum | float64 | 8x8 | c | axis=1 | 6 | 1/1 | 2.39 us | 36.9 ns | 2.37 us | - | - | - | 329 ns | 13.4 ns | 325 ns | 7.25x | - | >= 3.00x NumPy | met |
+| sum | float64 | 8x8 | c | axis=None | 6 | 1/1 | 1.55 us | 24.8 ns | 1.54 us | - | - | - | 178 ns | 1.97 ns | 176 ns | 8.74x | - | >= 3.00x NumPy | met |
+| transpose | float32 | 8x8 | c | - | 6 | 1/1 | 472 ns | 16.5 ns | 461 ns | - | - | - | 263 ns | 4.83 ns | 260 ns | 1.79x | - | >= 2.00x NumPy | deferred |
+| transpose | float64 | 8x8 | c | - | 6 | 1/1 | 478 ns | 4.08 ns | 470 ns | - | - | - | 263 ns | 6.68 ns | 260 ns | 1.82x | - | >= 2.00x NumPy | deferred |
 <!-- /report:matrix_overhead_cpu -->
 
 ### matmul, one thread
 
 <!-- report:matrix_gemm_1t_cpu -->
-Not measured: `benchmarks/results/refbox_gemm_1t_cpu_v310.json` is absent.
+matmul, one thread, CPU-only build, from `refbox_gemm_1t_cpu_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| matmul | float32 | 64x64x64 | c | - | 1 | 1/1 | 9.20 us | 108 ns | 9.13 us | 5.39 us | 316 ns | 5.15 us | 1.71x | - | no target |
+| matmul | float32 | 128x128x128 | c | - | 1 | 1/1 | 48.1 us | 1.80 us | 47.3 us | 42.4 us | 1.40 us | 41.9 us | 1.13x | - | no target |
+| matmul | float32 | 256x256x256 | c | - | 1 | 1/1 | 314 us | 25.7 us | 309 us | 291 us | 2.23 us | 287 us | 1.08x | - | no target |
+| matmul | float32 | 512x512x512 | c | - | 1 | 1/1 | 2.56 ms | 165 us | 2.50 ms | 2.25 ms | 28.4 us | 2.23 ms | 1.14x | - | no target |
+| matmul | float32 | 1024x1024x1024 | c | - | 1 | 1/1 | 19.0 ms | 161 us | 18.8 ms | 18.1 ms | 139 us | 18.1 ms | 1.05x | >= 0.95x NumPy | met |
+| matmul | float32 | 2048x2048x2048 | c | - | 1 | 1/1 | 147 ms | 11.8 ms | 144 ms | 144 ms | 3.41 ms | 142 ms | 1.02x | >= 0.95x NumPy | met |
+| matmul | float64 | 64x64x64 | c | - | 1 | 1/1 | 15.2 us | 343 ns | 15.0 us | 11.6 us | 124 ns | 11.5 us | 1.30x | - | no target |
+| matmul | float64 | 128x128x128 | c | - | 1 | 1/1 | 88.5 us | 1.13 us | 87.6 us | 84.5 us | 1.05 us | 82.3 us | 1.05x | - | no target |
+| matmul | float64 | 256x256x256 | c | - | 1 | 1/1 | 642 us | 53.8 us | 617 us | 619 us | 1.44 us | 614 us | 1.04x | - | no target |
+| matmul | float64 | 512x512x512 | c | - | 1 | 1/1 | 5.29 ms | 77.7 us | 5.24 ms | 4.81 ms | 156 us | 4.68 ms | 1.10x | - | no target |
+| matmul | float64 | 1024x1024x1024 | c | - | 1 | 1/1 | 40.4 ms | 375 us | 39.8 ms | 38.3 ms | 1.06 ms | 37.2 ms | 1.06x | >= 0.95x NumPy | met |
+| matmul | float64 | 2048x2048x2048 | c | - | 1 | 1/1 | 316 ms | 2.86 ms | 313 ms | 302 ms | 2.02 ms | 300 ms | 1.05x | >= 0.95x NumPy | met |
+
+**Thread scaling at n = 2048**: Peregrine's and OpenBLAS's 1-thread median divided by their 6-thread median, against the ceiling tool's FMA peak ratio between the same thread counts; the gate is 90 percent of that ratio.
+
+| dtype | Peregrine speedup | OpenBLAS speedup | FMA peak ratio | gate | status |
+|---|---|---|---|---|---|
+| float32 | - | - | 5.46x | 4.91x | noisy |
+| float64 | 4.40x | 4.08x | 5.44x | 4.89x | deferred |
 <!-- /report:matrix_gemm_1t_cpu -->
 
 ### GPU
@@ -203,7 +667,52 @@ route, the CPU route forced, and the GPU route forced with the transfers staged.
 The chart shows where the GPU route starts to win once the transfers are paid.
 
 <!-- report:matrix_gpu_cuda -->
-Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
+GPU, CUDA build, from `refbox_gpu_cuda_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+**Device-resident, Peregrine timed with CUDA events**
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | ratio vs v3.0.0 | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gpu_chain | float32 | 1024x1024 | c | device | 6 | 1/1 | 7.22 ms | 40.7 us | 7.12 ms | 155 us | 963 ns | 153 us | 46.64x | +0.0% | within 5% of v3.0.0 | met |
+| gpu_chain | float32 | 2048x2048 | c | device | 6 | 1/1 | 29.2 ms | 246 us | 28.9 ms | 596 us | 3.92 us | 591 us | 49.04x | +0.1% | within 5% of v3.0.0 | met |
+| gpu_chain | float32 | 4096x4096 | c | device | 6 | 1/1 | 142 ms | 1.12 ms | 134 ms | 2.37 ms | 24.3 us | 2.34 ms | 59.87x | -0.1% | within 5% of v3.0.0 | met |
+| gpu_chain | float32 | 4096x8192 | c | device | 6 | 1/1 | 282 ms | 1.57 ms | 279 ms | 4.74 ms | 43.9 us | 4.65 ms | 59.50x | +0.2% | within 5% of v3.0.0 | met |
+| gpu_matmul | float32 | 256x256x256 | c | device | 6 | 1/1 | 128 us | 2.83 us | 124 us | 36.7 us | 318 ns | 30.5 us | 3.48x | - | within 5% of v3.0.0 | reference noisy |
+| gpu_matmul | float32 | 512x512x512 | c | device | 6 | 1/1 | 889 us | 24.0 us | 859 us | 57.3 us | 1.03 us | 56.3 us | 15.53x | -0.2% | within 5% of v3.0.0 | met |
+| gpu_matmul | float32 | 1024x1024x1024 | c | device | 6 | 1/1 | 5.60 ms | 162 us | 5.45 ms | 402 us | 6.48 us | 392 us | 13.93x | -0.1% | within 5% of v3.0.0 | met |
+| gpu_matmul | float32 | 2048x2048x2048 | c | device | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | within 5% of v3.0.0 | noisy |
+| gpu_matmul | float32 | 4096x4096x4096 | c | device | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | within 5% of v3.0.0 | noisy |
+| gpu_matmul | float64 | 256x256x256 | c | device | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | within 5% of v3.0.0 | noisy |
+| gpu_matmul | float64 | 512x512x512 | c | device | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | within 5% of v3.0.0 | noisy |
+| gpu_matmul | float64 | 1024x1024x1024 | c | device | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | within 5% of v3.0.0 | noisy |
+| gpu_matmul | float64 | 2048x2048x2048 | c | device | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | within 5% of v3.0.0 | noisy |
+| gpu_matmul | float64 | 4096x4096x4096 | c | device | 6 | 0/1 | - | - | - | - | - | - | noisy | noisy | within 5% of v3.0.0 | noisy |
+
+**Host float32 matmul, auto route against both forced routes**
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | forced CPU median | forced GPU median | auto median | auto IQR | auto min | ratio vs NumPy | auto vs faster forced | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| matmul | float32 | 128x128x128 | c | auto | 6 | 1/1 | 56.0 us | 695 ns | 55.4 us | 17.7 us | 68.8 us | 16.1 us | 542 ns | 15.1 us | 3.48x | -8.8% | within 5% of the faster forced route | met |
+| matmul | float32 | 1x4096x4096 | c | auto | 6 | 0/1 | - | - | - | - | - | - | - | - | noisy | noisy | within 5% of the faster forced route | noisy |
+| matmul | float32 | 256x256x256 | c | auto | 6 | 0/1 | - | - | - | - | - | - | - | - | noisy | noisy | within 5% of the faster forced route | noisy |
+| matmul | float32 | 512x512x512 | c | auto | 6 | 0/1 | - | - | - | - | - | - | - | - | noisy | noisy | within 5% of the faster forced route | noisy |
+| matmul | float32 | 1024x1024x1024 | c | auto | 6 | 0/1 | - | - | - | - | - | - | - | - | noisy | noisy | within 5% of the faster forced route | noisy |
+| matmul | float32 | 4096x64x4096 | c | auto | 6 | 0/1 | - | - | - | - | - | - | - | - | noisy | noisy | within 5% of the faster forced route | noisy |
+| matmul | float32 | 2048x2048x2048 | c | auto | 6 | 0/3 | - | - | - | - | - | - | - | - | noisy | noisy | within 5% of the faster forced route; >= 5.00x NumPy | noisy |
+| matmul | float32 | 4096x4096x4096 | c | auto | 6 | 0/3 | - | - | - | - | - | - | - | - | noisy | noisy | within 5% of the faster forced route; >= 5.00x NumPy | noisy |
+
+**Transfers**
+
+| op | dtype | shape | layout | variant | threads | seeds | Peregrine median | Peregrine IQR | Peregrine min | Peregrine GB/s | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| from_device | float32 | 1024x1024 | c | - | 6 | 1/1 | 369 us | 13.8 us | 353 us | 11.4 GB/s | - | no target |
+| from_device | float32 | 2048x2048 | c | - | 6 | 1/1 | 1.41 ms | 33.1 us | 1.38 ms | 11.9 GB/s | - | no target |
+| from_device | float32 | 4096x4096 | c | - | 6 | 1/1 | 5.63 ms | 133 us | 5.55 ms | 11.9 GB/s | - | no target |
+| from_device | float32 | 4096x8192 | c | - | 6 | 0/1 | - | - | - | - | - | noisy |
+| to_device | float32 | 1024x1024 | c | - | 6 | 1/1 | 363 us | 3.39 us | 356 us | 11.6 GB/s | - | no target |
+| to_device | float32 | 2048x2048 | c | - | 6 | 1/1 | 1.47 ms | 27.0 us | 1.44 ms | 11.4 GB/s | - | no target |
+| to_device | float32 | 4096x4096 | c | - | 6 | 1/1 | 6.10 ms | 172 us | 6.00 ms | 11.0 GB/s | - | no target |
+| to_device | float32 | 4096x8192 | c | - | 6 | 1/1 | 12.4 ms | 520 us | 12.1 ms | 10.9 GB/s | - | no target |
 <!-- /report:matrix_gpu_cuda -->
 
 ![Host float32 matmul time against n for each route](../benchmarks/results/crossover.png)
@@ -211,5 +720,48 @@ Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
 ### Per-call overhead, CUDA build
 
 <!-- report:matrix_overhead_cuda -->
-Not measured: `benchmarks/results/refbox_overhead_cuda_v310.json` is absent.
+per-call overhead, CUDA build, from `refbox_overhead_cuda_v310.json`. Medians, IQRs and minimums of the timed samples (each sample is the mean of a batch of calls); both libraries at the thread count in the threads column. A ratio is the baseline's median time divided by Peregrine's; a percentage compares Peregrine with its own reference. Seeds counts the seeds that passed the CV gate; a noisy cell shows no number.
+
+| op | dtype | shape | layout | variant | threads | seeds | NumPy median | NumPy IQR | NumPy min | NumPy prealloc median | NumPy prealloc IQR | NumPy prealloc min | Peregrine median | Peregrine IQR | Peregrine min | ratio vs NumPy | ratio vs prealloc | time vs CPU-only build | target | status |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| axpby | float32 | 8x8 | c | alloc | 6 | 1/1 | 1.84 us | 13.3 ns | 1.82 us | 1.73 us | 23.8 ns | 1.71 us | 345 ns | 1.96 ns | 343 ns | 5.32x | 5.01x | -2.0% | within 5% of the CPU-only build | within 5% |
+| axpby | float32 | 8x8 | c | out | 6 | 1/1 | 1.84 us | 10.8 ns | 1.82 us | 1.72 us | 21.0 ns | 1.70 us | 218 ns | 2.14 ns | 216 ns | 8.43x | 7.92x | +1.8% | within 5% of the CPU-only build | within 5% |
+| axpby | float64 | 8x8 | c | alloc | 6 | 1/1 | 1.94 us | 25.4 ns | 1.87 us | 1.74 us | 38.0 ns | 1.71 us | 386 ns | 3.45 ns | 358 ns | 5.02x | 4.50x | +5.9% | within 5% of the CPU-only build | outside 5% |
+| axpby | float64 | 8x8 | c | out | 6 | 1/1 | 1.86 us | 43.0 ns | 1.85 us | 1.75 us | 32.3 ns | 1.71 us | 219 ns | 3.99 ns | 217 ns | 8.47x | 7.97x | -0.6% | within 5% of the CPU-only build | within 5% |
+| fma3 | float32 | 8x8 | c | alloc | 6 | 1/1 | 911 ns | 10.7 ns | 903 ns | 923 ns | 11.7 ns | 918 ns | 331 ns | 3.02 ns | 327 ns | 2.75x | 2.79x | +0.2% | within 5% of the CPU-only build | within 5% |
+| fma3 | float32 | 8x8 | c | out | 6 | 1/1 | 905 ns | 6.71 ns | 900 ns | 935 ns | 16.7 ns | 928 ns | 203 ns | 1.93 ns | 198 ns | 4.45x | 4.60x | -0.3% | within 5% of the CPU-only build | within 5% |
+| fma3 | float64 | 8x8 | c | alloc | 6 | 1/1 | 920 ns | 41.6 ns | 912 ns | 942 ns | 36.8 ns | 932 ns | 344 ns | 9.66 ns | 339 ns | 2.67x | 2.74x | +1.3% | within 5% of the CPU-only build | within 5% |
+| fma3 | float64 | 8x8 | c | out | 6 | 1/1 | 919 ns | 19.2 ns | 912 ns | 936 ns | 11.5 ns | 929 ns | 206 ns | 10.9 ns | 205 ns | 4.45x | 4.53x | -0.2% | within 5% of the CPU-only build | within 5% |
+| matmul | float32 | 1x1x1 | c | - | 6 | 1/1 | 1.09 us | 4.03 ns | 1.08 us | - | - | - | 364 ns | 2.98 ns | 360 ns | 2.99x | - | +1.3% | within 5% of the CPU-only build | within 5% |
+| matmul | float32 | 2x2x2 | c | - | 6 | 1/1 | 1.34 us | 9.69 ns | 1.33 us | - | - | - | 362 ns | 4.15 ns | 358 ns | 3.71x | - | +0.2% | within 5% of the CPU-only build | within 5% |
+| matmul | float32 | 4x4x4 | c | - | 6 | 1/1 | 1.35 us | 22.4 ns | 1.32 us | - | - | - | 370 ns | 3.09 ns | 367 ns | 3.64x | - | +0.4% | within 5% of the CPU-only build | within 5% |
+| matmul | float32 | 8x8x8 | c | - | 6 | 1/1 | 1.44 us | 61.2 ns | 1.41 us | - | - | - | 390 ns | 4.71 ns | 386 ns | 3.70x | - | +1.6% | within 5% of the CPU-only build | within 5% |
+| matmul | float32 | 16x16x16 | c | - | 6 | 1/1 | 1.69 us | 9.61 ns | 1.68 us | - | - | - | 515 ns | 14.6 ns | 508 ns | 3.28x | - | -3.4% | within 5% of the CPU-only build | within 5% |
+| matmul | float32 | 256x256x256 | c | - | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | - | noisy | within 5% of the CPU-only build | noisy |
+| matmul | float32 | 2048x2048x2048 | c | - | 6 | 0/1 | - | - | - | - | - | - | - | - | - | noisy | - | noisy | within 5% of the CPU-only build | noisy |
+| matmul | float64 | 1x1x1 | c | - | 6 | 1/1 | 1.08 us | 6.72 ns | 1.07 us | - | - | - | 365 ns | 3.69 ns | 361 ns | 2.95x | - | +1.3% | within 5% of the CPU-only build | within 5% |
+| matmul | float64 | 2x2x2 | c | - | 6 | 1/1 | 1.30 us | 4.68 ns | 1.29 us | - | - | - | 368 ns | 2.45 ns | 365 ns | 3.53x | - | +2.6% | within 5% of the CPU-only build | within 5% |
+| matmul | float64 | 4x4x4 | c | - | 6 | 1/1 | 1.33 us | 11.0 ns | 1.32 us | - | - | - | 367 ns | 3.46 ns | 358 ns | 3.63x | - | +3.0% | within 5% of the CPU-only build | within 5% |
+| matmul | float64 | 8x8x8 | c | - | 6 | 1/1 | 1.39 us | 17.8 ns | 1.37 us | - | - | - | 417 ns | 5.31 ns | 409 ns | 3.35x | - | +3.1% | within 5% of the CPU-only build | within 5% |
+| matmul | float64 | 16x16x16 | c | - | 6 | 1/1 | 1.75 us | 41.9 ns | 1.73 us | - | - | - | 668 ns | 13.2 ns | 633 ns | 2.61x | - | +9.1% | within 5% of the CPU-only build | outside 5% |
+| matmul | float64 | 256x256x256 | c | - | 6 | 1/1 | 215 us | 2.99 us | 204 us | - | - | - | 154 us | 4.40 us | 147 us | 1.39x | - | +0.4% | within 5% of the CPU-only build | within 5% |
+| matmul | float64 | 2048x2048x2048 | c | - | 6 | 1/1 | 80.0 ms | 3.15 ms | 77.3 ms | - | - | - | 70.7 ms | 923 us | 66.0 ms | 1.13x | - | +4.9% | within 5% of the CPU-only build | within 5% |
+| mean | float32 | 8x8 | c | axis=0 | 6 | 1/1 | 5.88 us | 146 ns | 5.78 us | - | - | - | 337 ns | 3.14 ns | 335 ns | 17.44x | - | +0.2% | within 5% of the CPU-only build | within 5% |
+| mean | float32 | 8x8 | c | axis=1 | 6 | 1/1 | 5.90 us | 50.4 ns | 5.86 us | - | - | - | 332 ns | 7.65 ns | 322 ns | 17.79x | - | +1.3% | within 5% of the CPU-only build | within 5% |
+| mean | float32 | 8x8 | c | axis=None | 6 | 1/1 | 5.07 us | 31.2 ns | 5.01 us | - | - | - | 183 ns | 5.93 ns | 181 ns | 27.70x | - | -1.1% | within 5% of the CPU-only build | within 5% |
+| mean | float64 | 8x8 | c | axis=0 | 6 | 1/1 | 4.54 us | 33.5 ns | 4.48 us | - | - | - | 341 ns | 4.01 ns | 338 ns | 13.29x | - | +0.1% | within 5% of the CPU-only build | within 5% |
+| mean | float64 | 8x8 | c | axis=1 | 6 | 1/1 | 4.58 us | 175 ns | 4.51 us | - | - | - | 338 ns | 10.3 ns | 335 ns | 13.53x | - | -3.7% | within 5% of the CPU-only build | within 5% |
+| mean | float64 | 8x8 | c | axis=None | 6 | 1/1 | 2.80 us | 31.2 ns | 2.77 us | - | - | - | 185 ns | 3.40 ns | 183 ns | 15.13x | - | +0.7% | within 5% of the CPU-only build | within 5% |
+| scaled_relu | float32 | 8x8 | c | alloc | 6 | 1/1 | 1.42 us | 51.0 ns | 1.38 us | 1.34 us | 8.72 ns | 1.33 us | 325 ns | 6.08 ns | 319 ns | 4.35x | 4.10x | +2.2% | within 5% of the CPU-only build | within 5% |
+| scaled_relu | float32 | 8x8 | c | out | 6 | 1/1 | 1.42 us | 51.7 ns | 1.37 us | 1.36 us | 30.4 ns | 1.33 us | 186 ns | 1.46 ns | 186 ns | 7.63x | 7.30x | +1.2% | within 5% of the CPU-only build | within 5% |
+| scaled_relu | float64 | 8x8 | c | alloc | 6 | 1/1 | 1.41 us | 6.07 ns | 1.41 us | 1.38 us | 35.5 ns | 1.36 us | 331 ns | 2.58 ns | 329 ns | 4.27x | 4.16x | +1.9% | within 5% of the CPU-only build | within 5% |
+| scaled_relu | float64 | 8x8 | c | out | 6 | 1/1 | 1.43 us | 23.1 ns | 1.42 us | 1.37 us | 49.9 ns | 1.36 us | 191 ns | 2.98 ns | 189 ns | 7.50x | 7.19x | +2.0% | within 5% of the CPU-only build | within 5% |
+| sum | float32 | 8x8 | c | axis=0 | 6 | 1/1 | 2.41 us | 36.4 ns | 2.39 us | - | - | - | 335 ns | 8.22 ns | 327 ns | 7.20x | - | +2.5% | within 5% of the CPU-only build | within 5% |
+| sum | float32 | 8x8 | c | axis=1 | 6 | 1/1 | 2.41 us | 60.9 ns | 2.40 us | - | - | - | 325 ns | 3.22 ns | 322 ns | 7.42x | - | -2.6% | within 5% of the CPU-only build | within 5% |
+| sum | float32 | 8x8 | c | axis=None | 6 | 1/1 | 1.58 us | 25.4 ns | 1.56 us | - | - | - | 183 ns | 8.47 ns | 179 ns | 8.59x | - | +2.1% | within 5% of the CPU-only build | within 5% |
+| sum | float64 | 8x8 | c | axis=0 | 6 | 1/1 | 2.41 us | 21.2 ns | 2.40 us | - | - | - | 334 ns | 2.59 ns | 331 ns | 7.22x | - | +0.5% | within 5% of the CPU-only build | within 5% |
+| sum | float64 | 8x8 | c | axis=1 | 6 | 1/1 | 2.42 us | 11.9 ns | 2.39 us | - | - | - | 330 ns | 3.50 ns | 329 ns | 7.31x | - | +0.4% | within 5% of the CPU-only build | within 5% |
+| sum | float64 | 8x8 | c | axis=None | 6 | 1/1 | 1.59 us | 11.0 ns | 1.58 us | - | - | - | 180 ns | 1.73 ns | 179 ns | 8.86x | - | +0.9% | within 5% of the CPU-only build | within 5% |
+| transpose | float32 | 8x8 | c | - | 6 | 1/1 | 466 ns | 4.27 ns | 458 ns | - | - | - | 270 ns | 7.10 ns | 262 ns | 1.73x | - | +2.5% | within 5% of the CPU-only build | within 5% |
+| transpose | float64 | 8x8 | c | - | 6 | 1/1 | 470 ns | 5.22 ns | 467 ns | - | - | - | 264 ns | 5.92 ns | 259 ns | 1.78x | - | +0.5% | within 5% of the CPU-only build | within 5% |
 <!-- /report:matrix_overhead_cuda -->
