@@ -830,10 +830,12 @@ def main(argv=None) -> int:
     mode.add_argument("--check", action="store_true", help="exit 1 if any block is stale")
     args = p.parse_args(argv)
     if args.write:
-        for rel in DOCS:
-            path, text, nl = _read(rel)
+        # Every file is rendered before any is opened for writing, so a render
+        # that raises (a loss without a reason, say) leaves the docs as they were.
+        filled = [(path, nl, fill(text)) for path, text, nl in map(_read, DOCS)]
+        for path, nl, text in filled:
             with open(path, "w", encoding="utf-8", newline=nl) as f:
-                f.write(fill(text))
+                f.write(text)
     problems = stale()
     for line in problems:
         print(line, file=sys.stderr)
