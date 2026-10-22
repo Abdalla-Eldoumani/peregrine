@@ -77,25 +77,25 @@ CLOSURES = (
              "the laptop's power limit; three approaches to the remaining synchronization cost were "
              "measured (point-to-point step counters with two B buffers, prefetch of the next B "
              "panel, and team-sized row blocks)"}),
-    (r"^matmul/float64/(12x12x12|16x16x16)/c/-/t6",
+    (r"^matmul/float(32|64)/(1x1x1|2x2x2|4x4x4|8x8x8|12x12x12|16x16x16)/c/-/t6",
      {"kind": "deferred",
-      "why": "the call is bound by fixed costs, the Python wrapper and NumPy's own allocation of the "
-             "result; three approaches were measured (a single-block mode "
-             "and vector row packing in the small kernel, a strip kernel variant, and a native "
-             "public entry, which the project's rule for promoting a function to native code did "
-             "not allow)"}),
+      "why": "the call is bound by fixed costs, the Python wrapper, the argument checks, and NumPy's "
+             "own allocation of the result; three approaches were measured (the native fast entry "
+             "with the GIL held for small products, a single-block mode and vector row packing in "
+             "the small kernel, and a native public entry, which the project's rule for promoting a "
+             "function to native code did not allow)"}),
     (r"^transpose/float(32|64)/8x8/c/-/t6",
      {"kind": "deferred",
       "why": "the call is bound by the Python wrapper and the result's allocation; three approaches "
              "were measured (lane-load tiles without threading overhead at one thread, a separate "
              "small-array path, and a native public entry, which the promotion rule did not allow)"}),
-    (r"^fma3/float(32|64)/32x32/c/alloc/t6",
+    (r"^fma3/float(32|64)/(8x8|32x32)/c/alloc/t6",
      {"kind": "deferred",
-      "why": "against the expression that also allocates, the result's own allocation takes a large "
-             "share of the call, and four float64 arrays of this size fill the L1 cache; three "
-             "approaches were measured (a one-thread path without a parallel region, a four-vector "
-             "loop with a 4K-aliasing direction, and a native public entry, which the promotion "
-             "rule did not allow)"}),
+      "why": "against the expression that also allocates, the result's own allocation and the call's "
+             "fixed cost take a large share of the time, and at 32x32 four float64 arrays fill the L1 "
+             "cache; three approaches were measured (a one-thread path without a parallel region, a "
+             "four-vector loop with a 4K-aliasing direction, and a native public entry, which the "
+             "promotion rule did not allow)"}),
     (r"^matmul/float(32|64)/64x64x64/(at_b|a_bt|ff)/-/t6",
      {"kind": "deferred",
       "why": "NumPy places these arrays at any 16-byte offset in a cache line, and that placement "
