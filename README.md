@@ -268,7 +268,7 @@ No measured cell is below 1.00x against any baseline.
 
 None.
 
-**CUDA build spot check.** The CUDA build runs the same CPU code; its host cells are compared with the CPU-only build's, and these differ by more than 5 percent. The runs were hours apart, and the cause was not isolated.
+**CUDA build spot check.** The CUDA build runs the same CPU code; its host cells are compared with the CPU-only build's, and these differ by more than 5 percent. The two builds were measured hours apart; a recheck that alternated the builds back to back on these cells found no difference beyond the run-to-run noise.
 
 - `axpby/float64/8x8/c/alloc/t6` in `refbox_overhead_cuda_v310.json` (5.9% slower than the CPU-only build)
 - `matmul/float64/16x16x16/c/-/t6` in `refbox_overhead_cuda_v310.json` (9.1% slower than the CPU-only build)
