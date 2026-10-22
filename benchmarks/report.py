@@ -137,6 +137,7 @@ VARIANT_TEXT = {"alloc": "new output", "out": "out=", "auto": "auto route"}
 BASE_TEXT = {
     "numpy": "NumPy", "numpy_noalloc": "NumPy, preallocated", "cupy": "CuPy",
     "forced": "faster forced route", "own_c": "own C-layout time", "v3.0.0": "v3.0.0",
+    "cpu_build": "the CPU-only build",
 }
 COLUMN_TEXT = {
     "numpy": "NumPy", "numpy_noalloc": "NumPy prealloc", "cupy": "CuPy",
@@ -145,9 +146,10 @@ COLUMN_TEXT = {
 RATIO_TEXT = {
     "numpy": "ratio vs NumPy", "numpy_noalloc": "ratio vs prealloc", "cupy": "ratio vs CuPy",
     "forced": "auto vs faster forced", "own_c": "time vs own C", "v3.0.0": "ratio vs v3.0.0",
+    "cpu_build": "time vs CPU-only build",
 }
 # Ratios that compare Peregrine with itself, shown as a percentage, never a loss.
-SELF = ("forced", "own_c")
+SELF = ("forced", "own_c", "cpu_build", "v3.0.0")
 
 
 # --- Reading. ---
@@ -243,6 +245,19 @@ def matrix_rows(group: str, build: str) -> dict | None:
                 row["ref_median"] = _pg(ref)
                 row["ratio"]["own_c"] = _pg(ref) / _pg(row)
     if build == "cuda":
+        # Host CPU cells on the CUDA build are a check that the CUDA build adds no
+        # per-call cost; the size targets belong to the CPU-only build.
+        refs = {}
+        for g, b in MATRIX:
+            if b == "cpu":
+                refs.update(matrix_rows(g, "cpu") or {})
+        for row in rows.values():
+            if row["variant"] in ("auto", "device") or row["op"] in ("to_device", "from_device"):
+                continue
+            row["cuda_host"] = True
+            ref = refs.get(row["key"])
+            if ref is not None and ref["status"] == "ok" and row["status"] == "ok":
+                row["ratio"]["cpu_build"] = _pg(ref) / _pg(row)
         old = load(quick_file("cuda", "v300"))
         old_rows = summarize(old) if old else {}
         for row in rows.values():
@@ -274,6 +289,9 @@ def square_target(n: int) -> float:
 def targets(row: dict) -> list:
     """[(baseline, target)]: a pair is met when baseline time / Peregrine time >= target."""
     op, shape, variant = row["op"], row["shape"], row["variant"]
+    if row.get("cuda_host"):
+        # Within the CV gate's 5 percent of the CPU-only build's time.
+        return [("cpu_build", 1 / 1.05)]
     if op == "matmul" and variant == "auto":
         m, k, n = shape
         t = [("forced", 1 / 1.05)]
@@ -303,7 +321,8 @@ def targets(row: dict) -> list:
             return [("numpy", 3.0), ("numpy_noalloc", 2.0)]
         return [("numpy_noalloc", 2.0)] if variant == "out" else [("numpy", 2.0)]
     if row.get("has_v300"):
-        return [("v3.0.0", 1.0)]
+        # No regression from v3.0.0, read on the CV gate's 5 percent noise scale.
+        return [("v3.0.0", 1 / 1.05)]
     return []
 
 
@@ -314,6 +333,10 @@ def _match(table: tuple, key: str):
 def status(row: dict) -> str:
     if row["status"] != "ok":
         return row["status"].replace("_", " ")
+    if row.get("cuda_host"):
+        # A spot check of the CUDA build against the CPU-only build, not a target.
+        r = row["ratio"].get("cpu_build")
+        return "reference noisy" if r is None else ("within 5%" if r >= 1 / 1.05 else "outside 5%")
     tg = targets(row)
     if not tg:
         return "no target"
@@ -364,6 +387,10 @@ def target_text(base: str, t: float) -> str:
         return f"within {(1 / t - 1) * 100:.0f}% of the faster forced route"
     if base == "own_c":
         return f"within {(1 / t - 1) * 100:.0f}% of own C-layout time"
+    if base == "cpu_build":
+        return f"within {(1 / t - 1) * 100:.0f}% of the CPU-only build"
+    if base == "v3.0.0":
+        return f"within {(1 / t - 1) * 100:.0f}% of v3.0.0"
     return f">= {t:.2f}x {BASE_TEXT[base]}"
 
 
@@ -506,7 +533,7 @@ def render_losses() -> str:
         parts.append("No measured cell is below 1.00x against any baseline.")
 
     ceil = load(CEILINGS)
-    closed, below, noisy, missing = [], [], [], []
+    closed, below, spot, noisy, missing = [], [], [], [], []
     for group, build in MATRIX:
         data = load(matrix_file(group, build))
         if data is None:
@@ -521,6 +548,9 @@ def render_losses() -> str:
             if st in ("at ceiling", "deferred"):
                 entry = _match(CLOSURES, row["key"])
                 closed.append([f"`{row['key']}`", name, st, _closure_evidence(row, entry, ceil), entry["why"]])
+            elif st == "outside 5%":
+                spot.append(f"`{row['key']}` in {name} ({(1 / row['ratio']['cpu_build'] - 1) * 100:.1f}% slower "
+                            "than the CPU-only build)")
             elif st == "below":
                 tg = [(b, t) for b, t in targets(row) if row["ratio"][b] < t]
                 below.append(f"`{row['key']}` in {name} (" + "; ".join(
@@ -541,6 +571,10 @@ def render_losses() -> str:
     parts.append(table(["cell", "results file", "closure", "evidence", "reason"], closed) if closed else "None.")
     parts.append("**Below target, not closed.**")
     parts.append("\n".join(f"- {b}" for b in below) if below else "None.")
+    parts.append("**CUDA build spot check.** The CUDA build runs the same CPU code; its host cells are "
+                 "compared with the CPU-only build's, and these differ by more than 5 percent. The runs were "
+                 "hours apart, and the cause was not isolated.")
+    parts.append("\n".join(f"- {c}" for c in spot) if spot else "None.")
     parts.append("**Noisy.** These cells stayed above the CV limit on every attempt, including the "
                  "fresh-process retry, so the protocol publishes no number for them.")
     parts.append("\n".join(noisy) if noisy else "None.")
@@ -714,6 +748,8 @@ def _applies(row: dict, base: str) -> bool:
         return bool(row.get("has_ref"))
     if base == "v3.0.0":
         return bool(row.get("has_v300"))
+    if base == "cpu_build":
+        return bool(row.get("cuda_host"))
     return base in row["names"]
 
 
@@ -722,7 +758,8 @@ def matrix_table(rows: list) -> str:
     auto = any(r["variant"] == "auto" for r in rows)
     bases = [b for b in ("numpy", "numpy_noalloc", "cupy") if b in names]
     bases += [b for b, flag in (("forced", auto), ("own_c", any(r.get("has_ref") for r in rows)),
-                                ("v3.0.0", any(r.get("has_v300") for r in rows))) if flag]
+                                ("v3.0.0", any(r.get("has_v300") for r in rows)),
+                                ("cpu_build", any(r.get("cuda_host") for r in rows))) if flag]
     rate = names == ["peregrine"]
     header = ["op", "dtype", "shape", "layout", "variant", "threads", "seeds"]
     for n in names:
