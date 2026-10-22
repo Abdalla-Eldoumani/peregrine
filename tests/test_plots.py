@@ -176,6 +176,20 @@ def test_a_failing_render_leaves_the_docs_untouched(tmp_path, monkeypatch):
     assert {rel: (tmp_path / rel).read_bytes() for rel in report.DOCS} == before
 
 
+def test_cuda_build_host_cells_are_held_to_the_cpu_build(synthetic):
+    # On the CUDA build a host CPU cell has no size target of its own: it is a
+    # spot check against the CPU-only build's time, and never counts as a loss.
+    cells = [((1, 1, 1), 1.04), ((2, 2, 2), 1.10)]
+    _write(synthetic, "refbox_overhead_cpu_v310.json",
+           [_cell("matmul", "float32", sh, {"peregrine": 1.0, "numpy": 3.5}) for sh, _ in cells])
+    _write(synthetic, "refbox_overhead_cuda_v310.json",
+           [_cell("matmul", "float32", sh, {"peregrine": f, "numpy": 3.5}) for sh, f in cells])
+    got = _statuses("overhead", "cuda")
+    assert got["matmul/float32/1x1x1/c/-/t6"] == "within 5%"
+    assert got["matmul/float32/2x2x2/c/-/t6"] == "outside 5%"
+    assert report.losses() == []
+
+
 def test_square_regime_boundaries(synthetic):
     # Each ratio passes under the cell's own regime and fails under the next
     # regime's target, or the reverse, so a shifted boundary flips a status.
