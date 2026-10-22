@@ -182,51 +182,42 @@ Representative cells from the full matrix. Times are medians of the timed sample
 
 | operation | dtype | shape | threads | baseline | baseline median | Peregrine median | ratio | target | status |
 |---|---|---|---|---|---|---|---|---|---|
-| matmul a @ b | float32 | 16x16x16 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float32 | 64x64x64 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float32 | 256x256x256 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float32 | 512x512x512 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float32 | 2048x2048x2048 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float64 | 16x16x16 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float64 | 64x64x64 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float64 | 256x256x256 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float64 | 512x512x512 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float64 | 2048x2048x2048 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float32 | 1x4096x4096 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float32 | 4096x64x4096 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b | float64 | 1000x333x750 | 6 | - | - | - | - | - | not measured |
-| matmul a.T @ b | float32 | 512x512x512 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b.T | float32 | 512x512x512 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b, both F-order | float32 | 512x512x512 | 6 | - | - | - | - | - | not measured |
-| transpose | float32 | 64x64 | 6 | - | - | - | - | - | not measured |
-| transpose | float32 | 2048x2048 | 6 | - | - | - | - | - | not measured |
-| transpose | float64 | 1000x3000 | 6 | - | - | - | - | - | not measured |
-| sum, axis=None | float32 | 64x64 | 6 | - | - | - | - | - | not measured |
-| sum, axis=None | float64 | 4096x4096 | 6 | - | - | - | - | - | not measured |
-| mean, axis=0 | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
-| mean, axis=1 | float64 | 1000000x16 | 6 | - | - | - | - | - | not measured |
-| axpby, new output | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
-| axpby, out= | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
-| fma3, new output | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
-| fma3, out= | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
-| scaled_relu, new output | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
-| scaled_relu, out= | float32 | 1024x1024 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b, auto route | float32 | 2048x2048x2048 | 6 | - | - | - | - | - | not measured |
-| matmul a @ b, auto route | float32 | 4096x4096x4096 | 6 | - | - | - | - | - | not measured |
-
-Not measured: `benchmarks/results/refbox_fused_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_matmul_layout_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_matmul_rect_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_matmul_square_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_reduce_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_transpose_cpu_v310.json` is absent.
+| matmul a @ b | float32 | 16x16x16 | 6 | NumPy | 1.70 us | 533 ns | 3.17x | >= 3.00x NumPy | met |
+| matmul a @ b | float32 | 64x64x64 | 6 | NumPy | 9.40 us | 5.29 us | 1.78x | >= 1.50x NumPy | met |
+| matmul a @ b | float32 | 256x256x256 | 6 | NumPy | 122 us | 76.0 us | 1.61x | >= 1.15x NumPy | met |
+| matmul a @ b | float32 | 512x512x512 | 6 | NumPy | 813 us | 519 us | 1.57x | >= 1.05x NumPy | met |
+| matmul a @ b | float32 | 2048x2048x2048 | 6 | NumPy | - | - | noisy | >= 0.97x NumPy | noisy |
+| matmul a @ b | float64 | 16x16x16 | 6 | NumPy | 1.76 us | 613 ns | 2.87x | >= 3.00x NumPy | deferred |
+| matmul a @ b | float64 | 64x64x64 | 6 | NumPy | 15.1 us | 6.98 us | 2.19x | >= 1.50x NumPy | met |
+| matmul a @ b | float64 | 256x256x256 | 6 | NumPy | 209 us | 153 us | 1.36x | >= 1.15x NumPy | met |
+| matmul a @ b | float64 | 512x512x512 | 6 | NumPy | 1.55 ms | 1.11 ms | 1.40x | >= 1.05x NumPy | met |
+| matmul a @ b | float64 | 2048x2048x2048 | 6 | NumPy | 77.6 ms | 68.6 ms | 1.13x | >= 0.97x NumPy | met |
+| matmul a @ b | float32 | 1x4096x4096 | 6 | NumPy | - | - | noisy | >= 1.00x NumPy | noisy |
+| matmul a @ b | float32 | 4096x64x4096 | 6 | NumPy | 19.2 ms | 4.89 ms | 3.92x | >= 1.00x NumPy | met |
+| matmul a @ b | float64 | 1000x333x750 | 6 | NumPy | 2.90 ms | 2.06 ms | 1.41x | >= 1.00x NumPy | met |
+| matmul a.T @ b | float32 | 512x512x512 | 6 | NumPy | 817 us | 524 us | 1.56x | >= 1.05x NumPy | met |
+| matmul a.T @ b | float32 | 512x512x512 | 6 | own C-layout time | 506 us | 524 us | +3.5% | within 10% of own C-layout time | met |
+| matmul a @ b.T | float32 | 512x512x512 | 6 | NumPy | - | - | noisy | >= 1.05x NumPy | noisy |
+| matmul a @ b.T | float32 | 512x512x512 | 6 | own C-layout time | - | - | noisy | within 10% of own C-layout time | noisy |
+| matmul a @ b, both F-order | float32 | 512x512x512 | 6 | NumPy | - | - | noisy | >= 1.05x NumPy | noisy |
+| matmul a @ b, both F-order | float32 | 512x512x512 | 6 | own C-layout time | - | - | noisy | within 10% of own C-layout time | noisy |
+| transpose | float32 | 64x64 | 6 | NumPy | 2.57 us | 1.12 us | 2.29x | >= 2.00x NumPy | met |
+| transpose | float32 | 2048x2048 | 6 | NumPy | 43.7 ms | 1.22 ms | 35.80x | >= 4.00x NumPy | met |
+| transpose | float64 | 1000x3000 | 6 | NumPy | 9.61 ms | 1.84 ms | 5.28x | >= 4.00x NumPy | met |
+| sum, axis=None | float32 | 64x64 | 6 | NumPy | 2.64 us | 684 ns | 3.86x | >= 3.00x NumPy | met |
+| sum, axis=None | float64 | 4096x4096 | 6 | NumPy | 23.2 ms | 6.85 ms | 3.39x | >= 1.50x NumPy | met |
+| mean, axis=0 | float32 | 1024x1024 | 6 | NumPy | 103 us | 24.9 us | 4.14x | >= 1.50x NumPy | met |
+| mean, axis=1 | float64 | 1000000x16 | 6 | NumPy | 15.3 ms | 5.16 ms | 2.97x | >= 1.50x NumPy | met |
+| axpby, new output | float32 | 1024x1024 | 6 | NumPy | - | - | noisy | >= 2.00x NumPy | noisy |
+| axpby, out= | float32 | 1024x1024 | 6 | NumPy, preallocated | - | - | noisy | >= 2.00x NumPy, preallocated | noisy |
+| fma3, new output | float32 | 1024x1024 | 6 | NumPy | 2.31 ms | 228 us | 10.13x | >= 2.00x NumPy | met |
+| fma3, out= | float32 | 1024x1024 | 6 | NumPy, preallocated | 647 us | 223 us | 2.90x | >= 2.00x NumPy, preallocated | met |
+| scaled_relu, new output | float32 | 1024x1024 | 6 | NumPy | 1.98 ms | 86.6 us | 22.91x | >= 2.00x NumPy | met |
+| scaled_relu, out= | float32 | 1024x1024 | 6 | NumPy, preallocated | 461 us | 41.6 us | 11.08x | >= 2.00x NumPy, preallocated | met |
+| matmul a @ b, auto route | float32 | 2048x2048x2048 | 6 | faster forced route | - | - | noisy | within 5% of the faster forced route | noisy |
+| matmul a @ b, auto route | float32 | 2048x2048x2048 | 6 | NumPy | - | - | noisy | >= 5.00x NumPy | noisy |
+| matmul a @ b, auto route | float32 | 4096x4096x4096 | 6 | faster forced route | - | - | noisy | within 5% of the faster forced route | noisy |
+| matmul a @ b, auto route | float32 | 4096x4096x4096 | 6 | NumPy | - | - | noisy | >= 5.00x NumPy | noisy |
 <!-- /report:headline -->
 
 ### The whole matrix at a glance
@@ -254,47 +245,63 @@ No measured cell is below 1.00x against any baseline.
 
 **Closed below target.** Cells that miss their target and are closed at a measured ceiling or deferred; every number is computed from the results files.
 
-None.
+| cell | results file | closure | evidence | reason |
+|---|---|---|---|---|
+| `matmul/float32/1x1x1/c/-/t6` | `refbox_matmul_square_cpu_v310.json` | deferred | 2.91x against NumPy (target >= 3.00x NumPy) | the call is bound by fixed costs, the Python wrapper, the argument checks, and NumPy's own allocation of the result; three approaches were measured (the native fast entry with the GIL held for small products, a single-block mode and vector row packing in the small kernel, and a native public entry, which the project's rule for promoting a function to native code did not allow) |
+| `matmul/float64/1x1x1/c/-/t6` | `refbox_matmul_square_cpu_v310.json` | deferred | 2.97x against NumPy (target >= 3.00x NumPy) | the call is bound by fixed costs, the Python wrapper, the argument checks, and NumPy's own allocation of the result; three approaches were measured (the native fast entry with the GIL held for small products, a single-block mode and vector row packing in the small kernel, and a native public entry, which the project's rule for promoting a function to native code did not allow) |
+| `matmul/float64/12x12x12/c/-/t6` | `refbox_matmul_square_cpu_v310.json` | deferred | 2.96x against NumPy (target >= 3.00x NumPy) | the call is bound by fixed costs, the Python wrapper, the argument checks, and NumPy's own allocation of the result; three approaches were measured (the native fast entry with the GIL held for small products, a single-block mode and vector row packing in the small kernel, and a native public entry, which the project's rule for promoting a function to native code did not allow) |
+| `matmul/float64/16x16x16/c/-/t6` | `refbox_matmul_square_cpu_v310.json` | deferred | 2.87x against NumPy (target >= 3.00x NumPy) | the call is bound by fixed costs, the Python wrapper, the argument checks, and NumPy's own allocation of the result; three approaches were measured (the native fast entry with the GIL held for small products, a single-block mode and vector row packing in the small kernel, and a native public entry, which the project's rule for promoting a function to native code did not allow) |
+| `matmul/float64/64x64x64/at_b/-/t6` | `refbox_matmul_layout_cpu_v310.json` | deferred | +18.7% against own C-layout time (target within 10% of own C-layout time) | NumPy places these arrays at any 16-byte offset in a cache line, and that placement alone moves the C-order reference cell between runs; three approaches were measured (F-order packing, reading a crowded column-major A in place with prefetch, and two-thread splits by column panels with shared or per-member B packing) |
+| `transpose/float32/8x8/c/-/t6` | `refbox_transpose_cpu_v310.json` | deferred | 1.79x against NumPy (target >= 2.00x NumPy) | the call is bound by the Python wrapper and the result's allocation; three approaches were measured (lane-load tiles without threading overhead at one thread, a separate small-array path, and a native public entry, which the promotion rule did not allow) |
+| `transpose/float64/8x8/c/-/t6` | `refbox_transpose_cpu_v310.json` | deferred | 1.79x against NumPy (target >= 2.00x NumPy) | the call is bound by the Python wrapper and the result's allocation; three approaches were measured (lane-load tiles without threading overhead at one thread, a separate small-array path, and a native public entry, which the promotion rule did not allow) |
+| `fma3/float32/8x8/c/alloc/t6` | `refbox_fused_cpu_v310.json` | deferred | 2.74x against NumPy (target >= 3.00x NumPy) | against the expression that also allocates, the result's own allocation and the call's fixed cost take a large share of the time, and at 32x32 four float64 arrays fill the L1 cache; three approaches were measured (a one-thread path without a parallel region, a four-vector loop with a 4K-aliasing direction, and a native public entry, which the promotion rule did not allow) |
+| `fma3/float32/32x32/c/alloc/t6` | `refbox_fused_cpu_v310.json` | deferred | 2.92x against NumPy (target >= 3.00x NumPy) | against the expression that also allocates, the result's own allocation and the call's fixed cost take a large share of the time, and at 32x32 four float64 arrays fill the L1 cache; three approaches were measured (a one-thread path without a parallel region, a four-vector loop with a 4K-aliasing direction, and a native public entry, which the promotion rule did not allow) |
+| `fma3/float64/8x8/c/alloc/t6` | `refbox_fused_cpu_v310.json` | deferred | 2.68x against NumPy (target >= 3.00x NumPy) | against the expression that also allocates, the result's own allocation and the call's fixed cost take a large share of the time, and at 32x32 four float64 arrays fill the L1 cache; three approaches were measured (a one-thread path without a parallel region, a four-vector loop with a 4K-aliasing direction, and a native public entry, which the promotion rule did not allow) |
+| `fma3/float64/32x32/c/alloc/t6` | `refbox_fused_cpu_v310.json` | deferred | 2.55x against NumPy (target >= 3.00x NumPy) | against the expression that also allocates, the result's own allocation and the call's fixed cost take a large share of the time, and at 32x32 four float64 arrays fill the L1 cache; three approaches were measured (a one-thread path without a parallel region, a four-vector loop with a 4K-aliasing direction, and a native public entry, which the promotion rule did not allow) |
+| `fma3/float32/8x8/c/alloc/t6` | `refbox_overhead_cpu_v310.json` | deferred | 2.78x against NumPy (target >= 3.00x NumPy) | against the expression that also allocates, the result's own allocation and the call's fixed cost take a large share of the time, and at 32x32 four float64 arrays fill the L1 cache; three approaches were measured (a one-thread path without a parallel region, a four-vector loop with a 4K-aliasing direction, and a native public entry, which the promotion rule did not allow) |
+| `fma3/float64/8x8/c/alloc/t6` | `refbox_overhead_cpu_v310.json` | deferred | 2.73x against NumPy (target >= 3.00x NumPy) | against the expression that also allocates, the result's own allocation and the call's fixed cost take a large share of the time, and at 32x32 four float64 arrays fill the L1 cache; three approaches were measured (a one-thread path without a parallel region, a four-vector loop with a 4K-aliasing direction, and a native public entry, which the promotion rule did not allow) |
+| `transpose/float32/8x8/c/-/t6` | `refbox_overhead_cpu_v310.json` | deferred | 1.79x against NumPy (target >= 2.00x NumPy) | the call is bound by the Python wrapper and the result's allocation; three approaches were measured (lane-load tiles without threading overhead at one thread, a separate small-array path, and a native public entry, which the promotion rule did not allow) |
+| `transpose/float64/8x8/c/-/t6` | `refbox_overhead_cpu_v310.json` | deferred | 1.82x against NumPy (target >= 2.00x NumPy) | the call is bound by the Python wrapper and the result's allocation; three approaches were measured (lane-load tiles without threading overhead at one thread, a separate small-array path, and a native public entry, which the promotion rule did not allow) |
+| `scaling/float64/2048x2048x2048/c/-/t1-t6` | `refbox_gemm_1t_cpu_v310.json`, `refbox_matmul_square_cpu_v310.json` | deferred | Peregrine 4.40x from 1 to 6 threads, OpenBLAS 4.08x, measured FMA peak ratio 5.44x | per-thread timers show the six-thread compute is bound by the all-core clock under the laptop's power limit; three approaches to the remaining synchronization cost were measured (point-to-point step counters with two B buffers, prefetch of the next B panel, and team-sized row blocks) |
 
 **Below target, not closed.**
 
 None.
 
+**CUDA build spot check.** The CUDA build runs the same CPU code; its host cells are compared with the CPU-only build's, and these differ by more than 5 percent. The runs were hours apart, and the cause was not isolated.
+
+- `axpby/float64/8x8/c/alloc/t6` in `refbox_overhead_cuda_v310.json` (5.9% slower than the CPU-only build)
+- `matmul/float64/16x16x16/c/-/t6` in `refbox_overhead_cuda_v310.json` (9.1% slower than the CPU-only build)
+
 **Noisy.** These cells stayed above the CV limit on every attempt, including the fresh-process retry, so the protocol publishes no number for them.
 
-None.
-
-Not measured: `benchmarks/results/refbox_matmul_square_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_matmul_rect_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_matmul_layout_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_transpose_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_reduce_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_fused_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_overhead_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_gemm_1t_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_overhead_cuda_v310.json` is absent.
+- matmul, square, CPU-only build: `matmul/float32/250x250x250/c/-/t6/s0`, `matmul/float32/640x640x640/c/-/t6/s0`, `matmul/float32/750x750x750/c/-/t6/s0`, `matmul/float32/1500x1500x1500/c/-/t6/s0`, `matmul/float32/2048x2048x2048/c/-/t6/s0`, `matmul/float32/4096x4096x4096/c/-/t6/s0`, `matmul/float64/250x250x250/c/-/t6/s0`, `matmul/float64/256x256x256/c/-/t6/s0`, `matmul/float64/333x333x333/c/-/t6/s0`, `matmul/float64/384x384x384/c/-/t6/s0`, `matmul/float64/640x640x640/c/-/t6/s0`, `matmul/float64/750x750x750/c/-/t6/s0`, `matmul/float64/1000x1000x1000/c/-/t6/s0`, `matmul/float64/1500x1500x1500/c/-/t6/s0`, `matmul/float64/2048x2048x2048/c/-/t6/s0`, `matmul/float64/3000x3000x3000/c/-/t6/s0`, `matmul/float64/4096x4096x4096/c/-/t6/s0`, `matmul/float32/256x256x256/c/-/t6/s1`, `matmul/float32/512x512x512/c/-/t6/s1`, `matmul/float32/2048x2048x2048/c/-/t6/s1`, `matmul/float32/2048x2048x2048/c/-/t6/s2`, `matmul/float64/256x256x256/c/-/t6/s2`, `matmul/float64/512x512x512/c/-/t6/s1`, `matmul/float64/512x512x512/c/-/t6/s2`
+- matmul, rectangular, CPU-only build: `matmul/float64/1x4096x4096/c/-/t6/s0`, `matmul/float64/4096x4096x1/c/-/t6/s0`, `matmul/float64/4x4096x4096/c/-/t6/s0`, `matmul/float64/4096x256x256/c/-/t6/s0`, `matmul/float64/256x4096x256/c/-/t6/s0`, `matmul/float64/256x256x4096/c/-/t6/s0`, `matmul/float32/1x4096x4096/c/-/t6/s0`, `matmul/float32/4096x256x256/c/-/t6/s0`, `matmul/float32/256x4096x256/c/-/t6/s0`, `matmul/float32/256x256x4096/c/-/t6/s0`, `matmul/float32/1000x333x750/c/-/t6/s0`, `matmul/float32/1x4096x4096/c/-/t6/s1`, `matmul/float32/1x4096x4096/c/-/t6/s2`, `matmul/float32/4096x64x4096/c/-/t6/s2`
+- matmul, operand layouts, CPU-only build: `matmul/float64/1000x333x750/a_bt/-/t6/s0`, `matmul/float64/512x512x512/ff/-/t6/s0`, `matmul/float64/1000x333x750/ff/-/t6/s0`, `matmul/float64/4096x256x256/ff/-/t6/s0`, `matmul/float64/512x512x512/c/-/t6/s0`, `matmul/float64/1000x333x750/c/-/t6/s0`, `matmul/float64/4096x256x256/c/-/t6/s0`, `matmul/float32/1000x333x750/c/-/t6/s0`, `matmul/float32/4096x256x256/c/-/t6/s0`, `matmul/float32/512x512x512/ff/-/t6/s0`, `matmul/float32/2048x2048x2048/ff/-/t6/s0`, `matmul/float32/1000x333x750/ff/-/t6/s0`, `matmul/float64/512x512x512/at_b/-/t6/s0`, `matmul/float64/2048x2048x2048/at_b/-/t6/s0`, `matmul/float64/1000x333x750/at_b/-/t6/s0`, `matmul/float64/4096x256x256/at_b/-/t6/s0`, `matmul/float32/512x512x512/a_bt/-/t6/s0`, `matmul/float32/2048x2048x2048/a_bt/-/t6/s0`, `matmul/float32/1000x333x750/a_bt/-/t6/s0`, `matmul/float32/4096x256x256/a_bt/-/t6/s0`, `matmul/float32/512x512x512/at_b/-/t6/s0`, `matmul/float32/2048x2048x2048/at_b/-/t6/s0`, `matmul/float32/1000x333x750/at_b/-/t6/s0`, `matmul/float32/4096x256x256/at_b/-/t6/s0`, `matmul/float32/512x512x512/a_bt/-/t6/s1`, `matmul/float32/512x512x512/a_bt/-/t6/s2`, `matmul/float32/512x512x512/c/-/t6/s1`, `matmul/float32/512x512x512/at_b/-/t6/s2`, `matmul/float32/512x512x512/ff/-/t6/s1`, `matmul/float32/512x512x512/ff/-/t6/s2`
+- transpose, CPU-only build: `transpose/float64/256x256/c/-/t6/s0`, `transpose/float64/512x512/c/-/t6/s0`, `transpose/float64/4096x4096/c/-/t6/s0`, `transpose/float32/256x256/c/-/t6/s0`, `transpose/float32/4096x4096/c/-/t6/s0`, `transpose/float32/64x64/c/-/t6/s1`, `transpose/float32/2048x2048/c/-/t6/s1`, `transpose/float32/2048x2048/c/-/t6/s2`
+- sum and mean, CPU-only build: `sum/float64/4096x4096/c/axis=None/t6/s0`, `sum/float64/16x1000000/c/axis=None/t6/s0`, `sum/float64/1000000x16/c/axis=None/t6/s0`, `mean/float64/1024x1024/c/axis=0/t6/s0`, `mean/float64/4096x4096/c/axis=1/t6/s0`, `mean/float64/16x1000000/c/axis=1/t6/s0`, `sum/float32/1024x1024/c/axis=None/t6/s0`, `mean/float64/1024x1024/c/axis=None/t6/s0`, `mean/float64/4096x4096/c/axis=None/t6/s0`, `mean/float64/16x1000000/c/axis=None/t6/s0`, `mean/float64/1000000x16/c/axis=None/t6/s0`, `mean/float32/1024x1024/c/axis=1/t6/s0`, `sum/float32/4096x4096/c/axis=1/t6/s0`, `sum/float64/256x256/c/axis=1/t6/s0`, `sum/float64/1024x1024/c/axis=1/t6/s0`, `sum/float64/4096x4096/c/axis=1/t6/s0`, `sum/float64/16x1000000/c/axis=1/t6/s0`, `sum/float64/1024x1024/c/axis=0/t6/s0`, `mean/float32/1024x1024/c/axis=0/t6/s0`, `sum/float32/1024x1024/c/axis=0/t6/s0`, `sum/float64/4096x4096/c/axis=None/t6/s2`
+- fused elementwise ops, CPU-only build: `scaled_relu/float64/128x128/c/alloc/t6/s0`, `scaled_relu/float64/1024x1024/c/alloc/t6/s0`, `scaled_relu/float64/5793x5793/c/alloc/t6/s0`, `axpby/float64/512x512/c/out/t6/s0`, `fma3/float64/512x512/c/alloc/t6/s0`, `axpby/float32/1024x1024/c/out/t6/s0`, `fma3/float32/512x512/c/out/t6/s0`, `scaled_relu/float32/128x128/c/out/t6/s0`, `scaled_relu/float32/512x512/c/out/t6/s0`, `axpby/float64/128x128/c/alloc/t6/s0`, `axpby/float64/5793x5793/c/alloc/t6/s0`, `scaled_relu/float32/1024x1024/c/alloc/t6/s0`, `axpby/float32/512x512/c/alloc/t6/s0`, `axpby/float32/1024x1024/c/alloc/t6/s0`, `fma3/float32/128x128/c/alloc/t6/s0`, `fma3/float32/512x512/c/alloc/t6/s0`, `fma3/float32/1024x1024/c/alloc/t6/s0`, `fma3/float64/512x512/c/out/t6/s0`, `scaled_relu/float32/1024x1024/c/alloc/t6/s1`, `axpby/float32/1024x1024/c/out/t6/s1`, `axpby/float32/1024x1024/c/out/t6/s2`, `axpby/float32/1024x1024/c/alloc/t6/s1`, `axpby/float32/1024x1024/c/alloc/t6/s2`, `scaled_relu/float32/1024x1024/c/out/t6/s1`, `scaled_relu/float32/1024x1024/c/out/t6/s2`, `fma3/float32/1024x1024/c/out/t6/s1`, `fma3/float32/1024x1024/c/out/t6/s2`, `fma3/float32/1024x1024/c/alloc/t6/s1`
+- GPU, CUDA build: `from_device/float32/4096x8192/c/-/t6/s0`, `gpu_matmul/float64/256x256x256/c/device/t6/s0`, `gpu_matmul/float64/512x512x512/c/device/t6/s0`, `gpu_matmul/float64/1024x1024x1024/c/device/t6/s0`, `gpu_matmul/float64/2048x2048x2048/c/device/t6/s0`, `gpu_matmul/float64/4096x4096x4096/c/device/t6/s0`, `gpu_matmul/float32/2048x2048x2048/c/device/t6/s0`, `gpu_matmul/float32/4096x4096x4096/c/device/t6/s0`, `matmul/float32/256x256x256/c/auto/t6/s0`, `matmul/float32/512x512x512/c/auto/t6/s0`, `matmul/float32/1024x1024x1024/c/auto/t6/s0`, `matmul/float32/2048x2048x2048/c/auto/t6/s0`, `matmul/float32/4096x4096x4096/c/auto/t6/s0`, `matmul/float32/1x4096x4096/c/auto/t6/s0`, `matmul/float32/4096x64x4096/c/auto/t6/s0`, `matmul/float32/2048x2048x2048/c/auto/t6/s1`, `matmul/float32/2048x2048x2048/c/auto/t6/s2`, `matmul/float32/4096x4096x4096/c/auto/t6/s1`, `matmul/float32/4096x4096x4096/c/auto/t6/s2`
+- per-call overhead, CUDA build: `matmul/float32/256x256x256/c/-/t6/s0`, `matmul/float32/2048x2048x2048/c/-/t6/s0`
 <!-- /report:losses -->
 
 ### v3.0.0 to v3.1.0
 
 <!-- report:compare -->
-Not measured: `benchmarks/results/refbox_quick_cpu_v300.json` is absent.
+Peregrine's median time in the v3.0.0 and v3.1.0 runs of the quick subset, same harness and machine, with NumPy's median in each run as a check that the machine state matched. The speedup is the v3.0.0 time divided by the v3.1.0 time; both libraries ran at the thread count in the threads column. A selection, plus every cell that got slower; the full list is in docs/benchmarks.md.
 
-Not measured: `benchmarks/results/refbox_quick_cpu_v310.json` is absent.
-
-Not measured: `benchmarks/results/refbox_quick_cuda_v300.json` is absent.
-
-Not measured: `benchmarks/results/refbox_quick_cuda_v310.json` is absent.
+| operation | dtype | shape | threads | NumPy, v3.0.0 run | NumPy, v3.1.0 run | Peregrine v3.0.0 | Peregrine v3.1.0 | speedup |
+|---|---|---|---|---|---|---|---|---|
+| axpby, new output | float32 | 2896x2896 | 6 | 30.2 ms | 27.1 ms | 7.88 ms | 2.74 ms | 2.87x |
+| matmul a @ b | float32 | 64x64x64 | 6 | 9.45 us | 9.13 us | 119 us | 5.21 us | 22.81x |
+| matmul a @ b | float32 | 1x4096x4096 | 6 | noisy | noisy | noisy | noisy | - |
+| matmul a.T @ b | float32 | 512x512x512 | 6 | noisy | 837 us | noisy | 555 us | - |
+| matmul a @ b | float32 | 2048x2048x2048 | 6 | 36.6 ms | 36.5 ms | 57.7 ms | 32.8 ms | 1.76x |
+| matmul a @ b | float64 | 64x64x64 | 6 | 15.2 us | 15.1 us | 121 us | 7.56 us | 15.99x |
+| matmul a @ b | float64 | 2048x2048x2048 | 6 | 79.8 ms | noisy | 135 ms | noisy | - |
+| sum, axis=None | float64 | 4096x4096 | 6 | 24.1 ms | 23.4 ms | 23.7 ms | 7.10 ms | 3.33x |
+| transpose | float32 | 2048x2048 | 6 | noisy | 47.9 ms | noisy | 1.24 ms | - |
+| matmul a @ b, auto route | float32 | 2048x2048x2048 | 6 | noisy | noisy | noisy | noisy | - |
 <!-- /report:compare -->
 
 ## Method
@@ -314,20 +321,54 @@ settings are below; the full method and the commands to reproduce every file
 are in [docs/benchmarks.md](docs/benchmarks.md).
 
 <!-- report:environment -->
-Not measured: `benchmarks/results/refbox_matmul_square_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_matmul_rect_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_matmul_layout_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_transpose_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_reduce_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_fused_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_overhead_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_gemm_1t_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_gpu_cuda_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_overhead_cuda_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_quick_cpu_v300.json` is absent.
-Not measured: `benchmarks/results/refbox_quick_cpu_v310.json` is absent.
-Not measured: `benchmarks/results/refbox_quick_cuda_v300.json` is absent.
-Not measured: `benchmarks/results/refbox_quick_cuda_v310.json` is absent.
+Each results file and the run that wrote it:
+
+| results file | build | Peregrine | commit | date | priority |
+|---|---|---|---|---|---|
+| `refbox_matmul_square_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T14:06 | high |
+| `refbox_matmul_rect_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T16:43 | high |
+| `refbox_matmul_layout_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T17:48 | high |
+| `refbox_transpose_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T20:27 | high |
+| `refbox_reduce_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-21T22:32 | high |
+| `refbox_fused_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-22T01:56 | high |
+| `refbox_overhead_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-22T10:52 | high |
+| `refbox_gemm_1t_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-22T10:41 | high |
+| `refbox_gpu_cuda_v310.json` | CUDA | 3.1.0 | 4e21f991b096 | 2026-10-21T03:01 | high |
+| `refbox_overhead_cuda_v310.json` | CUDA | 3.1.0 | 4e21f991b096 | 2026-10-21T06:06 | high |
+| `refbox_quick_cpu_v300.json` | CPU-only | 3.0.0 | unknown | 2026-10-21T08:10 | high |
+| `refbox_quick_cpu_v310.json` | CPU-only | 3.1.0 | 4e21f991b096 | 2026-10-22T11:37 | high |
+| `refbox_quick_cuda_v300.json` | CUDA | 3.0.0 | unknown | 2026-10-21T10:49 | high |
+| `refbox_quick_cuda_v310.json` | CUDA | 3.1.0 | 4e21f991b096 | 2026-10-21T06:54 | high |
+
+Measurement conditions recorded in the manifests of the matrix files (one value means every file agrees):
+
+| condition | value |
+|---|---|
+| Peregrine threads | 6, 1 |
+| OpenBLAS threads | 6 |
+| OMP_NUM_THREADS at start | 6 |
+| process priority | high |
+| affinity mask (one logical CPU per core) | 0x555 |
+| CPU | Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz |
+| OS | Windows-10-10.0.19045-SP0 |
+| power plan | Ultimate Performance |
+| Python | 3.12.4 |
+| NumPy | 2.5.4 |
+| OpenBLAS | 0.3.34.106.0 (Haswell kernels) |
+| compiler | MSVC 19.42.34436.0 |
+| compiler flags | `/DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG /bigobj /MP /O2 /permissive- /W4 SHELL:-openmp` |
+| OpenMP runtime | vcomp140.dll |
+| GPU and driver (CUDA build) | NVIDIA GeForce RTX 3060 Laptop GPU, driver 617.14 |
+| samples per contender | 30 |
+| warmup samples | 5 |
+| samples per ABBA block | 5 |
+| batch target per sample | 100 ms |
+| rewarm after a switch | 200 ms |
+| rewarm after a switch, GPU contenders | 3.00 s |
+| idle gap at a switch | 300 ms |
+| CV limit | 5% |
+| attempts before the fresh-process retry | 3 |
+| clock-discard band | 42.0 to 200.0 percent processor performance |
 <!-- /report:environment -->
 
 ## Hardware
@@ -336,7 +377,36 @@ The ceilings below come from a small measurement tool in `tools/ceilings`, run
 on the same machine as the benchmarks.
 
 <!-- report:hardware -->
-Not measured: `benchmarks/results/refbox_ceilings.json` is absent.
+| component | value |
+|---|---|
+| CPU | Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz, 6 cores, 12 logical processors |
+| GPU | NVIDIA GeForce RTX 3060 Laptop GPU, driver 617.14, CUDA runtime 12.8 |
+
+FMA peak in GF/s, measured by the ceiling tool at 1 and 6 threads (one per core):
+
+| dtype | 1 thread | 6 threads |
+|---|---|---|
+| float32 | 134.5 GF/s | 733.6 GF/s |
+| float64 | 67.3 GF/s | 365.9 GF/s |
+
+Memory bandwidth in GB/s, median of 10 trials over a 256 MiB float64 array, counting the bytes each kernel reads and writes:
+
+| kernel | stores | 1 thread | 6 threads |
+|---|---|---|---|
+| read | none | 20.1 GB/s | 27.1 GB/s |
+| write | regular | 13.5 GB/s | 17.0 GB/s |
+| write | nontemporal | 40.5 GB/s | 42.1 GB/s |
+| copy | regular | 18.6 GB/s | 18.4 GB/s |
+| copy | nontemporal | 25.7 GB/s | 23.6 GB/s |
+| triad | regular | 21.0 GB/s | 17.2 GB/s |
+| triad | nontemporal | 27.0 GB/s | 21.3 GB/s |
+
+PCIe to the NVIDIA GeForce RTX 3060 Laptop GPU, pinned host memory, median of 20 transfers of 256 MiB timed with CUDA events:
+
+| direction | bandwidth | latency |
+|---|---|---|
+| H2D | 12.5 GB/s | 8.22 us |
+| D2H | 12.6 GB/s | 8.46 us |
 <!-- /report:hardware -->
 
 ## Development
