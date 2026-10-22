@@ -572,8 +572,9 @@ def render_losses() -> str:
     parts.append("**Below target, not closed.**")
     parts.append("\n".join(f"- {b}" for b in below) if below else "None.")
     parts.append("**CUDA build spot check.** The CUDA build runs the same CPU code; its host cells are "
-                 "compared with the CPU-only build's, and these differ by more than 5 percent. The runs were "
-                 "hours apart, and the cause was not isolated.")
+                 "compared with the CPU-only build's, and these differ by more than 5 percent. The two builds "
+                 "were measured hours apart; a recheck that alternated the builds back to back on these cells "
+                 "found no difference beyond the run-to-run noise.")
     parts.append("\n".join(f"- {c}" for c in spot) if spot else "None.")
     parts.append("**Noisy.** These cells stayed above the CV limit on every attempt, including the "
                  "fresh-process retry, so the protocol publishes no number for them.")
