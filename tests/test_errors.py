@@ -48,11 +48,14 @@ def test_promoted_unsupported_dtype_is_type_error():
         pg.matmul(a, a)
 
 
-def test_out_keyword_raises_not_implemented():
-    a = np.zeros((2, 2))
-    b = np.zeros((2, 2))
-    with pytest.raises(NotImplementedError, match="out= is not implemented"):
-        pg.matmul(a, b, out=np.zeros((2, 2)))
+def test_out_keyword_writes_into_out():
+    # out= is implemented: the product lands in out and out itself comes back.
+    # The full rule set (types, dtypes, layouts, overlap) lives in test_out.py.
+    a = np.arange(4.0).reshape(2, 2)
+    b = np.array([[2.0, 0.0], [1.0, 3.0]])
+    out = np.zeros((2, 2))
+    assert pg.matmul(a, b, out=out) is out
+    np.testing.assert_array_equal(out, a @ b)
 
 
 def test_out_none_matches_omission():

@@ -13,9 +13,8 @@ void transpose(const T* a, T* out, int64_t m, int64_t n) {
     // Cache-blocked so each BS-by-BS tile of out stays warm while its source
     // column is gathered. 32 elements is 256 B at f64, four cache lines per
     // tile side, which keeps both the source stripe and the destination stripe
-    // inside L1 on the Comet Lake this targets. Plain scalar copy: a transpose
-    // is pure data movement, memory-bandwidth bound, so the gather/scatter
-    // pattern dominates and SIMD shuffles win nothing here.
+    // inside L1 on the Comet Lake this targets. The scalar twin of
+    // transpose_avx2, kept plain so the no-AVX2 fallback can link it.
     constexpr int64_t BS = 32;
 
     for (int64_t i0 = 0; i0 < m; i0 += BS) {

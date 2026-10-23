@@ -2,56 +2,111 @@ cmake_minimum_required(VERSION 3.26)
 project(peregrine LANGUAGES CXX)
 
 option(PG_ENABLE_CUDA "Build the CUDA backend (requires CUDA Toolkit 12.8)" OFF)
+option(PG_BUILD_CEILINGS "Build the dev-only hardware ceiling tool" OFF)
+option(PG_KERNEL_LISTINGS "Write assembly listings for the AVX2 kernel sources into the build tree" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-find_package(Python 3.12 COMPONENTS Interpreter Development.Module REQUIRED)
+# The SABI component is what lets nanobind's STABLE_ABI take effect: without it
+# nanobind silently builds a version-specific module, which an abi3-tagged wheel
+# then ships to interpreters that cannot import it. scikit-build-core sets
+# SKBUILD_SABI_COMPONENT from wheel.py-api.
+find_package(Python 3.12 COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT} REQUIRED)
 
 # nanobind is resolved from the build venv that scikit-build-core creates
 execute_process(
   COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
   OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE nanobind_ROOT)
 find_package(nanobind CONFIG REQUIRED)
+
+# NumPy headers for the fast entries, from the same interpreter. FindPython's
+# NumPy component is not used: Python::NumPy links Python::Module, which would
+# bring back the version-specific python3XY library and break the abi3 module.
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" -c "import numpy; print(numpy.get_include())"
+  OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE PG_NUMPY_INCLUDE
+  COMMAND_ERROR_IS_FATAL ANY)
 find_package(OpenMP REQUIRED)
 
-nanobind_add_module(_core STABLE_ABI NB_STATIC
+# NOMINSIZE: without it nanobind adds /Os in Release on MSVC, and favoring size
+# turns off MSVC's auto-vectorization of the scalar twins (gemm_small, reduce).
+# PROTECT_STACK: nanobind otherwise turns off the compiler's stack protection
+# (/GS- on MSVC since 3.0) for every source in the module, the kernels included.
+nanobind_add_module(_core STABLE_ABI NB_STATIC NOMINSIZE PROTECT_STACK
   src/bindings/module.cpp
+  src/bindings/fast_entry.cpp
+  src/bindings/output_cache.cpp
   src/cpu/feature_detect.cpp
+  src/cpu/topology.cpp
+  src/cpu/threads.cpp
   src/cpu/gemm_naive.cpp
+  src/cpu/gemm_small_naive.cpp
+  src/cpu/gemm_skinny_naive.cpp
   src/cpu/pack.cpp
   src/cpu/microkernel_avx2_f64.cpp
   src/cpu/microkernel_avx2_f32.cpp
   src/cpu/gemm_blis.cpp
+  src/cpu/gemm_small_avx2.cpp
+  src/cpu/gemm_skinny_avx2.cpp
   src/cpu/fused_avx2.cpp
   src/cpu/fused_naive.cpp
   src/cpu/transpose.cpp
   src/cpu/reduce.cpp
   src/dispatch/dispatch.cpp
+  src/cpu/transpose_avx2.cpp
+  src/cpu/reduce_avx2.cpp
 )
 target_include_directories(_core PRIVATE src)
+# SYSTEM keeps the NumPy headers' own /W4 warnings out of the build log.
+target_include_directories(_core SYSTEM PRIVATE "${PG_NUMPY_INCLUDE}")
 target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
 
 # AVX2 codegen is confined to exactly these kernel translation units. The arch
 # flag is deliberately absent at target level: AVX2 instructions in a TU that the
 # no-AVX2 fallback path links produce a module that executes an illegal
 # instruction at import on a CPU without AVX2 (the legacy import crash). The
-# feature_detect, gemm_naive, fused_naive, dispatch, and module TUs must stay
-# free of AVX2 codegen so the fallback path runs everywhere; fused_naive.cpp is
-# the fused fallback and is kept OUT of this list on purpose.
+# feature_detect, topology, threads, gemm_naive, gemm_small_naive,
+# gemm_skinny_naive, fused_naive, dispatch, and module TUs must stay free of
+# AVX2 codegen so the fallback path runs everywhere; fused_naive.cpp is the
+# fused fallback and is kept OUT of this list on purpose.
 set(PG_AVX2_SOURCES
   src/cpu/pack.cpp
   src/cpu/microkernel_avx2_f64.cpp
   src/cpu/microkernel_avx2_f32.cpp
   src/cpu/gemm_blis.cpp
+  src/cpu/gemm_small_avx2.cpp
+  src/cpu/gemm_skinny_avx2.cpp
   src/cpu/fused_avx2.cpp
+  src/cpu/transpose_avx2.cpp
+  src/cpu/reduce_avx2.cpp
 )
 
+# The kernel codegen gate reads these listings: the inner k-loop must show no
+# stack spills or reloads and the expected FMA count. The flags only add an
+# output file, so the object code matches a build with the option OFF.
+set(pg_listing_opts "")
+if (PG_KERNEL_LISTINGS)
+  if (MSVC)
+    # /FAs writes <source>.asm, with the source lines interleaved, next to each
+    # object (the target's intermediate directory under the VS generator).
+    set(pg_listing_opts /FAs)
+  else()
+    # -S alone stops before the object and breaks the link; -save-temps=obj
+    # keeps <source>.s and .ii next to each object and still builds the module.
+    set(pg_listing_opts -save-temps=obj -fverbose-asm)
+  endif()
+endif()
+
 if (MSVC)
-  # /openmp:llvm because the legacy /openmp runtime is OpenMP 2.0 and rejects
-  # modern pragmas. No /fp:fast: it changes NaN and Inf semantics and the
-  # library promises NumPy-matching results.
+  # OpenMP comes from find_package(OpenMP), which gives MSVC's /openmp and links
+  # vcomp140.dll from the redistributable Visual C++ runtime. /openmp:llvm is
+  # never used: its libomp140 DLL is not redistributable, so a wheel would either
+  # fail to import without Visual Studio or ship a file it may not ship. The
+  # code sticks to OpenMP 2.0 constructs, which is all /openmp accepts. No
+  # /fp:fast: it changes NaN and Inf semantics and the library promises
+  # NumPy-matching results.
   #
   # Fenced behind COMPILE_LANGUAGE:CXX so these MSVC host flags reach only the
   # .cpp TUs. nvcc rejects a raw /permissive- on its own command line ("a single
@@ -60,14 +115,16 @@ if (MSVC)
   # target the generator expression is true for every TU, so the OFF build sees
   # byte-identical flags.
   target_compile_options(_core PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:/O2;/openmp:llvm;/permissive-;/W4>)
-  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    $<$<COMPILE_LANGUAGE:CXX>:/O2;/permissive-;/W4>)
+  set(pg_avx2_opts /arch:AVX2 ${pg_listing_opts})
+  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "${pg_avx2_opts}")
 else()
   # No -ffast-math for the same reason. CXX-fenced for the same nvcc reason as
   # the MSVC branch (and a no-op difference on the CUDA-OFF Linux/CI build).
   target_compile_options(_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O3;-Wall;-Wextra>)
-  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+  set(pg_avx2_opts -mavx2 -mfma ${pg_listing_opts})
+  set_source_files_properties(${PG_AVX2_SOURCES} PROPERTIES COMPILE_OPTIONS "${pg_avx2_opts}")
 
   # libatomic on GCC/Clang. The MC/KC/NC sweep hook publishes its triple through
   # a std::atomic<blocking> (gemm_blis.cpp); blocking is three int64 (24 bytes),
@@ -127,5 +184,26 @@ if (PG_ENABLE_CUDA)
   target_compile_definitions(_core PRIVATE PG_HAS_CUDA=1)
   target_link_libraries(_core PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
 endif()
+
+# After the CUDA block: the tool's PCIe probe needs the CUDA language enabled
+# here first. The tool has no install() rule, so it never reaches a wheel.
+if (PG_BUILD_CEILINGS)
+  add_subdirectory(tools/ceilings)
+endif()
+
+# The fast-entry TU targets the NumPy 2.0 C API, matching numpy>=2.0 at run
+# time, and records what the module was built with for _core._build_info().
+set(PG_CONFIG_CXX_FLAGS
+  "$<$<CONFIG:Release>:${CMAKE_CXX_FLAGS_RELEASE}>$<$<CONFIG:Debug>:${CMAKE_CXX_FLAGS_DEBUG}>$<$<CONFIG:RelWithDebInfo>:${CMAKE_CXX_FLAGS_RELWITHDEBINFO}>$<$<CONFIG:MinSizeRel>:${CMAKE_CXX_FLAGS_MINSIZEREL}>")
+set_source_files_properties(src/bindings/fast_entry.cpp PROPERTIES COMPILE_DEFINITIONS
+  "NPY_TARGET_VERSION=NPY_2_0_API_VERSION;NPY_NO_DEPRECATED_API=NPY_2_0_API_VERSION;PG_BUILD_COMPILER=\"${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\";PG_BUILD_CXX_FLAGS=\"${CMAKE_CXX_FLAGS} ${PG_CONFIG_CXX_FLAGS} $<JOIN:$<TARGET_PROPERTY:_core,COMPILE_OPTIONS>, >\"")
+# The target's own definitions cannot be read from a definition on one of its
+# sources (CMake rejects the self reference), so they reach the TU through a
+# generated header instead.
+file(GENERATE
+  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/build_info/$<CONFIG>/pg_build_definitions.h"
+  CONTENT "#define PG_BUILD_DEFINITIONS \"$<JOIN:$<TARGET_PROPERTY:_core,COMPILE_DEFINITIONS>, >\"\n"
+  TARGET _core)
+target_include_directories(_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/build_info/$<CONFIG>")
 
 install(TARGETS _core LIBRARY DESTINATION peregrine)

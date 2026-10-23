@@ -25,13 +25,15 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 extern template void gemm<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
 extern template void gemm<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
 
-// Host-pointer convenience: allocates dA/dB/dC from the context mempool on the
-// compute stream, copies the host inputs up, runs the device gemm above, copies
-// the result back, and synchronizes before returning. This exists so the
-// correctness suite has a callable host->device->host path. The device-resident
-// path is gemm<T> directly on pg.Array buffers; this convenience stays as the
-// simplest correctness entry. a, b, c are HOST pointers (c is the caller-owned
-// m*n output buffer).
+// The staged GEMM for host operands, in one native crossing: pre-flights the
+// three buffers together, allocates dA/dB/dC from the context mempool, copies the
+// host inputs up, runs the device gemm above, copies the result back, and waits
+// for the stream, all in stream order on the context stream. A large float32
+// product instead runs in row blocks whose uploads and downloads overlap the
+// GEMM on the context's side streams, with bits identical to the unblocked
+// product (see gemm_cublas.cu). An asynchronous device error surfaces as
+// pg::cuda_error before it returns. a, b, c are HOST pointers (c is the
+// caller-owned m*n output buffer).
 template <typename T>
 void gemm_host(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 

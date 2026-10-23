@@ -3,8 +3,12 @@
 #include "cpu/fused.hpp"
 #include "cpu/gemm_blis.hpp"
 #include "cpu/gemm_naive.hpp"
+#include "cpu/gemm_skinny.hpp"
+#include "cpu/gemm_small.hpp"
 #include "cpu/reduce.hpp"
 #include "cpu/transpose.hpp"
+
+#include <algorithm>
 
 #if defined(PG_HAS_CUDA)
 namespace pg::cuda {
@@ -19,7 +23,7 @@ void gemm(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
 // The device-resident fused kernels, forward-declared CUDA-free the same way:
 // fused.cu's explicit float/double instantiations satisfy these, and this TU
 // pulls no src/cuda header so the deletable-src/cuda invariant holds. Pure
-// device-pointer compute on the compute stream.
+// device-pointer compute on the context stream.
 template <typename T>
 void fused_axpby(const T* x, const T* y, T* out, int64_t n, T a, T b);
 template <typename T>
@@ -31,30 +35,76 @@ void fused_scaled_relu(const T* x, T* out, int64_t n, T scale);
 
 namespace pg::dispatch {
 
-template <typename T>
-void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
-    // The features are memoized at import and already fold in PEREGRINE_DISABLE_AVX2,
-    // so a forced fallback routes here exactly as a CPU without AVX2 would. The
-    // packed kernel owns its own small-matrix branch, so this stays a pure
-    // features-in/path-out decision with no side effects. gemm_blis and
-    // gemm_naive share the signature, so the call crosses the TU boundary with
-    // no adapter and no AVX2 codegen leaking into this fallback-linked unit.
-    const auto& f = cpu::detect();
-    if (f.avx2 && f.fma) {
-        cpu::gemm_blis<T>(a, b, c, m, k, n);
-        return;
+// Below this max dimension packing and a team cost more than they save, so the
+// register-tiled direct kernel wins (1.3-5x the packed path's time at n = 16 to
+// 96, single-call diagnostics); it still wins at 128-160 on one thread, but the
+// threaded packed path overtakes it near 160, so 96 holds until measured.
+constexpr int64_t SMALL_MAX_DIM = 96;
+// A product with an output dimension or k this thin is bound by reading the
+// long operand, so the skinny kernels stream it instead of packing it.
+constexpr int64_t SKINNY_MAX_DIM = 4;
+
+gemm_path choose_gemm_path(int64_t m, int64_t k, int64_t n, bool avx2_fma) noexcept {
+    if (!avx2_fma) {
+        return gemm_path::naive;
     }
-    cpu::gemm_naive<T>(a, b, c, m, k, n);
+    if (std::max(m, std::max(k, n)) <= SMALL_MAX_DIM) {
+        return gemm_path::small;
+    }
+    if (std::min(m, n) <= SKINNY_MAX_DIM || k <= SKINNY_MAX_DIM) {
+        return gemm_path::skinny;
+    }
+    return gemm_path::packed;
 }
 
-template void matmul<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
-template void matmul<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
+template <typename T>
+void matmul(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b,
+            T* c, int64_t m, int64_t k, int64_t n) {
+    // NumPy gives a length-1 dim any stride (it never moves the pointer, and the
+    // contiguity and alignment flags ignore it). Unit stride reads the same
+    // elements and lets the kernels take a contiguous reading.
+    if (m == 1) {
+        rs_a = 1;
+    }
+    if (k == 1) {
+        cs_a = 1;
+        rs_b = 1;
+    }
+    if (n == 1) {
+        cs_b = 1;
+    }
+    // The features are memoized at import and already fold in
+    // PEREGRINE_DISABLE_AVX2, so a forced fallback routes here exactly as a CPU
+    // without AVX2 would. The kernels share the signature, so the call crosses
+    // the TU boundary with no adapter and no AVX2 codegen leaking into this
+    // fallback-linked unit.
+    const auto& f = cpu::detect();
+    switch (choose_gemm_path(m, k, n, f.avx2 && f.fma)) {
+    case gemm_path::packed:
+        cpu::gemm_blis<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+        return;
+    case gemm_path::small:
+        cpu::gemm_small<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+        return;
+    case gemm_path::skinny:
+        cpu::gemm_skinny<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+        return;
+    case gemm_path::naive:
+        break;
+    }
+    cpu::gemm_naive<T>(a, rs_a, cs_a, b, rs_b, cs_b, c, m, k, n);
+}
+
+template void matmul<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t,
+                            float*, int64_t, int64_t, int64_t);
+template void matmul<double>(const double*, int64_t, int64_t, const double*, int64_t, int64_t,
+                             double*, int64_t, int64_t, int64_t);
 
 #if defined(PG_HAS_CUDA)
 template <typename T>
 void matmul_device(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
     // Device-in/device-out: a, b, c are device pointers, so this is a pure
-    // forward to the cuBLAS GEMM on the compute stream -- no host staging, no
+    // forward to the cuBLAS GEMM on the context stream -- no host staging, no
     // sync (the binding owns the result's lifetime; from_device syncs when it
     // crosses back to host). f32 and f64 both forward to gemm<T>: f64 is the
     // FORCED device-resident path (both operands were explicitly to_device'd),
@@ -119,11 +169,9 @@ template void fused_scaled_relu<double>(const double*, double*, int64_t, double)
 
 #if defined(PG_HAS_CUDA)
 // Device-resident fused entries: x, y, z, out are device pointers, so each is a
-// pure forward to the hand-written grid-stride kernel on the compute stream -- no
-// host staging, no sync (the binding owns the output buffer's lifetime; the
-// output alloc and the kernel are both on the compute stream, so the single-stream
-// ordering needs no cross-stream fence, unlike matmul_device's transfer/compute
-// split). Both f32 and f64 forward through: the fused device path is reached only
+// pure forward to the hand-written grid-stride kernel on the context stream -- no
+// host staging, no sync (the binding owns the output buffer's lifetime, and the
+// output alloc and the kernel share the one stream). Both f32 and f64 forward through: the fused device path is reached only
 // when operands are already a pg.Array (the user's explicit to_device), so there
 // is no f64-never-AUTO-routes exclusion to enforce here -- that is a GEMM-only rule
 // and fused never auto-stages a host array. Pure: no warnings/logging/fallback.
@@ -150,24 +198,36 @@ template void fused_scaled_relu_device<float>(const float*, float*, int64_t, flo
 template void fused_scaled_relu_device<double>(const double*, double*, int64_t, double);
 #endif
 
-// transpose and the two sum entries have one CPU implementation each, valid on
-// every CPU, so they forward directly. No avx2/naive branch: unlike matmul
-// there is no packed variant to choose, and the kernels are plain TUs the
-// fallback path links unconditionally. The decision stays pure: no features
-// are read, no state mutated, the call simply crosses the TU boundary.
+// transpose takes the AVX2 body on avx2 && fma, the scalar twin otherwise; the
+// result is a permutation of the input bits, so both give the same array.
 template <typename T>
 void transpose(const T* a, T* out, int64_t m, int64_t n) {
+    const auto& f = cpu::detect();
+    if (f.avx2 && f.fma) {
+        cpu::transpose_avx2<T>(a, out, m, n);
+        return;
+    }
     cpu::transpose<T>(a, out, m, n);
 }
 
+// The sums take the AVX2 leaf kernels on avx2 && fma, like the fused ops, and
+// the scalar twins otherwise; both give the same bits.
 template <typename T>
 T sum_all(const T* a, int64_t m, int64_t n) {
-    return cpu::sum_all<T>(a, m, n);
+    const auto& f = cpu::detect();
+    return cpu::sum_all<T>(a, m, n, f.avx2 && f.fma);
 }
 
 template <typename T>
 void sum_axis(const T* a, T* out, int64_t m, int64_t n, int axis) {
-    cpu::sum_axis<T>(a, out, m, n, axis);
+    const auto& f = cpu::detect();
+    cpu::sum_axis<T>(a, out, m, n, axis, f.avx2 && f.fma, false);
+}
+
+template <typename T>
+void mean_axis(const T* a, T* out, int64_t m, int64_t n, int axis) {
+    const auto& f = cpu::detect();
+    cpu::sum_axis<T>(a, out, m, n, axis, f.avx2 && f.fma, true);
 }
 
 template void transpose<float>(const float*, float*, int64_t, int64_t);
@@ -176,5 +236,7 @@ template float sum_all<float>(const float*, int64_t, int64_t);
 template double sum_all<double>(const double*, int64_t, int64_t);
 template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
 template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
+template void mean_axis<float>(const float*, float*, int64_t, int64_t, int);
+template void mean_axis<double>(const double*, double*, int64_t, int64_t, int);
 
 } // namespace pg::dispatch

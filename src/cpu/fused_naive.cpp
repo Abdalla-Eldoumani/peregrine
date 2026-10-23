@@ -1,6 +1,13 @@
 #include "cpu/fused.hpp"
+#include "cpu/threads.hpp"
 
+#include <bit>
 #include <cmath>
+#include <cstdint>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace pg::cpu {
 
@@ -13,8 +20,11 @@ namespace pg::cpu {
 // silently, GCC hard-errors.
 //
 // The arithmetic mirrors the AVX2 bodies element-for-element so the two paths are
-// tolerance-equal (in fact bitwise-equal for these ops): axpby's two roundings,
-// fma3's single std::fma rounding, and the NaN-checked relu. All index math is
+// bitwise-equal: axpby's two roundings, fma3's single std::fma rounding, and the
+// NaN-checked relu. This TU cannot fuse axpby (no FMA instruction without the
+// arch flag), and the AVX2 body keeps it unfused on GCC too. Threads split
+// the elements at the same 64-byte lines of out as the AVX2 bodies, whose team
+// is capped for DRAM-sized calls; no bit depends on the team. All index math is
 // int64_t.
 
 namespace {
@@ -29,36 +39,84 @@ inline T relu_nan_safe_scalar(T sx) {
     return sx > T(0) ? sx : T(0);
 }
 
+// The AVX2 bodies' NaN rule: v with the quiet bit set where v is a NaN, else r,
+// so a result built from two NaNs takes the first NaN operand in written order
+// whatever operand order the compiler emits.
+inline float pickq(float r, float v) {
+    return v != v ? std::bit_cast<float>(std::bit_cast<std::uint32_t>(v) | 0x00400000u) : r;
+}
+
+inline double pickq(double r, double v) {
+    return v != v ? std::bit_cast<double>(std::bit_cast<std::uint64_t>(v) | 0x0008000000000000u) : r;
+}
+
+// Runs f(lo, hi) on each thread's elements, split at 64-byte lines of out.
+template <typename T, typename F>
+void elementwise(T* out, int64_t n, const F& f) {
+    constexpr int64_t LINE = 64 / static_cast<int64_t>(sizeof(T));
+    const auto addr = reinterpret_cast<std::uintptr_t>(out);
+    int64_t base = addr % sizeof(T) == 0 ? static_cast<int64_t>((64 - addr % 64) % 64 / sizeof(T)) : 0;
+    base = base < n ? base : n;
+    const int64_t lines = (n - base) / LINE;
+    const int nt = team_size(static_cast<double>(n) * static_cast<double>(sizeof(T)), FUSED_SERIAL_BELOW_BYTES,
+                             FUSED_PER_THREAD_BYTES, lines);
+    const unsigned csr = mxcsr();
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(nt) if(nt > 1)
+#endif
+    {
+        const mxcsr_scope fp(csr);
+#if defined(_OPENMP)
+        const int64_t t = omp_get_thread_num();
+        const int64_t team = omp_get_num_threads();
+#else
+        const int64_t t = 0;
+        const int64_t team = 1;
+#endif
+        f(t == 0 ? 0 : base + LINE * (lines * t / team), t == team - 1 ? n : base + LINE * (lines * (t + 1) / team));
+    }
+}
+
 } // namespace
 
 template <typename T>
 void fused_axpby_naive(const T* x, const T* y, T* out, int64_t n, T a, T b) {
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = a * x[i] + b * y[i];
-    }
+    elementwise(out, n, [=](int64_t lo, int64_t hi) {
+        for (int64_t i = lo; i < hi; ++i) {
+            T ax = a * x[i];
+            T by = b * y[i];
+            T r = ax + by;
+            if (r != r) {
+                ax = pickq(ax, a);
+                by = pickq(by, b);
+                r = pickq(ax + by, ax);
+            }
+            out[i] = r;
+        }
+    });
 }
 
 template <typename T>
 void fused_fma3_naive(const T* x, const T* y, const T* z, T* out, int64_t n) {
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = std::fma(x[i], y[i], z[i]);
-    }
+    elementwise(out, n, [=](int64_t lo, int64_t hi) {
+        for (int64_t i = lo; i < hi; ++i) {
+            T r = std::fma(x[i], y[i], z[i]);
+            if (r != r) {
+                r = pickq(pickq(pickq(r, z[i]), y[i]), x[i]);
+            }
+            out[i] = r;
+        }
+    });
 }
 
 template <typename T>
 void fused_scaled_relu_naive(const T* x, T* out, int64_t n, T scale) {
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static)
-#endif
-    for (int64_t i = 0; i < n; ++i) {
-        out[i] = relu_nan_safe_scalar<T>(scale * x[i]);
-    }
+    elementwise(out, n, [=](int64_t lo, int64_t hi) {
+        for (int64_t i = lo; i < hi; ++i) {
+            const T sx = scale * x[i];
+            out[i] = relu_nan_safe_scalar<T>(sx != sx ? pickq(sx, scale) : sx);
+        }
+    });
 }
 
 template void fused_axpby_naive<float>(const float*, const float*, float*, int64_t, float, float);

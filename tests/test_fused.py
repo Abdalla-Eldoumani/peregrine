@@ -1,20 +1,20 @@
 """Fused elementwise suite: axpby, fma3, scaled_relu, both backends.
 
-FUSE-02 (CPU AVX2 matches the unfused NumPy expression incl exact NaN/Inf) and
-the CPU half of FUSE-04 (all dtypes, sizes 0 to 16M, NaN/Inf). Every CPU-vs-NumPy
+The CPU AVX2 kernels match the unfused NumPy expression, including exact NaN/Inf,
+across all dtypes and sizes 0 to 16M. Every CPU-vs-NumPy
 and GPU-vs-NumPy comparison routes through assert_fused_close (conftest), never an
 inline tolerance, exactly like the matmul and reduction suites. fma3 compares
 against the unfused NumPy x*y + z and the helper allows the single-rounding fused
 result to be at least as accurate (the elementwise-fused tolerance contract).
 
-The reserved -k area names from the phase Test Map (filled here):
+The -k area names:
 
-    cpu and oracle  -> FUSE-02 CPU AVX2 matches unfused NumPy, all dtypes/sizes
-    relu and nan    -> FUSE-02 scaled_relu NaN propagation (the np.maximum trap)
-    thread          -> FUSE-02 bitwise thread stability (OMP 1 vs N subprocess)
-    error           -> FUSE-02 dtype rejection / promotion / same-shape errors
-    gpu             -> FUSE-03 device grid-stride/float4 matches the same oracle
-    property        -> FUSE-04 hypothesis property over drawn shapes + large @example
+    cpu and oracle  -> CPU AVX2 matches unfused NumPy, all dtypes/sizes
+    relu and nan    -> scaled_relu NaN propagation (the np.maximum trap)
+    thread          -> bitwise thread stability (OMP 1 vs N subprocess)
+    error           -> dtype rejection / promotion / same-shape errors
+    gpu             -> device grid-stride/float4 matches the same oracle
+    property        -> hypothesis property over drawn shapes + large @example
 
 GPU tests skip cleanly with a stated reason on a CPU-only build or a machine
 without a device, so the whole file stays green on the WSL/GCC
@@ -45,7 +45,7 @@ DTYPES = [np.float32, np.float64]
 
 # The oracle adds 16M and 16M-1 as explicit examples (the 0..16M range and the
 # odd-tail float4 probe) rather than across the full cartesian grid, to keep
-# suite runtime sane (CONTEXT: mind 16M runtime; RESEARCH FUSE-04 Pitfall 4).
+# suite runtime sane.
 LARGE_SIZE = 16 * 1024 * 1024
 LARGE_ODD_SIZE = 16 * 1024 * 1024 - 1
 
@@ -128,7 +128,7 @@ def _operands(shape, dtype, n_operands, seed=0):
 
 
 # ---------------------------------------------------------------------------
-# FUSE-02 / FUSE-04: oracle, all dtypes, legacy-killer + round + odd sizes.
+# Oracle, all dtypes, legacy-killer + round + odd sizes.
 # -k "cpu and oracle"
 # ---------------------------------------------------------------------------
 
@@ -171,76 +171,28 @@ def test_cpu_oracle_rectangular(op_id, call, oracle, n_operands, dtype):
     assert_fused_close(np.asarray(got), ref)
 
 
-def _ulp_distance(got, ref):
-    # Representable-step distance between two same-dtype float arrays: reinterpret
-    # the bits as signed ints and remap to a monotone ordering (negatives mirrored
-    # below +0.0), so |mono(got) - mono(ref)| counts the float ladder rungs between
-    # them. One rung is one ULP. Used to prove a contracting-build divergence is a
-    # single legitimate rounding, not arbitrary error. Inputs are strictly positive
-    # finite here, so the negative branch never runs, but it keeps the helper total.
-    int_t = np.int64 if got.dtype == np.float64 else np.int32
-    g = np.ascontiguousarray(got).view(int_t).astype(np.int64)
-    r = np.ascontiguousarray(ref).view(int_t).astype(np.int64)
-    floor = np.int64(np.iinfo(np.int64).min)
-    g = np.where(g < 0, floor - g, g)
-    r = np.where(r < 0, floor - r, r)
-    return np.abs(g - r)
-
-
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 def test_cpu_axpby_bitwise_equals_unfused(dtype):
-    # axpby's vector body is add(mul(a,x), mul(b,y)) -- written as two roundings to
-    # match the unfused NumPy expression a*x + b*y (the WR-01 contract; fma3 is the
-    # one op that contracts to a single rounding). Whether those two roundings
-    # SURVIVE to the result depends on the compiler's sanctioned FP model, and the
-    # honest claim differs per platform:
-    #
-    #   MSVC /fp:precise stops emitting FMA contractions (VS 2022; conftest header),
-    #   so the kernel keeps both roundings and is BITWISE-equal to the unfused NumPy
-    #   reference -- the strong claim, asserted with assert_array_equal.
-    #
-    #   GCC's DEFAULT FP model allows FMA contraction, so it contracts add(mul,mul)
-    #   into a single fmadd even from explicit intrinsics, and the kernel rounds
-    #   once. That is the more accurate single-rounding FMA, legitimately differing
-    #   from the always-two-rounding NumPy reference by at most one ULP -- exactly
-    #   the fma3-class contraction the numeric policy sanctions, NOT a kernel bug.
-    #
-    # Detect which world we are in at runtime from the kernel's OWN output rather
-    # than guessing by os.name: the NumPy reference is always two-rounding (separate
-    # ufuncs never fuse), so if the kernel reproduces it bit-for-bit the build does
-    # not contract and the strong bitwise claim holds; if it does not, the build
-    # contracted, and we assert the divergence is a single legitimate rounding (<= 1
-    # ULP) and stays within the fused tolerance contract (assert_fused_close, the
-    # same sanctioned path the rest of the suite uses -- the contract is NOT
-    # loosened). The size spans many AVX2 blocks (8 f32 / 4 f64) AND a scalar tail
-    # (+5 is not a multiple of either width). Strictly positive operands (no
-    # cancellation), so this is a rounding-form claim, not an accuracy claim.
+    # axpby's vector body is add(mul(a,x), mul(b,y)): two roundings, to match the
+    # unfused NumPy expression a*x + b*y (fma3 is the one op that rounds once).
+    # MSVC /fp:precise never fuses them, and on GCC, whose default FP model may
+    # fuse a multiply into the add that consumes it, an empty asm on each product
+    # keeps them apart. So every build is bitwise equal to the NumPy reference.
+    # The size spans many AVX2 blocks (8 f32 / 4 f64) AND a partial tail (+5 is
+    # not a multiple of either width).
     n = 8 * 1000 + 5
     rng = np.random.default_rng(11)
     x = (np.abs(rng.standard_normal((1, n))) + 0.5).astype(dtype)
     y = (np.abs(rng.standard_normal((1, n))) + 0.5).astype(dtype)
     got = np.asarray(pg.axpby(x, y, a=2.0, b=3.0))
-    ref = dtype(2.0) * x + dtype(3.0) * y
-    if (got == ref).all():
-        # Non-contracting build (MSVC /fp:precise): the two roundings survive, so
-        # the strongest true claim is exact bitwise equality.
-        np.testing.assert_array_equal(got, ref)
-    else:
-        # Contracting build (GCC default model): the kernel rounded once. Prove the
-        # divergence is a single legitimate FMA rounding -- at most one ULP from the
-        # two-rounding reference -- and within the sanctioned fused tolerance.
-        assert int(_ulp_distance(got, ref).max()) <= 1, (
-            "axpby diverges from the unfused reference by more than one ULP: the "
-            "difference is not a single FMA contraction"
-        )
-        assert_fused_close(got, ref)
+    np.testing.assert_array_equal(got, dtype(2.0) * x + dtype(3.0) * y)
 
 
 @pytest.mark.parametrize("op_id,call,oracle,n_operands", OPS, ids=OP_IDS)
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 @pytest.mark.parametrize("n", [LARGE_SIZE, LARGE_ODD_SIZE], ids=["16M", "16M-1"])
 def test_cpu_oracle_large(op_id, call, oracle, n_operands, dtype, n):
-    # The 0..16M FUSE-04 range and the 16M-1 odd-tail probe, as a FEW explicit
+    # The 0..16M range and the 16M-1 odd-tail probe, as a FEW explicit
     # (1, n) examples rather than across the full cartesian grid (runtime). 16M-1
     # is odd so the very last element is a scalar-tail element after the last full
     # AVX2 block -- the legacy-killer class at scale.
@@ -263,7 +215,7 @@ def test_cpu_oracle_int_promotes_to_float64():
 
 
 # ---------------------------------------------------------------------------
-# FUSE-02: NaN / Inf positional. The scaled_relu NaN trap is lane-position
+# NaN / Inf positional. The scaled_relu NaN trap is lane-position
 # sensitive, so specials land at every offset incl the tail.
 # -k "relu and nan" / -k "nan"
 # ---------------------------------------------------------------------------
@@ -272,8 +224,8 @@ def test_cpu_oracle_int_promotes_to_float64():
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 @pytest.mark.parametrize("scale", [1.0, 3.0, -2.0], ids=["s1", "s3", "sneg"])
 def test_relu_nan_propagates_at_every_lane(dtype, scale):
-    # scaled_relu(NaN) must PROPAGATE NaN, not collapse to 0 (the bare maxps trap
-    # RESEARCH Pitfall 1). Build a flat row long enough to span several AVX2
+    # scaled_relu(NaN) must PROPAGATE NaN, not collapse to 0 (the bare maxps
+    # trap). Build a flat row long enough to span several AVX2
     # blocks and a non-empty tail, then put a NaN at EVERY lane offset in turn,
     # including the last element (the tail lane). np.maximum is the oracle.
     width = 8 if dtype == np.float32 else 4
@@ -289,7 +241,7 @@ def test_relu_nan_propagates_at_every_lane(dtype, scale):
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 def test_relu_negative_nan_propagates(dtype):
-    # -NaN is still NaN: scaled_relu(-NaN) propagates, never 0 (RESEARCH line 230).
+    # -NaN is still NaN: scaled_relu(-NaN) propagates, never 0.
     # The sign bit of a NaN is not meaningful to np.maximum, but it must stay NaN.
     n = 11
     x = np.full((1, n), -np.nan, dtype=dtype)
@@ -315,8 +267,8 @@ def test_relu_signed_inf_positions(dtype):
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 def test_fma3_inf_times_zero_is_nan(dtype):
-    # inf*0 + z = NaN, exactly like the unfused NumPy expression (RESEARCH line
-    # 242). Place the inf*0 pair at multiple offsets including the tail.
+    # inf*0 + z = NaN, exactly like the unfused NumPy expression. Place the
+    # inf*0 pair at multiple offsets including the tail.
     n = 14
     rng = np.random.default_rng(1)
     x = rng.standard_normal((1, n)).astype(dtype)
@@ -353,7 +305,7 @@ def test_axpby_inf_operand_positions(dtype):
 
 
 # ---------------------------------------------------------------------------
-# FUSE-02: dtype rejection / promotion / same-shape / ndim errors.
+# Dtype rejection / promotion / same-shape / ndim errors.
 # -k "error"
 # ---------------------------------------------------------------------------
 
@@ -423,7 +375,7 @@ def test_error_3d_input_is_value_error(op_id, call, oracle, n_operands):
 
 
 # ---------------------------------------------------------------------------
-# FUSE-02: bitwise thread stability (OMP 1 vs N subprocess). Elementwise has no
+# Bitwise thread stability (OMP 1 vs N subprocess). Elementwise has no
 # cross-element accumulation, so the result is bitwise thread-stable by
 # construction -- but the test is still required. -k "thread"
 # ---------------------------------------------------------------------------
@@ -451,6 +403,9 @@ def _run_thread_subprocess(tmp_path, omp_threads):
     # full environment copy with the override merged in: a stripped env breaks
     # DLL resolution for the OpenMP runtime on Windows (mirrors test_threads.py).
     env = dict(os.environ, OMP_NUM_THREADS=str(omp_threads))
+    # PEREGRINE_NUM_THREADS outranks OMP_NUM_THREADS; inherited, it would make
+    # both children run the same count.
+    env.pop("PEREGRINE_NUM_THREADS", None)
     p = subprocess.run(
         [sys.executable, "-c", _THREAD_SCRIPT, str(out_path)],
         env=env,
@@ -472,7 +427,348 @@ def test_thread_count_bitwise_identical(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# FUSE-04: hypothesis property over drawn shapes + the legacy-killer @example
+# Kernel edges: sizes just below, at, and above every threshold the kernels
+# switch on (the serial size, below which one thread runs without the alignment
+# peel, six threads, streaming stores), every head length of the 32-byte
+# alignment peel and every misalignment below it (out is a view at an element
+# offset into a larger buffer), out= exactly an input, NaN/Inf/-0.0/subnormal
+# operands, and the caller's FTZ/DAZ. One script computes every case; it runs
+# at 1 and 6 threads on the AVX2 kernels and at 1 and 6 threads on the scalar
+# twins (PEREGRINE_DISABLE_AVX2=1, read at import, so each run is its own
+# process).
+# -k "edges"
+# ---------------------------------------------------------------------------
+
+_EDGE_SCRIPT = r"""
+import hashlib
+import sys
+
+import numpy as np
+
+import peregrine as pg
+
+threads, path = int(sys.argv[1]), sys.argv[2]
+pg.set_num_threads(threads)
+MXCSR_DEFAULT, FTZ_DAZ = 0x1F80, 0x8040
+L3 = 12 * 2**20
+ARRAYS = {"axpby": 3, "fma3": 4, "scaled_relu": 2}
+INPUTS = {"axpby": 2, "fma3": 3, "scaled_relu": 1}
+SMALL = [1, 2, 3, 5, 7, 8, 9, 15, 16, 17, 31, 33, 64, 65]
+
+
+def sizes(op, dt):
+    item = np.dtype(dt).itemsize
+    team = 32768 // item  # the serial threshold, in elements of out
+    six = 6 * 8192 // item  # six threads have work from here
+    at = L3 // (ARRAYS[op] * item)  # streaming starts above this
+    return SMALL + [team - 1, team, team + 1, six - 1, six, six + 1, at - 1, at, at + 1]
+
+
+def operands(op, dt, n, seed):
+    # Mixed signs, a run of subnormal operands, products that underflow, and one
+    # special per index (NaN, +-Inf, -0.0, inf * 0 for fma3), at both ends and
+    # inside, so they land on peels, tails, and thread boundaries alike.
+    rng = np.random.default_rng(seed)
+    k = INPUTS[op]
+    tiny = 2.0**-70 if dt == np.float32 else 2.0**-540
+    xs = [rng.standard_normal(n) for _ in range(k)]
+    for j, v in enumerate(xs):
+        v[j::5 + j] *= tiny
+    xs[0][3::11] *= tiny
+    sub = np.finfo(dt).smallest_subnormal
+    picks = sorted(p for p in {0, 1, n // 3, n // 2, n - 2, n - 1, *rng.integers(0, n, 8).tolist()} if 0 <= p < n)
+    specials = [np.nan, np.inf, -np.inf, -0.0, 3 * float(sub)]
+    for i, p in enumerate(picks):
+        xs[i % k][p] = specials[i % len(specials)]
+    if op == "fma3" and n > 4:
+        xs[0][n // 4], xs[1][n // 4] = np.inf, 0.0
+    return [v.astype(dt).reshape(1, n) for v in xs]
+
+
+def run(op, xs, out):
+    if op == "axpby":
+        return pg.axpby(xs[0], xs[1], a=0.75, b=-1.5, out=out)
+    if op == "fma3":
+        return pg.fma3(xs[0], xs[1], xs[2], out=out)
+    return pg.scaled_relu(xs[0], scale=1.25, out=out)
+
+
+def run_case(op, dt, n, off, where, given, csr):
+    buf = np.zeros((1, n + 8), dt)
+    xs = [v.copy() for v in given]
+    if where is None:
+        out = buf[:, off:off + n]
+    else:
+        i = 0 if where == "xx" else where
+        buf[:, off:off + n] = xs[i]
+        xs[i] = out = buf[:, off:off + n]
+        if where == "xx":
+            xs[1] = out
+    previous = pg._core._set_mxcsr(csr)
+    try:
+        r = run(op, xs, out)
+    finally:
+        pg._core._set_mxcsr(previous)
+    assert r is out
+    # Values against NumPy where it computes the same roundings, so a run whose
+    # results never reached out cannot pass by agreeing with another such run.
+    x0 = given[0]
+    x1 = x0 if where == "xx" else given[-1]
+    if csr == MXCSR_DEFAULT and op == "scaled_relu":
+        assert np.array_equal(r, np.maximum(dt(1.25) * x0, dt(0.0)), equal_nan=True)
+    if csr == MXCSR_DEFAULT and op == "axpby":
+        assert np.array_equal(r, dt(0.75) * x0 + dt(-1.5) * x1, equal_nan=True)
+    canon = np.where(np.isnan(r), np.nan, r)
+    return hashlib.blake2b(r.tobytes()).hexdigest(), hashlib.blake2b(canon.tobytes()).hexdigest()
+
+
+digests = {}
+for op in ("axpby", "fma3", "scaled_relu"):
+    # where: None for a fresh output, else the input out= aliases; "xx" passes
+    # x twice to axpby with out=x
+    wheres = [None, 0] + ([INPUTS[op] - 1] if INPUTS[op] > 1 else []) + (["xx"] if op == "axpby" else [])
+    for dt in (np.float32, np.float64):
+        lanes = 32 // np.dtype(dt).itemsize
+        for n in sizes(op, dt):
+            given = operands(op, dt, n, n)
+            for off in range(lanes) if n < 100000 else (0, 1):
+                for where in wheres:
+                    for mode, csr in (("plain", MXCSR_DEFAULT), ("ftz", MXCSR_DEFAULT | FTZ_DAZ)):
+                        key = f"{mode} {op} {np.dtype(dt).name} {n} {off} {where}"
+                        digests[key] = run_case(op, dt, n, off, where, given, csr)
+np.save(path, np.array(sorted((k, *v) for k, v in digests.items())))
+"""
+
+
+@pytest.fixture(scope="module")
+def edge_digests(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("edges")
+    runs = {}
+    for threads in (1, 6):
+        for twin in (False, True):
+            env = dict(os.environ)
+            env.pop("PEREGRINE_NUM_THREADS", None)
+            env.pop("PEREGRINE_DISABLE_AVX2", None)
+            if twin:
+                env["PEREGRINE_DISABLE_AVX2"] = "1"
+            path = tmp / f"edges_{threads}_{int(twin)}.npy"
+            # the four runs share nothing, so they run side by side
+            proc = subprocess.Popen([sys.executable, "-c", _EDGE_SCRIPT, str(threads), str(path)], env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            runs[(threads, twin)] = (proc, path)
+    digests = {}
+    for key, (proc, path) in runs.items():
+        _, err = proc.communicate(timeout=600)
+        assert proc.returncode == 0, err
+        digests[key] = {row[0]: (row[1], row[2]) for row in np.load(path)}
+    return digests
+
+
+@pytest.mark.parametrize("twin", [False, True], ids=["avx2", "twin"])
+def test_edges_thread_count_does_not_change_bits(edge_digests, twin):
+    one, six = edge_digests[(1, twin)], edge_digests[(6, twin)]
+    assert one.keys() == six.keys()
+    assert [k for k in one if one[k][0] != six[k][0]] == []
+    # the operands carry subnormals that FTZ/DAZ must visibly flush
+    assert any(one[k][0] != one["ftz" + k[len("plain"):]][0] for k in one if k.startswith("plain"))
+
+
+@pytest.mark.skipif(not (pg.cpu_features()["avx2"] and pg.cpu_features()["fma"]),
+                    reason="the AVX2 kernels need an AVX2 CPU")
+def test_edges_avx2_equals_scalar_twin(edge_digests):
+    avx2, twin = edge_digests[(6, False)], edge_digests[(6, True)]
+    assert avx2.keys() == twin.keys()
+    # NaN payloads are compared positionally: the twin's std::fma may come from
+    # the C runtime, which need not produce the payload the FMA instruction does.
+    assert [k for k in avx2 if avx2[k][1] != twin[k][1]] == []
+
+
+# NaN payloads. Two NaNs meeting in one instruction give the payload of the
+# first source slot, and the compiler may order operands differently in the
+# peel, the body, and the tail. The kernels choose the first NaN operand in
+# written order (a, x, b, y; x, y, z; scale, x), quieted, so a payload never
+# depends on alignment, thread count, or path. -k "payload"
+# ---------------------------------------------------------------------------
+
+_QUIET = {np.float32: (np.uint32, 0x7F800000, 0x00400000), np.float64: (np.uint64, 0x7FF0000000000000, 0x0008000000000000)}
+
+
+def _call_fused(op, xs, s, out):
+    if op == "axpby":
+        return pg.axpby(xs[0], xs[1], a=s, b=-1.5, out=out)
+    if op == "fma3":
+        return pg.fma3(xs[0], xs[1], xs[2], out=out)
+    return pg.scaled_relu(xs[0], scale=s, out=out)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("op", ["axpby", "fma3", "scaled_relu"])
+@pytest.mark.parametrize("scalar_nan", [False, True])
+def test_nan_payload_is_the_first_nan_operand(op, dtype, scalar_nan):
+    if op == "fma3" and scalar_nan:
+        pytest.skip("fma3 has no scalar operand")
+    u, exp, q = _QUIET[dtype]
+    k = {"axpby": 2, "fma3": 3, "scaled_relu": 1}[op]
+    # Past the serial size, so the alignment peel, the body, and the tail all run.
+    n = 32768 // np.dtype(dtype).itemsize + 37
+    rng = np.random.default_rng(11)
+    xs = [rng.standard_normal(n).astype(dtype) for _ in range(k)]
+    # Distinct payloads, every other one signaling; step 7 puts NaNs at every
+    # lane offset, and the operand subsets cycle so every combination occurs.
+    payload = 1
+    for idx, p in enumerate(range(0, n, 7)):
+        mask = idx % (2**k - 1) + 1
+        for j in range(k):
+            if mask >> j & 1:
+                xs[j][p] = np.array(exp | (q if payload % 2 else 0) | payload, u).view(dtype)
+                payload += 1
+    s = 0.75
+    if scalar_nan:
+        s = np.array(exp | 0x5A5A, u).view(dtype)
+    order = {"axpby": lambda i: [s, xs[0][i], -1.5, xs[1][i]], "fma3": lambda i: [xs[0][i], xs[1][i], xs[2][i]],
+             "scaled_relu": lambda i: [s, xs[0][i]]}[op]
+    expected = {}
+    for i in range(n):
+        first = next((v for v in order(i) if np.isnan(v)), None)
+        if first is not None:
+            expected[i] = int(np.array(first, dtype).view(u)) | q
+    assert expected
+    w = 32 // np.dtype(dtype).itemsize
+    results = []
+    saved = pg.get_num_threads()
+    try:
+        for threads in (1, 6):
+            pg.set_num_threads(threads)
+            for off in range(w):
+                buf = np.zeros((1, n + w), dtype)
+                out = buf[:, off:off + n]
+                _call_fused(op, [x.reshape(1, n) for x in xs], s, out)
+                bits = out.reshape(-1).view(u)
+                assert {i: int(bits[i]) for i in expected} == expected, (threads, off)
+                results.append(bits.copy())
+    finally:
+        pg.set_num_threads(saved)
+    for r in results[1:]:
+        assert np.array_equal(r, results[0])
+
+
+# ---------------------------------------------------------------------------
+# Loop direction. From 4 KiB of out the AVX2 kernels run descending when out
+# sits up to 512 bytes past an input modulo 4 KiB and not that close before any
+# other (an ascending loop would stall there on 4K aliasing), and ascending
+# otherwise. The direction must never change a bit. The inputs share one page
+# offset and out sits at a chosen distance past it: inside the window, on its
+# edges, outside, before the inputs, and, with two inputs, past one and before
+# the other. Sizes cover the small ones that never test the direction, every
+# remainder of the four-vector groups from 4 KiB (no peel), and a few past the
+# serial size (peel, then a team of two and up), with NaN payloads and
+# infinities spread over every vector position. -k "direction"
+# ---------------------------------------------------------------------------
+
+_PAGE = 4096
+
+
+def _special_operands(op, dtype, n, seed):
+    u, exp, q = _QUIET[dtype]
+    k = {"axpby": 2, "fma3": 3, "scaled_relu": 1}[op]
+    rng = np.random.default_rng(seed)
+    xs = [rng.standard_normal(n).astype(dtype) for _ in range(k)]
+    # every fifth element a NaN with its own payload (alternately signaling),
+    # every eleventh an infinity, the operand cycling with the position
+    nan_at, inf_at = np.arange(2, n, 5), np.arange(3, n, 11)
+    for j in range(k):
+        p = nan_at[nan_at % k == j]
+        xs[j].view(u)[p] = (exp | np.where(p % 2 == 1, q, 0) | (p + 1)).astype(u)
+        xs[j][inf_at[(inf_at + 1) % k == j]] = np.inf
+    return xs
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("op", ["axpby", "fma3", "scaled_relu"])
+def test_direction_never_changes_bits(op, dtype):
+    item = np.dtype(dtype).itemsize
+    w = 32 // item
+    k = {"axpby": 2, "fma3": 3, "scaled_relu": 1}[op]
+    serial = 32768 // item
+    tested = 4096 // item
+    sizes = [1, 2, w - 1, w, w + 1, 4 * w - 1, 4 * w, 4 * w + 1, tested - 1]
+    sizes += [tested + r for r in range(8 * w + 3)]
+    sizes += [serial, serial + 1, serial + w - 1, serial + 4 * w + 3]
+    gaps = [item, 40, 200, 448, 504, 512, 520, 2048, _PAGE - 512, _PAGE - 504, _PAGE - 40, _PAGE - item]
+    span = (max(sizes) * item // _PAGE + 2) * _PAGE
+    raw = np.zeros((k + 3) * span + _PAGE, np.uint8)
+    base = -raw.ctypes.data % _PAGE
+
+    def at(offset, n):
+        return raw[base + offset:base + offset + n * item].view(dtype).reshape(1, n)
+
+    saved = pg.get_num_threads()
+    bad = []
+    try:
+        for n in sizes:
+            given = _special_operands(op, dtype, n, n)
+            pg.set_num_threads(1)
+            ref = _call_fused(op, [x.reshape(1, n) for x in given], 0.75, None).tobytes()
+            for threads in (1, 6):
+                pg.set_num_threads(threads)
+                for gap in gaps:
+                    for mixed in ([False, True] if k > 1 else [False]):
+                        xs = []
+                        for j, x in enumerate(given):
+                            # mixed: the second input sits 2 * gap past the first, so out
+                            # is gap past one input and gap before the other
+                            v = at(j * span + (2 * gap % _PAGE if mixed and j == 1 else 0), n)
+                            v[...] = x
+                            xs.append(v)
+                        out = at(k * span + gap, n)
+                        out[...] = 0
+                        _call_fused(op, xs, 0.75, out)
+                        if out.tobytes() != ref:
+                            bad.append((n, threads, gap, mixed))
+    finally:
+        pg.set_num_threads(saved)
+    assert bad == []
+
+
+# ---------------------------------------------------------------------------
+# DRAM-sized calls. Past 24 MiB of inputs and out the team is capped at 12 /
+# arrays members (fma3 3, axpby 4, scaled_relu 6) and the inputs are prefetched
+# a little ahead, also past the end of each member's range. Sizes at the cap,
+# one past it, and past it with a tail, at 1, 2, 3, and 6 threads, bitwise equal
+# to each other and, where NumPy rounds the same way, to NumPy. -k "dram"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("op", ["axpby", "fma3", "scaled_relu"])
+def test_dram_team_cap_never_changes_bits(op, dtype):
+    item = np.dtype(dtype).itemsize
+    arrays = {"axpby": 3, "fma3": 4, "scaled_relu": 2}[op]
+    cap = 24 * 2**20 // (arrays * item)
+    saved = pg.get_num_threads()
+    try:
+        for n in (cap, cap + 1, cap + 4 * (32 // item) + 3):
+            xs = [x.reshape(1, n) for x in _special_operands(op, dtype, n, n)]
+            results = []
+            for threads in (1, 2, 3, 6):
+                pg.set_num_threads(threads)
+                results.append(_call_fused(op, xs, 0.75, None).tobytes())
+            assert results[1:] == results[:1] * 3, n
+            got = np.frombuffer(results[0], dtype)
+            # the signaling NaNs raise NumPy's invalid flag, which is expected here
+            with np.errstate(invalid="ignore"):
+                if op == "scaled_relu":
+                    want = np.maximum(dtype(0.75) * xs[0], dtype(0.0))
+                    assert np.array_equal(got, want.ravel(), equal_nan=True)
+                if op == "axpby":
+                    want = dtype(0.75) * xs[0] + dtype(-1.5) * xs[1]
+                    assert np.array_equal(got, want.ravel(), equal_nan=True)
+    finally:
+        pg.set_num_threads(saved)
+
+
+# ---------------------------------------------------------------------------
+# Hypothesis property over drawn shapes + the legacy-killer @example
 # pins + an explicit large @example. -k "property"
 # ---------------------------------------------------------------------------
 
@@ -572,7 +868,7 @@ test_property_matches_unfused_numpy = example(
 
 
 # ---------------------------------------------------------------------------
-# FUSE-03: the device path matches the same oracle. The device-resident kernels
+# The device path matches the same oracle. The device-resident kernels
 # (grid-stride/float4) compute on pg.Array operands; the result, brought back
 # with from_device, must match the SAME assert_fused_close oracle as the CPU
 # path. The marker resolves to a clean skip on CPU-only and WSL. -k "gpu"
@@ -681,10 +977,10 @@ def test_gpu_matches_oracle_nan_inf(op_id, call, oracle, n_operands, dtype):
 @pytest.mark.parametrize("dtype", DTYPES, ids=["f32", "f64"])
 @pytest.mark.parametrize("n", [LARGE_SIZE, LARGE_ODD_SIZE], ids=["16M", "16M-1"])
 def test_gpu_matches_oracle_large(op_id, call, oracle, n_operands, dtype, n):
-    # The 0..16M FUSE-04 range and the 16M-1 odd-tail float4 probe on the device:
+    # The 0..16M range and the 16M-1 odd-tail float4 probe on the device:
     # 16M-1 is odd so the last element is a scalar-tail element after the last full
     # float4/double2 pack -- the float4 OOB risk compute-sanitizer memcheck catches
-    # (RESEARCH Pitfall 4). A few explicit (1, n) examples, not the cartesian grid.
+    # A few explicit (1, n) examples, not the cartesian grid.
     x, y, z = _operands((1, n), dtype, n_operands)
     got = call(x, y, z)
     ref = oracle(x, y, z)
@@ -711,7 +1007,7 @@ def test_gpu_mixed_residency_is_type_error():
 def test_fused_helper_smoke():
     """The single toleranced path is importable and passes a trivial identity.
 
-    Kept from the Wave-0 scaffold: a non-gated everywhere-pass so the file stays
+    A non-gated everywhere-pass so the file stays
     collectable even if every kernel were stripped.
     """
     x = np.zeros((2, 2), np.float64)

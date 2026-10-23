@@ -1,0 +1,166 @@
+name: wheels
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  sdist:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install build==1.6.1
+      - run: python -m build --sdist --outdir dist
+      - name: sdist holds tracked source only
+        run: python tools/check_dist_contents.py sdist dist/*.tar.gz
+      - name: sdist builds a working wheel
+        run: |
+          python -m pip wheel --no-deps -w sdist-wheel dist/*.tar.gz
+          python -m venv "$RUNNER_TEMP/v"
+          "$RUNNER_TEMP/v/bin/python" -m pip install sdist-wheel/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/v/bin/python" -I -c "import numpy as np, peregrine as pg; a = np.arange(6.0).reshape(2, 3); assert (pg.matmul(a, a.T) == a @ a.T).all()"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  wheels:
+    needs: sdist
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdist
+          path: sdist
+      - run: echo "SDIST=$(ls sdist/*.tar.gz)" >> "$GITHUB_ENV"
+      - uses: pypa/cibuildwheel@b3395e271a35f73dad77f21802abe9b986dfe299 # v4.3.1
+        with:
+          package-dir: ${{ env.SDIST }}
+          output-dir: wheelhouse
+        env:
+          # cp312 builds the abi3 wheel; cp315 finds it compatible and only tests it.
+          CIBW_BUILD: "cp312-* cp315-*"
+          CIBW_SKIP: "*t-* *-win32 *_i686 *-musllinux_*"
+          CIBW_ARCHS: auto64
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_BEFORE_BUILD_WINDOWS: "pip install delvewheel==1.13.2"
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: "python {project}/tools/check_wheel_dlls.py {wheel} && delvewheel repair -w {dest_dir} {wheel}"
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel show {wheel} && auditwheel repair -w {dest_dir} {wheel}"
+          CIBW_TEST_EXTRAS: test
+          CIBW_TEST_SOURCES: "tests benchmarks tools docs pyproject.toml README.md CHANGELOG.md"
+          CIBW_TEST_ENVIRONMENT: "HYPOTHESIS_PROFILE=ci"
+          CIBW_TEST_COMMAND: "python -m pytest tests -q -p no:cacheprovider"
+      - name: wheels hold only what they may ship
+        run: python tools/check_dist_contents.py wheel wheelhouse/*.whl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  clean-import:
+    # The repaired Windows wheel must load and run with only the runtimes it
+    # bundles: Server Core has no Visual Studio, and the embeddable Python
+    # carries only its own C runtime.
+    needs: wheels
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      MSYS_NO_PATHCONV: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wheels-windows-2025
+          path: wheelhouse
+      - name: stage an embeddable python with numpy and the wheel
+        run: |
+          curl -sSfL -o py.zip https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
+          python -m zipfile -e py.zip w/py
+          python -m pip install --target w/site wheelhouse/*.whl
+          cp tools/smoke_import.py w/
+      - name: import and run every op in Windows Server Core
+        run: |
+          docker run --rm -v "$(cygpath -w "$PWD/w"):C:\w" mcr.microsoft.com/windows/servercore:ltsc2025 \
+            'C:\w\py\python.exe' -I 'C:\w\smoke_import.py' 'C:\w\site'
+
+  release-dry-run:
+    if: github.event_name == 'pull_request'
+    needs: [sdist, wheels, clean-import]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - run: python tools/release.py --dist dist --dry-run
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [sdist, wheels, clean-import]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - run: python tools/release.py --dist dist --tag "$GITHUB_REF_NAME" --prepare
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          create-storage-record: false
+      - run: python tools/release.py --dist dist --tag "$GITHUB_REF_NAME" --publish
+        env:
+          GH_TOKEN: ${{ github.token }}

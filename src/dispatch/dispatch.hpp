@@ -3,14 +3,35 @@
 
 namespace pg::dispatch {
 
-// Every op routes through here. v1 has one backend (cpu naive); the packed
-// CPU kernels, the CUDA backend, and the calibrated crossover table all land
-// behind this same entry point so the binding layer never changes.
+// Every op routes through here, so the binding layer never changes when a
+// kernel does.
+//
+// Host matmul reads A and B through element strides: element (i, p) of A is
+// a[i * rs_a + p * cs_a] and (p, j) of B is b[p * rs_b + j * cs_b], any sign or
+// zero, so transposed, F-ordered, sliced, and reversed operands need no copy.
+// C is C-contiguous with ldc = n and is overwritten. Every path gives the same
+// bits for every layout of the same values.
 template <typename T>
-void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n);
+void matmul(const T* a, int64_t rs_a, int64_t cs_a, const T* b, int64_t rs_b, int64_t cs_b,
+            T* c, int64_t m, int64_t k, int64_t n);
 
-extern template void matmul<float>(const float*, const float*, float*, int64_t, int64_t, int64_t);
-extern template void matmul<double>(const double*, const double*, double*, int64_t, int64_t, int64_t);
+extern template void matmul<float>(const float*, int64_t, int64_t, const float*, int64_t, int64_t,
+                                   float*, int64_t, int64_t, int64_t);
+extern template void matmul<double>(const double*, int64_t, int64_t, const double*, int64_t, int64_t,
+                                    double*, int64_t, int64_t, int64_t);
+
+// C-contiguous operands.
+template <typename T>
+inline void matmul(const T* a, const T* b, T* c, int64_t m, int64_t k, int64_t n) {
+    matmul<T>(a, k, 1, b, n, 1, c, m, k, n);
+}
+
+// The host matmul paths. The choice is a pure function of the shape and the
+// CPU features, never of the layout or the thread count, because each path
+// rounds differently and a layout- or thread-dependent choice would change the
+// bits.
+enum class gemm_path { naive, small, skinny, packed };
+gemm_path choose_gemm_path(int64_t m, int64_t k, int64_t n, bool avx2_fma) noexcept;
 
 #if defined(PG_HAS_CUDA)
 // Device-resident GEMM routing. a, b, c are DEVICE pointers; the binding's
@@ -84,10 +105,10 @@ extern template void fused_scaled_relu_device<float>(const float*, float*, int64
 extern template void fused_scaled_relu_device<double>(const double*, double*, int64_t, double);
 #endif
 
-// transpose, sum_all, and sum_axis route through the same entry point. They
-// have one CPU implementation each (a plain, non-AVX2 TU that runs on every
-// CPU), so the routing is a direct forward today; keeping them behind dispatch
-// means the CUDA backend can join later without touching the binding layer.
+// transpose, sum_all, and sum_axis route through the same entry point, so the
+// binding layer never changes when a kernel does. transpose and the sums pick
+// their AVX2 bodies on avx2 && fma, else the scalar twins, with the same bits
+// either way.
 template <typename T>
 void transpose(const T* a, T* out, int64_t m, int64_t n);
 
@@ -97,11 +118,18 @@ T sum_all(const T* a, int64_t m, int64_t n);
 template <typename T>
 void sum_axis(const T* a, T* out, int64_t m, int64_t n, int axis);
 
+// sum_axis divided by the reduced count converted to T, in T, inside the same
+// pass; the bits equal sum_axis followed by that division.
+template <typename T>
+void mean_axis(const T* a, T* out, int64_t m, int64_t n, int axis);
+
 extern template void transpose<float>(const float*, float*, int64_t, int64_t);
 extern template void transpose<double>(const double*, double*, int64_t, int64_t);
 extern template float sum_all<float>(const float*, int64_t, int64_t);
 extern template double sum_all<double>(const double*, int64_t, int64_t);
 extern template void sum_axis<float>(const float*, float*, int64_t, int64_t, int);
 extern template void sum_axis<double>(const double*, double*, int64_t, int64_t, int);
+extern template void mean_axis<float>(const float*, float*, int64_t, int64_t, int);
+extern template void mean_axis<double>(const double*, double*, int64_t, int64_t, int);
 
 } // namespace pg::dispatch

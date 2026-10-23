@@ -9,15 +9,12 @@ namespace pg::cuda {
 // Device-resident fused elementwise kernels: axpby (a*x + b*y), fma3 (x*y + z,
 // one rounding), scaled_relu (maximum(scale*x, 0), NaN-propagating). x, y, z and
 // out are DEVICE pointers, C-contiguous (NumPy layout), over a flat n-element
-// range. Pure compute on the context compute stream; the binding owns buffer
+// range. Pure compute on the context stream; the binding owns buffer
 // lifetime (alloc + free), exactly as gemm<T> leaves staging to its caller.
 //
 // v1 is DEVICE-RESIDENT ONLY: there is no fused_host / staging twin (unlike
 // gemm + gemm_host). A host ndarray fused call computes on the CPU; the GPU path
-// is reached only for already-resident pg.Array operands, so the kernel and its
-// output buffer live on the single compute stream and there is no transfer ->
-// compute cross-stream race surface to fence (sidestepped by construction). The
-// kernels match the SAME unfused-NumPy oracle + elementwise
+// is reached only for already-resident pg.Array operands. The kernels match the SAME unfused-NumPy oracle + elementwise
 // tolerance as the CPU path; scaled_relu propagates NaN like np.maximum (the
 // device max does NOT, so the kernel restores it), and fma3 is a true single
 // rounding via fmaf/fma.
@@ -47,7 +44,7 @@ extern template void fused_scaled_relu<double>(const double*, double*, int64_t, 
 // three kernel launches per iteration -- NOT a single op, because a single-op
 // timer cannot measure the chained work the bench composes. The timed region is
 // the chain only: it allocates its own intermediate + output device scratch on
-// the compute stream once (so no allocation lands inside the timed window and the
+// the context stream once (so no allocation lands inside the timed window and the
 // chain runs transfer-free), warms the clocks, records a start event, runs `reps`
 // chain iterations, records a stop event, syncs, and returns cudaEventElapsedTime
 // / reps in milliseconds. Device-side timing is immune to the host-side

@@ -73,6 +73,112 @@ class TestTranspose:
         assert got.dtype == np.float64
         np.testing.assert_array_equal(got, a.T.astype(np.float64))
 
+    # The transpose moves bits and never computes, so it is held to the bytes
+    # of np.ascontiguousarray(a.T), on random bit patterns (signaling NaN
+    # payloads, -0.0, subnormals) as well as on normal values.
+    @staticmethod
+    def _operand(rng, shape, dtype, bits):
+        if not bits:
+            return rng.standard_normal(shape).astype(dtype)
+        u = np.uint32 if dtype == np.float32 else np.uint64
+        return rng.integers(0, np.iinfo(u).max, shape, dtype=u, endpoint=True).view(dtype)
+
+    @pytest.fixture
+    def threads(self):
+        previous = pg.get_num_threads()
+        yield pg.set_num_threads
+        pg.set_num_threads(previous)
+
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_every_small_shape_bitwise(self, dtype, n_threads, threads):
+        # Every m and n remainder of the 2W x W tiles (16 x 8 f32, 8 x 4 f64).
+        threads(n_threads)
+        rng = np.random.default_rng(7)
+        bad = []
+        for m in range(1, 34):
+            for n in range(1, 34):
+                a = self._operand(rng, (m, n), dtype, bits=(m + n) % 2 == 1)
+                if pg.transpose(a).tobytes() != np.ascontiguousarray(a.T).tobytes():
+                    bad.append((m, n))
+        assert bad == []
+
+    # Outputs below 32 KiB run one thread on plain W x W tiles and scalar
+    # remainders, from 32 KiB on the blocked bands: shapes just below, at, and
+    # just above that size, with row counts under W, at a multiple of W, and
+    # odd.
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_small_path_threshold_bitwise(self, dtype, n_threads, threads):
+        threads(n_threads)
+        rng = np.random.default_rng(9)
+        elems = 32768 // np.dtype(dtype).itemsize
+        bad = []
+        for m in (5, 61, 64, 127):
+            for n in (elems // m - 1, elems // m, elems // m + 1, -(-elems // m)):
+                for shape in ((m, n), (n, m)):
+                    a = self._operand(rng, shape, dtype, bits=True)
+                    if pg.transpose(a).tobytes() != np.ascontiguousarray(a.T).tobytes():
+                        bad.append(shape)
+        assert bad == []
+
+    # Legacy-killer squares, odd large shapes on both sides of the tiles, single
+    # rows and columns, and outputs past 12 MiB whose rows are whole 64-byte
+    # lines (the streaming-store path), with and without a column remainder.
+    @pytest.mark.parametrize(
+        "shape",
+        [(n, n) for n in LEGACY_KILLER_SIZES]
+        + [(333, 750), (3000, 2000), (4097, 63), (63, 4097), (1, 100000), (100000, 1),
+           (2048, 2049), (2048, 1001)],
+        ids=str,
+    )
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_large_and_odd_shapes_bitwise(self, dtype, n_threads, shape, threads):
+        threads(n_threads)
+        rng = np.random.default_rng(list(shape))
+        for bits in (False, True):
+            a = self._operand(rng, shape, dtype, bits)
+            got = pg.transpose(a)
+            assert got.flags.c_contiguous and got.flags.owndata
+            assert got.tobytes() == np.ascontiguousarray(a.T).tobytes()
+
+    # Outputs just below, at, and above the 1020 KiB page-prefault threshold for
+    # each dtype (510 x 512 f32 and 255 x 512 f64 sit on it), with odd rows so a
+    # column block's range of out starts and ends mid-page.
+    @pytest.mark.parametrize(
+        "shape",
+        [(509, 513), (510, 512), (511, 511), (255, 511), (255, 512), (256, 511), (1021, 1031)],
+        ids=str,
+    )
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_prefault_threshold_bitwise(self, dtype, n_threads, shape, threads):
+        threads(n_threads)
+        rng = np.random.default_rng(list(shape))
+        a = self._operand(rng, shape, dtype, bits=True)
+        assert pg.transpose(a).tobytes() == np.ascontiguousarray(a.T).tobytes()
+
+    # The native entry writes into any C-contiguous out, so out can sit at an
+    # element offset from a 64-byte line: streaming stores must then step aside
+    # (offset 1) while a line-aligned out of the same shape streams (offset 0).
+    # Both outputs are past 12 MiB with rows of whole lines.
+    @pytest.mark.parametrize("offset", [0, 1])
+    @pytest.mark.parametrize("n_threads", [1, 6])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_into_line_offsets_bitwise(self, dtype, n_threads, offset, threads):
+        threads(n_threads)
+        m, n = (2048, 2048) if dtype == np.float32 else (2048, 1024)
+        rng = np.random.default_rng(offset)
+        a = self._operand(rng, (m, n), dtype, bits=True)
+        item = np.dtype(dtype).itemsize
+        buf = np.empty(m * n + 64 // item, dtype)
+        start = (-buf.ctypes.data % 64) // item + offset
+        out = buf[start:start + m * n].reshape(n, m)
+        assert out.ctypes.data % 64 == (0 if offset == 0 else item)
+        pg._core.transpose_into(a, out)
+        assert out.tobytes() == np.ascontiguousarray(a.T).tobytes()
+
 
 class TestReductions:
     @pytest.mark.parametrize("n", SIZES)

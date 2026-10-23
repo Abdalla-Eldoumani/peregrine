@@ -1,19 +1,16 @@
-"""Calibration and dispatch suite, covering DISP-01..05. This file is a Wave 0
-scaffold: it establishes the shared infrastructure (the requires_cuda skip gate
-and the PEREGRINE_CACHE_DIR cache isolation idiom) so the later Phase 5 waves fill in
-each reserved test under its own name without re-establishing setup. It asserts
-nothing about calibrate/policy behavior yet -- those modules do not exist until
-Waves 2-3 -- beyond proving the file collects and that the introspection smoke
-passes on every build.
+"""Calibration and dispatch suite: calibration cost, the cache, its fail-safe
+read, the static fallback, and the routing decisions. The shared infrastructure
+(the requires_cuda skip gate and the PEREGRINE_CACHE_DIR cache isolation idiom)
+lives here once so each test needs no setup of its own.
 
 requires_cuda() (conftest) is the one GPU gate, identical to test_cuda.py: build
 flag plus a usable-device probe, deferring to pg.has_cuda(). CPU-only and the
 WSL/GCC clone stay green; only the GPU-measurement tests (the live crossover and
-the real-device calibrate path) carry @gpu. The bulk of DISP-05 is NOT gated: a
+the real-device calibrate path) carry @gpu. Most routing tests are NOT gated: a
 backend decision is a PURE function fed a synthetic calibration dict, so it runs
 everywhere and asserts a backend ENUM ("cpu" / "cuda"), needing no tolerance.
 
-Cache isolation -- the design names PEREGRINE_CACHE_DIR (DISP-03). Every in-process
+Cache isolation -- the design names PEREGRINE_CACHE_DIR. Every in-process
 test that touches the calibration cache redirects it to a pytest tmp_path so the
 real per-user cache is never read or written:
 
@@ -32,45 +29,59 @@ monkeypatching in-process:
                        env=env, capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stderr          # child error surfaces as itself
 
-A warn-once or other process-global sentinel (RESEARCH Pitfall 5) is isolated
+A warn-once or other process-global sentinel is isolated
 the same way the forced-OOM test isolates its sentinel (test_cuda.py:544-568): a
 subprocess per assertion, never an in-process reset that leaks across tests.
 
-Any numeric CPU-vs-GPU comparison a later wave adds routes through
-assert_matmul_close (conftest), never an inline rtol -- the single toleranced
-path, exactly like the CPU and CUDA suites; f32 is judged against the f64 ground
-truth the same way. Most DISP-05 tests compare a backend enum and need no
-tolerance at all.
+Any numeric CPU-vs-GPU comparison routes through assert_matmul_close
+(conftest), never an inline rtol -- the single toleranced path, exactly like the
+CPU and CUDA suites; f32 is judged against the f64 ground truth the same way.
+Most routing tests compare a backend enum and need no tolerance at all.
 
-Reserved -k test names, one per acceptance point in the Phase 5 validation map.
-This wave (05-02) fills the pure-policy decision and cache-read names; the
-measurement and integration names stay reserved for their waves. The names do
-not change.
+The -k test names, one per acceptance point, with the code each one exercises:
 
-    DISP-01 (no calibration at import; bounded calibrate):
-        calibrate_budget          calibration completes within its time budget   [Wave 3: calibrate.py]
-        cpu_only_calibrate        a CPU-only build calibrates without a device    [Wave 3: calibrate.py]
-    DISP-02 (cache write; signature):
-        writes_cache              calibrate persists a cache file                 [Wave 3: calibrate.py]
-        cache_reuse               a second run reuses the cache, does not redo     [Wave 3: calibrate.py]
-        signature_distinct        a different machine signature -> a distinct key  [Wave 3: calibrate.py]
-    DISP-03 (corrupt/mismatch -> recalibrate, never half-load; cache override):
-        corrupt_recalibrate       a corrupt cache is discarded and recalibrated   [Wave 2: policy._load_cache]
-        schema_mismatch           an unknown schema version -> recalibrate         [Wave 2: policy._load_cache]
-        signature_mismatch        a signature mismatch -> recalibrate              [Wave 2: policy._load_cache]
-        atomic_write              the cache write is atomic, never half-written    [Wave 3: calibrate.py]
-        cache_dir_override        PEREGRINE_CACHE_DIR redirects the cache location       [Wave 2: policy._cache_path]
-    DISP-04 (conservative static fallback; transfer cost in crossover):
-        static_fallback           no cache -> a conservative CPU-preferring choice [Wave 2: policy.choose_backend]
-        transfer_cost             the crossover accounts for host<->device transfer[Wave 2: policy.choose_backend]
-    DISP-05 (routing decisions; the FP64 trap):
-        f64_host_cpu              host f64 never auto-routes to the GPU            [Wave 2: policy.choose_backend]
-        f32_256_host_cpu          host f32 n=256 stays on the CPU (overhead floor) [Wave 2: policy.choose_backend]
-        f32_4096_host_gpu         host f32 n=4096 routes to the GPU                [Wave 2: policy.choose_backend]
-        f32_device_gpu            f32 device-resident routes to the GPU            [Wave 2: policy.choose_backend]
-        set_backend               an explicit backend choice is honored           [Wave 2: policy.choose_backend]
-        env_backend               PEREGRINE_BACKEND (subprocess, env-before-import)      [Wave 4: __init__.py]
-        live_crossover            real RTX 3060 calibration reproduces DISP-05 (@gpu) [Wave 4: integration]
+    No calibration at import; bounded calibrate:
+        calibrate_budget          calibration completes within its time budget   [calibrate.py]
+        cpu_only_calibrate        a CPU-only build calibrates without a device    [calibrate.py]
+    Cache write; signature:
+        writes_cache              calibrate persists a cache file                 [calibrate.py]
+        cache_reuse               a second run reuses the cache, does not redo     [calibrate.py]
+        signature_distinct        a different machine signature -> a distinct key  [calibrate.py]
+    Corrupt/mismatch -> recalibrate, never half-load; cache override:
+        corrupt_recalibrate       a corrupt cache is discarded and recalibrated   [policy._load_cache]
+        schema_mismatch           an unknown schema version -> recalibrate         [policy._load_cache]
+        signature_mismatch        a signature mismatch -> recalibrate              [policy._load_cache]
+        atomic_write              the cache write is atomic, never half-written    [calibrate.py]
+        cache_dir_override        PEREGRINE_CACHE_DIR redirects the cache location [policy._cache_path]
+    Conservative static fallback; transfer cost in crossover:
+        static_fallback           no cache -> a conservative CPU-preferring choice [policy.choose_backend]
+        transfer_cost             the crossover accounts for host<->device transfer[policy.choose_backend]
+    Routing decisions; the FP64 trap:
+        f64_host_cpu              host f64 never auto-routes to the GPU            [policy.choose_backend]
+        f32_256_host_cpu          host f32 n=256 stays on the CPU (overhead floor) [policy.choose_backend]
+        f32_4096_host_gpu         host f32 n=4096 routes to the GPU                [policy.choose_backend]
+        set_backend               an explicit backend choice is honored           [policy.choose_backend]
+        env_backend               PEREGRINE_BACKEND (subprocess, env-before-import) [__init__.py]
+        live_crossover            real RTX 3060 calibration reproduces the routing (@gpu) [integration]
+    Routing on work and bytes moved:
+        staged_fit                the fixed cost is fitted from the staged series [policy._staging_floor]
+        skinny_host               skinny host products stay on the CPU            [policy.choose_backend]
+        reproduces_measured       grid decisions match measured staged vs CPU     [policy.choose_backend]
+        monotone                  square decisions are monotone in the work       [policy.choose_backend]
+        needs_compute             a host GPU route needs compute alone to win     [policy.choose_backend]
+    Per-process memos (no file system work after the first auto dispatch):
+        memoizes_calibration      the second dispatch reads no file and no NVML    [__init__.py]
+        invalidate                reset hook and set_backend drop the memos        [__init__.py]
+        replaces_memo             calibrate() installs what it wrote              [calibrate.py]
+        signature_from_probe      probe name + NVML driver, no subprocess          [calibrate.py]
+        nvml                      NVML read and every failure mode -> "n/a"        [calibrate.py]
+        schema1_cache_rejected    a schema-1 cache is never routed on              [policy._load_cache]
+    Forced cuda and the runtime fallback:
+        cuda_without_device       PEREGRINE_BACKEND=cuda raises at the first matmul [__init__.py]
+        stops_after_cuda_fallback no auto-routed device work after the fallback    [__init__.py]
+    What calibrate() measures:
+        bypasses_router           CPU series times the kernel, backend forced cpu  [calibrate.py]
+        min_time / grid / warm    minimum statistic, crossover refinement, warmup  [calibrate.py]
 """
 
 import importlib
@@ -86,7 +97,7 @@ import pytest
 import peregrine as pg
 from peregrine import policy
 
-# The SUBMODULE, fetched via import_module. As of Phase 5 the package re-exports
+# The SUBMODULE, fetched via import_module. The package re-exports
 # the calibrate FUNCTION as pg.calibrate (the public API),
 # which shadows the submodule attribute: `from peregrine import calibrate` and
 # `import peregrine.calibrate as calibrate` both now bind the FUNCTION. These
@@ -98,7 +109,7 @@ calibrate = importlib.import_module("peregrine.calibrate")
 from conftest import assert_matmul_close, requires_cuda
 
 _CUDA_OK, _CUDA_REASON = requires_cuda()
-# Reused by every device-touching test the later waves add (the live crossover
+# Reused by every device-touching test (the live crossover
 # and the real-device calibrate path). The scaffold smoke test below is
 # deliberately NOT decorated: it must pass on every build to prove the file is
 # wired and collects even when CUDA is off.
@@ -107,8 +118,8 @@ gpu = pytest.mark.skipif(not _CUDA_OK, reason=_CUDA_REASON)
 
 def test_calibration_module_scaffold():
     # Runs everywhere, including CPU-only and WSL: proves this file collects and
-    # is wired to the package without depending on calibrate/policy (which do not
-    # exist until Waves 2-3). has_cuda() is the stable introspection surface and
+    # is wired to the package without depending on calibrate/policy.
+    # has_cuda() is the stable introspection surface and
     # returns a bool on every build (False on a CPU-only build, never an
     # exception), so the scaffold can assert its type as the everywhere-smoke,
     # mirroring test_cuda.py's test_has_cuda_runtime.
@@ -117,11 +128,11 @@ def test_calibration_module_scaffold():
 
 # --- synthetic calibration table -------------------------------------------
 #
-# The whole DISP-05 contract is provable WITHOUT a GPU by feeding choose_backend
+# The whole routing contract is provable WITHOUT a GPU by feeding choose_backend
 # a synthetic calibration dict: it is a pure function, so its decisions are
 # fixed by the numbers in the table, not by the hardware. The numbers below are
 # constructed so the four acceptance points hold BY CONSTRUCTION, encoding the
-# physical fact the single-GFLOP/s model gets wrong (RESEARCH CRITICAL pitfall):
+# physical fact the single-GFLOP/s model gets wrong:
 # at small n the host GPU path is dominated by a FIXED staging+launch floor, not
 # by asymptotic bandwidth, so n=256 host stays on the CPU while n=4096 host
 # crosses to the GPU.
@@ -129,15 +140,17 @@ def test_calibration_module_scaffold():
 # Times are per-(dtype, n) measured wall seconds on a log grid (the cache shape):
 #   cpu:  honest ~55 GF/s f32 / ~80 GF/s f64, work = 2*n^3 flops
 #   gpu:  a ~50us cuBLAS launch floor + asymptotic ~2600 GF/s compute (NO transfer)
-#   transfer: H2D(2 operands) + D2H(1 result) at ~12 GB/s PCIe, plus an ~800us
-#             fixed staging floor (three Python->native->CUDA crossings + launch
-#             + pageable-copy setup) that dominates at small n.
+#   transfer: H2D(2 operands) + D2H(1 result) at ~12 GB/s PCIe
+#   staged: gpu + transfer + an 800us fixed staging floor (three
+#           Python->native->CUDA crossings + launch + pageable-copy setup) that
+#           dominates at small n; the policy fits its fixed cost from this
+#           series, and the fit recovers the 800us exactly.
 #
-# Resulting host crossover is ~n=298, device crossover ~n=112, so:
-#   f32 n=256 host  -> CPU  (gpu_compute + transfer 0.93ms > cpu 0.61ms)
+# Resulting host square crossover is n=299, while the GPU's compute alone is
+# faster at every size (below n=128 both times clamp to the n=128 values), so:
+#   f32 n=256 host  -> CPU  (gpu_compute + transfer + fixed 0.93ms > cpu 0.61ms)
 #   f32 n=4096 host -> CUDA (70.5ms < cpu 2499ms)
-#   f32 n=512 device-> CUDA (gpu_compute 0.15ms < cpu 4.88ms, no transfer)
-#   f32 n=256 device-> CUDA while n=256 host -> CPU  (transfer-cost crossover)
+#   f32 n=256: compute alone favors the GPU, the host product stays on the CPU
 
 _GRID = [128, 256, 512, 1024, 2048, 4096]
 
@@ -149,6 +162,11 @@ def _cpu_seconds(n, gflops):
 def _gpu_seconds(n):
     # fixed cuBLAS launch floor + asymptotic 2600 GF/s compute (compute only)
     return 50e-6 + 2.0 * n**3 / 2600e9
+
+
+def _staged_seconds(n, fixed=800e-6):
+    # 8*n^2 bytes up and 4*n^2 down at 12 GB/s each, plus the fixed floor
+    return _gpu_seconds(n) + 12.0 * n * n / 12e9 + fixed
 
 
 def synthetic_calibration():
@@ -167,6 +185,7 @@ def synthetic_calibration():
             # carries no f64 GPU entry (and the FP64 trap fires before any lookup)
             "float32": [[n, _gpu_seconds(n)] for n in _GRID],
         },
+        "staged": {"float32": [[n, _staged_seconds(n)] for n in _GRID]},
         "transfer": {
             "h2d_gbps": 12.0,
             "d2h_gbps": 12.0,
@@ -176,7 +195,79 @@ def synthetic_calibration():
     }
 
 
-# --- DISP-05: the four auto-mode acceptance points (pure, CPU-only) ----------
+# A calibration this suite's reference machine (i7-10750H, RTX 3060 Laptop,
+# CUDA build) measured, kept verbatim so the routing tests also run on real
+# numbers. Its CPU float32 series is flat from n=64 to n=128, where the GEMM
+# starts threading; the tests that must not depend on that step also run on
+# _smoothed_real_calibration, which has none.
+_REAL_SIZES = [16, 32, 38, 45, 54, 64, 128, 256, 512, 1024, 2048, 4096]
+_REAL_SERIES = {
+    "cpu32": [4.3e-6, 2.10e-5, 3.24e-5, 4.90e-5, 7.59e-5, 1.278e-4, 1.305e-4,
+              3.734e-4, 1.79e-3, 7.46e-3, 5.498e-2, 0.41793],
+    "cpu64": [4.2e-6, 2.05e-5, 2.80e-5, 4.80e-5, 7.59e-5, 1.249e-4, 2.147e-4,
+              7.910e-4, 3.69e-3, 1.860e-2, 0.12796, 0.94408],
+    "gpu32": [1.33e-5, 1.64e-5, 2.15e-5, 2.15e-5, 2.25e-5, 1.74e-5, 1.84e-5,
+              2.56e-5, 7.68e-5, 5.683e-4, 4.2301e-3, 3.47505e-2],
+    "staged32": [9.09e-5, 9.36e-5, 1.073e-4, 1.071e-4, 1.121e-4, 9.91e-5, 1.186e-4,
+                 2.013e-4, 7.236e-4, 2.5916e-3, 1.019e-2, 6.507e-2],
+}
+
+
+def real_calibration():
+    """The reference machine's measured CUDA-build calibration dict."""
+
+    def grid(key):
+        return [[n, t] for n, t in zip(_REAL_SIZES, _REAL_SERIES[key])]
+
+    return {
+        "schema": policy.SCHEMA,
+        "signature": "reference|machine|table",
+        "cpu": {"float32": grid("cpu32"), "float64": grid("cpu64")},
+        "gpu": {"float32": grid("gpu32")},
+        "staged": {"float32": grid("staged32")},
+        "transfer": {"h2d_gbps": 10.82, "d2h_gbps": 4.50, "fixed_overhead_s": 3.95e-5},
+        "calibrated_at": "2026-10-17T00:00:00",
+    }
+
+
+def _smoothed_real_calibration():
+    # The reference calibration with the threaded CPU rate of n=128 carried down
+    # to the small sizes: the series once small products run as efficiently as
+    # n=128 does.
+    table = real_calibration()
+    table["signature"] = "reference|smoothed|table"
+    t128 = dict(table["cpu"]["float32"])[128]
+    table["cpu"]["float32"] = [
+        [n, t128 * (n / 128) ** 3 if n < 128 else t] for n, t in table["cpu"]["float32"]
+    ]
+    return table
+
+
+def _routing_tables():
+    return [synthetic_calibration(), real_calibration(), _smoothed_real_calibration()]
+
+
+def _host(table, m, k, n):
+    return policy.choose_backend("float32", m, k, n, calibration=table, backend="auto")
+
+
+def _compute_only(table, m, k, n):
+    # The GPU's product time against the CPU's with no transfer and no fixed
+    # cost: the floor under the host decision's GPU side.
+    work = 2.0 * m * k * n
+    gpu = policy._interp_time(table["gpu"]["float32"], work)
+    cpu = policy._interp_time(table["cpu"]["float32"], work)
+    return "cuda" if gpu < cpu else "cpu"
+
+
+# Square sizes from 1 past the largest grid point, so the interpolation, both
+# clamped and extrapolated ends, and every knot are covered.
+_SQUARE_NS = sorted(
+    {*range(1, 700), *np.geomspace(700, 32768, 300).astype(int).tolist()}
+)
+
+
+# --- routing: the four auto-mode acceptance points (pure, CPU-only) ----------
 
 
 def test_f64_host_cpu():
@@ -184,20 +275,16 @@ def test_f64_host_cpu():
     # size, decided BEFORE any table lookup. Holds at every grid size.
     table = synthetic_calibration()
     for n in (256, 1024, 4096):
-        got = policy.choose_backend(
-            "float64", n, n, n, residency="host", calibration=table, backend="auto"
-        )
+        got = policy.choose_backend("float64", n, n, n, calibration=table, backend="auto")
         assert got == "cpu", f"f64 host n={n} must stay on cpu, got {got}"
 
 
 def test_f32_256_host_cpu():
     # Host f32 n=256 stays on the CPU: the GPU compute + H2D/D2H round trip +
     # fixed staging floor (~0.93ms) exceeds the honest CPU time (~0.61ms). This
-    # is the point a single-GFLOP/s model gets wrong (RESEARCH CRITICAL pitfall).
+    # is the point a single-GFLOP/s model gets wrong.
     table = synthetic_calibration()
-    got = policy.choose_backend(
-        "float32", 256, 256, 256, residency="host", calibration=table, backend="auto"
-    )
+    got = policy.choose_backend("float32", 256, 256, 256, calibration=table, backend="auto")
     assert got == "cpu"
 
 
@@ -205,78 +292,118 @@ def test_f32_4096_host_gpu():
     # Host f32 n=4096 crosses to the GPU: the GEMM time saved (~2499ms CPU vs
     # ~53ms GPU compute) dwarfs the ~17.6ms transfer round trip.
     table = synthetic_calibration()
-    got = policy.choose_backend(
-        "float32", 4096, 4096, 4096, residency="host", calibration=table, backend="auto"
-    )
+    got = policy.choose_backend("float32", 4096, 4096, 4096, calibration=table, backend="auto")
     assert got == "cuda"
 
 
-def test_f32_device_gpu():
-    # Device-resident f32 at n>=512 routes to the GPU: no transfer cost, so it
-    # crosses far earlier than the host path. Verify the stated point and that it
-    # holds across the larger grid sizes too.
-    table = synthetic_calibration()
-    for n in (512, 1024, 2048, 4096):
-        got = policy.choose_backend(
-            "float32", n, n, n, residency="device", calibration=table, backend="auto"
-        )
-        assert got == "cuda", f"f32 device n={n} must route to cuda, got {got}"
-
-
-# --- DISP-04: static fallback and the transfer-cost crossover ----------------
+# --- static fallback and the transfer-cost crossover ----------------
 
 
 def test_static_fallback():
-    # No cache -> conservative CPU-preferring choice, for every (dtype, size,
-    # residency). A calibration dict with no "gpu" key (a CPU-only cache) is the
-    # same: the GPU is treated as unavailable.
+    # No cache -> conservative CPU-preferring choice, for every (dtype, size).
+    # A calibration dict with no "gpu" key (a CPU-only cache) is the same: the
+    # GPU is treated as unavailable.
     cpu_only = synthetic_calibration()
     del cpu_only["gpu"]
     for dtype in ("float32", "float64"):
         for n in (256, 1024, 4096):
-            for residency in ("host", "device"):
-                assert (
-                    policy.choose_backend(
-                        dtype, n, n, n, residency=residency,
-                        calibration=None, backend="auto",
-                    )
-                    == "cpu"
-                )
-                assert (
-                    policy.choose_backend(
-                        dtype, n, n, n, residency=residency,
-                        calibration=cpu_only, backend="auto",
-                    )
-                    == "cpu"
-                )
+            for table in (None, cpu_only):
+                got = policy.choose_backend(dtype, n, n, n, calibration=table, backend="auto")
+                assert got == "cpu"
 
 
 def test_transfer_cost():
-    # The crossover accounts for the host<->device round trip: at n=256 a
-    # device-resident f32 routes to the GPU (compute alone beats the CPU) while
-    # the SAME n as a host array stays on the CPU once H2D+D2H + staging is added.
-    # The device path therefore crosses at a smaller n than the host path.
+    # The crossover accounts for the host<->device round trip: at n=256 the
+    # GPU's compute alone beats the CPU, yet the host product stays on the CPU
+    # once H2D+D2H + staging is added.
     table = synthetic_calibration()
-    host = policy.choose_backend(
-        "float32", 256, 256, 256, residency="host", calibration=table, backend="auto"
-    )
-    device = policy.choose_backend(
-        "float32", 256, 256, 256, residency="device", calibration=table, backend="auto"
-    )
+    host = policy.choose_backend("float32", 256, 256, 256, calibration=table, backend="auto")
     assert host == "cpu"
-    assert device == "cuda"
+    assert _compute_only(table, 256, 256, 256) == "cuda"
 
 
-# --- DISP-05: explicit backend override (set_backend / PEREGRINE_BACKEND) ----------
+# --- routing on work and bytes moved ------------------------------------------
+
+
+def test_staged_fit_recovers_the_fixed_floor():
+    # The synthetic staged series is gpu + transfer + 800us exactly, so the fit
+    # must return the 800us; with no fixed part it must return zero, never less.
+    assert policy._staging_floor(synthetic_calibration()) == pytest.approx(800e-6, rel=1e-12)
+    table = synthetic_calibration()
+    table["staged"]["float32"] = [[n, _staged_seconds(n, 0.0)] for n in _GRID]
+    assert 0.0 <= policy._staging_floor(table) < 1e-15
+    # a staged series faster than its own compute plus transfer is floored at zero
+    table["staged"]["float32"] = [[n, _gpu_seconds(n) / 2] for n in _GRID]
+    assert policy._staging_floor(table) == 0.0
+
+
+def test_skinny_host_products_stay_on_cpu():
+    # A product with a small dimension moves bytes out of all proportion to its
+    # work, so on the measured calibration it stays on the CPU however long its
+    # other dimensions are: (1, 1, 4096) is 8 kiloflops, and the matrix-vector
+    # products below move a whole 4096-square operand for 2*4096**2 flops.
+    shapes = [
+        (1, 1, 4096), (1, 4096, 1), (4096, 1, 1),
+        (1, 4096, 4096), (4096, 4096, 1), (4096, 1, 4096),
+    ]
+    for table in (real_calibration(), _smoothed_real_calibration()):
+        for shape in shapes:
+            assert _host(table, *shape) == "cpu", shape
+
+
+def test_model_reproduces_measured_staged_decisions():
+    # At every measured size the host decision is the one the measurements make
+    # themselves, staged GPU path against CPU: the CPU up to n=54 and the GPU
+    # from n=64, the measured crossover. Squares past the largest measured size
+    # stay on the GPU.
+    table = real_calibration()
+    cpu = dict(table["cpu"]["float32"])
+    for n, staged in table["staged"]["float32"]:
+        assert _host(table, n, n, n) == ("cuda" if staged < cpu[n] else "cpu"), n
+    assert _host(table, 54, 54, 54) == "cpu"
+    for n in (64, 256, 4096, 8192, 16384):
+        assert _host(table, n, n, n) == "cuda", n
+    # without the CPU's threading step the crossover moves, but large squares
+    # still go to the GPU
+    for n in (256, 4096, 16384):
+        assert _host(_smoothed_real_calibration(), n, n, n) == "cuda", n
+
+
+def test_square_decision_is_monotone_in_work():
+    # Once a square product goes to the GPU every larger one does too, including
+    # past the largest measured size, where both times follow the last
+    # segment's slope. Clamping them there instead would send host squares past
+    # about n=15,000 back to the CPU on the reference calibration.
+    for table in _routing_tables():
+        for decide in (_host, _compute_only):
+            got = [decide(table, n, n, n) for n in _SQUARE_NS]
+            first = got.index("cuda")
+            assert set(got[:first]) <= {"cpu"} and set(got[first:]) == {"cuda"}, (
+                decide.__name__, _SQUARE_NS[first], table["signature"]
+            )
+
+
+def test_host_route_needs_compute_alone_to_win():
+    # The host decision prices the GPU's compute plus transfers and a fixed cost
+    # that are never negative, so wherever a host product goes to the GPU the
+    # GPU's compute alone already beats the CPU.
+    dims = (1, 7, 64, 300, 4096)
+    shapes = [(n, n, n) for n in _SQUARE_NS]
+    shapes += [(m, k, n) for m in dims for k in dims for n in dims]
+    for table in _routing_tables():
+        for shape in shapes:
+            if _host(table, *shape) == "cuda":
+                assert _compute_only(table, *shape) == "cuda", shape
+
+
+# --- explicit backend override (set_backend / PEREGRINE_BACKEND) ----------
 
 
 def test_set_backend_forces_cpu():
     # A forced "cpu" backend wins within rules 1-2: it stays CPU even when the
     # table favors the GPU (large-n f32).
     table = synthetic_calibration()
-    got = policy.choose_backend(
-        "float32", 4096, 4096, 4096, residency="host", calibration=table, backend="cpu"
-    )
+    got = policy.choose_backend("float32", 4096, 4096, 4096, calibration=table, backend="cpu")
     assert got == "cpu"
 
 
@@ -284,19 +411,17 @@ def test_set_backend_forces_cuda_routing():
     # A forced "cuda" backend routes to cuda even for float64 and even with no
     # calibration: the POLICY only routes; the wrapper (not the policy) validates
     # device availability and raises the requested-but-unavailable RuntimeError.
-    got_f64 = policy.choose_backend(
-        "float64", 256, 256, 256, residency="host", calibration=None, backend="cuda"
-    )
+    got_f64 = policy.choose_backend("float64", 256, 256, 256, calibration=None, backend="cuda")
     assert got_f64 == "cuda"
     table = synthetic_calibration()
     got_small = policy.choose_backend(
-        "float32", 256, 256, 256, residency="host", calibration=table, backend="cuda"
+        "float32", 256, 256, 256, calibration=table, backend="cuda"
     )
     assert got_small == "cuda"
 
 
 def test_set_backend():
-    # The wrapper-level set_backend (DISP-05 override half). cpu/auto succeed and
+    # The wrapper-level set_backend (the override half of routing). cpu/auto succeed and
     # return None; an out-of-set value raises ValueError naming the allowed set;
     # on a CPU-only build "cuda" raises the VERBATIM "cuda backend requested but
     # <reason>" RuntimeError (the same token to_device raises -- the contract is
@@ -350,7 +475,7 @@ assert out.shape == (64, 64) and out.dtype == np.float32
 
 
 def test_env_backend(tmp_path):
-    # DISP-05: PEREGRINE_BACKEND maps to the backend at import. The variable MUST be in
+    # PEREGRINE_BACKEND maps to the backend at import. The variable MUST be in
     # the environment before the process starts (the dispatch policy reads it once
     # at import, exactly like PEREGRINE_DISABLE_AVX2 in test_fallback.py), so this spawns
     # a child with a FULL env copy plus the override merged in -- a stripped env
@@ -394,7 +519,7 @@ assert pg._backend == "auto", repr(pg._backend)
 
 
 def test_import_no_calibration(tmp_path):
-    # DISP-01: a bare `import peregrine` runs no calibration and reads/writes no
+    # A bare `import peregrine` runs no calibration and reads/writes no
     # cache (the import budget is <50ms; calibration and the cache read are lazy).
     # Run in a subprocess so the import is genuinely fresh -- an in-process import
     # is already cached and could not observe import-time side effects. The child
@@ -416,11 +541,11 @@ def test_import_no_calibration(tmp_path):
 
 @gpu
 def test_live_crossover(tmp_path, monkeypatch):
-    # DISP-05 (live, @gpu): on a fresh ON build, an actual calibrate() on the real
+    # Live, @gpu: on a fresh ON build, an actual calibrate() on the real
     # RTX 3060 must complete within budget, return gpu + transfer entries (a true
-    # GPU-signature cache), and the four DISP-05 crossover points must hold when
+    # GPU-signature cache), and the four routing crossover points must hold when
     # the policy is fed the REAL measured numbers -- not the synthetic table. This
-    # is the end-to-end close of DISP-01/05 on hardware: every other DISP-05 test
+    # is the end-to-end check of calibration and routing on hardware: every other routing test
     # uses constructed numbers, this one proves the live device reproduces the
     # contract. Isolated to a tmp cache dir so the real per-user cache is untouched.
     monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
@@ -433,16 +558,24 @@ def test_live_crossover(tmp_path, monkeypatch):
     # size, matching test_calibrate_budget's reasoning)
     assert elapsed < 120 + 60.0, f"live calibrate overran: {elapsed:.1f}s"
 
-    # a real GPU calibration carries the measured gpu + transfer series ...
+    # a real GPU calibration carries the measured gpu + staged + transfer series ...
     assert "gpu" in cal and "transfer" in cal, "ON-build calibrate must measure the GPU"
     assert cal["gpu"]["float32"], "gpu float32 grid must be non-empty"
+    assert cal["staged"]["float32"], "staged float32 grid must be non-empty"
     for key in ("h2d_gbps", "d2h_gbps", "fixed_overhead_s"):
         assert key in cal["transfer"], f"transfer must carry {key}"
-    # ... and a GPU machine signature (gpu name + driver, not none/n-a)
+    # ... and a GPU machine signature (gpu name + NVML driver, not none/n-a)
     parts = cal["signature"].split("|")
     assert parts[1] != "none" and parts[2] != "n/a", cal["signature"]
 
-    # the four DISP-05 points, fed the LIVE numbers. The measured grid only spans
+    # The CPU series times the kernel, not the auto router. Through the router
+    # every point carried a fixed 50-80 ms routing cost; a 128x128 product is
+    # tens of microseconds of work, so 5 ms is far from both.
+    for n, t in cal["cpu"]["float32"]:
+        if n <= 128:
+            assert t < 5e-3, f"cpu f32 n={n} took {t * 1e3:.2f} ms"
+
+    # the four routing points, fed the LIVE numbers. The measured grid only spans
     # the sizes the budget allowed; key the points off what was actually measured.
     measured_ns = [pt[0] for pt in cal["cpu"]["float32"]]
     large_n = measured_ns[-1]
@@ -452,57 +585,41 @@ def test_live_crossover(tmp_path, monkeypatch):
     # exactly as on the synthetic table)
     for n in measured_ns:
         assert (
-            policy.choose_backend(
-                "float64", n, n, n, residency="host", calibration=cal, backend="auto"
-            )
+            policy.choose_backend("float64", n, n, n, calibration=cal, backend="auto")
             == "cpu"
         ), f"live f64 host n={n} must stay on cpu"
 
-    # The transfer-cost ordering, on real numbers: at EVERY measured size a
-    # device-resident f32 is at least as likely to route to the GPU as the same
-    # size as a host array, because the host path adds the H2D+D2H round trip and
-    # the fixed staging floor on top of the identical compute comparison. So the
-    # host path can never pick cuda where the device path picks cpu -- the device
-    # crossover sits at a smaller-or-equal n. This is the load-bearing DISP-04/05
-    # property and it holds regardless of the absolute CPU-time magnitude (it falls
-    # straight out of _transfer_time >= 0 in the policy). The exact small-n
-    # host->cpu point is asserted on the synthetic table (test_f32_256_host_cpu),
-    # where the CPU baseline is honest by construction; here the live CPU grid only
-    # has to be internally consistent, which the inequality checks.
+    # The transfer-cost ordering, on real numbers: at EVERY measured size the
+    # host decision adds the H2D+D2H round trip and the fixed staging floor on
+    # top of the compute comparison, so it can never pick cuda where the GPU's
+    # compute alone loses. This holds regardless of the absolute CPU-time
+    # magnitude (it falls straight out of the transfer time and the fitted fixed
+    # cost both being >= 0 in the policy). The exact small-n host->cpu point is
+    # asserted on the synthetic table (test_f32_256_host_cpu), where the CPU
+    # baseline is honest by construction; here the live CPU grid only has to be
+    # internally consistent, which the inequality checks.
     for n in measured_ns:
-        host = policy.choose_backend(
-            "float32", n, n, n, residency="host", calibration=cal, backend="auto"
-        )
-        device = policy.choose_backend(
-            "float32", n, n, n, residency="device", calibration=cal, backend="auto"
-        )
-        assert not (host == "cuda" and device == "cpu"), (
-            f"live n={n}: host picked cuda but device picked cpu -- the transfer "
-            f"floor must make the host path the more conservative one"
+        host = policy.choose_backend("float32", n, n, n, calibration=cal, backend="auto")
+        assert not (host == "cuda" and _compute_only(cal, n, n, n) == "cpu"), (
+            f"live n={n}: host picked cuda where the GPU's compute alone loses"
         )
 
-    # device-resident f32 at the largest measured size routes to the GPU: with no
-    # transfer cost the warm device GEMM beats the CPU outright
-    assert (
-        policy.choose_backend(
-            "float32", large_n, large_n, large_n,
-            residency="device", calibration=cal, backend="auto",
-        )
-        == "cuda"
-    ), f"live f32 device n={large_n} should route to cuda"
+    # at the largest measured size the warm device GEMM beats the CPU outright
+    assert _compute_only(cal, large_n, large_n, large_n) == "cuda", (
+        f"live f32 compute n={large_n} should favor cuda"
+    )
 
     # the largest measured host f32 crosses to the GPU: the GEMM time saved dwarfs
-    # the transfer round trip at large n (the headline DISP-05 win, on real numbers)
+    # the transfer round trip at large n (the headline routing win, on real numbers)
     assert (
         policy.choose_backend(
-            "float32", large_n, large_n, large_n,
-            residency="host", calibration=cal, backend="auto",
+            "float32", large_n, large_n, large_n, calibration=cal, backend="auto"
         )
         == "cuda"
     ), f"live f32 host n={large_n} should route to cuda"
 
 
-# --- DISP-03: fail-safe cache read and the PEREGRINE_CACHE_DIR override -------------
+# --- fail-safe cache read and the PEREGRINE_CACHE_DIR override -------------
 
 
 def _write_cache_file(path, payload):
@@ -596,18 +713,32 @@ def test_malformed_body_recalibrate(tmp_path):
     _write_cache_file(path, bad)
     assert policy._load_cache(path, sig) is None
 
+    # gpu present but staged absent: the fixed-cost fit would raise KeyError
+    bad = _valid()
+    del bad["staged"]
+    _write_cache_file(path, bad)
+    assert policy._load_cache(path, sig) is None
+
+    # a zero time or a repeated size: the log-log interpolation would raise
+    for series, dt in (("cpu", "float32"), ("cpu", "float64"), ("gpu", "float32"),
+                       ("staged", "float32")):
+        bad = _valid()
+        bad[series][dt][1][1] = 0.0
+        _write_cache_file(path, bad)
+        assert policy._load_cache(path, sig) is None, (series, dt)
+        bad = _valid()
+        bad[series][dt][1][0] = bad[series][dt][0][0]
+        _write_cache_file(path, bad)
+        assert policy._load_cache(path, sig) is None, (series, dt)
+
     # the load-bearing consequence: with the cache rejected to None, the dispatch
     # path falls back to the conservative static choice and does NOT crash, for
-    # every (dtype, residency) -- the fail-safe contract DISP-03 promises.
+    # every dtype -- the fail-safe contract of the cache read.
     for dtype in ("float32", "float64"):
-        for residency in ("host", "device"):
-            assert (
-                policy.choose_backend(
-                    dtype, 256, 256, 256, residency=residency,
-                    calibration=None, backend="auto",
-                )
-                == "cpu"
-            )
+        assert (
+            policy.choose_backend(dtype, 256, 256, 256, calibration=None, backend="auto")
+            == "cpu"
+        )
 
 
 def test_signature_mismatch(tmp_path):
@@ -626,21 +757,46 @@ def test_signature_mismatch(tmp_path):
     assert "cpu" in loaded and "gpu" in loaded and "transfer" in loaded
 
 
+def test_schema1_cache_rejected(tmp_path):
+    # Schema 1 caches carry a CPU grid timed through the auto router, inflated
+    # by its per-call routing cost; a complete, signature-matching schema-1 file
+    # must be discarded rather than routed on.
+    assert policy.SCHEMA == 2
+    path = str(tmp_path / "calibration.json")
+    payload = synthetic_calibration()
+    payload["schema"] = 1
+    _write_cache_file(path, payload)
+    assert policy._load_cache(path, payload["signature"]) is None
+    payload["schema"] = 2
+    _write_cache_file(path, payload)
+    assert policy._load_cache(path, payload["signature"]) == payload
+
+
 def test_cache_dir_override(tmp_path, monkeypatch):
-    # PEREGRINE_CACHE_DIR redirects the resolved cache path: the file lives under the
-    # override dir, named calibration.json, so tests never touch the real cache.
+    # PEREGRINE_CACHE_DIR redirects the resolved cache path: the file lives
+    # directly under the override dir, so tests never touch the real cache. The
+    # file name is keyed by a short hash of the signature, so a CPU-only and a
+    # CUDA build sharing one directory keep separate caches.
     monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
-    resolved = policy._cache_path()
-    assert resolved == os.path.join(str(tmp_path), "calibration.json")
-    # without the override the path falls back to the platform user cache dir and
-    # still ends in calibration.json under a peregrine-named directory.
+    cpu_sig = "cpu brand|none|n/a|3.0.0"
+    gpu_sig = "cpu brand|NVIDIA GeForce RTX 3060|610.47|3.0.0"
+    resolved = policy._cache_path(cpu_sig)
+    assert os.path.dirname(resolved) == str(tmp_path)
+    name = os.path.basename(resolved)
+    assert name.startswith("calibration-") and name.endswith(".json"), name
+    # stable for one signature, distinct across signatures
+    assert policy._cache_path(cpu_sig) == resolved
+    assert policy._cache_path(gpu_sig) != resolved
+    assert os.path.dirname(policy._cache_path(gpu_sig)) == str(tmp_path)
+    # without the override the path falls back to the platform user cache dir,
+    # under a peregrine-named directory, with the same keyed file name.
     monkeypatch.delenv("PEREGRINE_CACHE_DIR", raising=False)
-    default = policy._cache_path()
-    assert default.endswith("calibration.json")
+    default = policy._cache_path(cpu_sig)
+    assert os.path.basename(default) == name
     assert "peregrine" in default.lower()
 
 
-# --- DISP-01: calibrate() measures under budget; CPU-only omits gpu/transfer ---
+# --- calibrate() measures under budget; CPU-only omits gpu/transfer ---
 #
 # These exercise the live calibrate() measurement on whatever build is present.
 # On the CPU-only build (the dominant gate) they measure the CPU grid only; on a
@@ -653,7 +809,7 @@ def test_cache_dir_override(tmp_path, monkeypatch):
 
 @pytest.mark.slow
 def test_calibrate_budget(tmp_path, monkeypatch):
-    # DISP-01: calibrate() returns a dict carrying the CPU grid and completes
+    # calibrate() returns a dict carrying the CPU grid and completes
     # within its time budget. budget_seconds is a hard ceiling, not a tight bound:
     # the loop measures a whole size before re-checking elapsed, so one in-flight
     # size can run past the nominal budget. Assert a generous ceiling (the budget
@@ -684,7 +840,7 @@ def test_calibrate_budget(tmp_path, monkeypatch):
 
 
 def test_cpu_only_calibrate(tmp_path, monkeypatch):
-    # DISP-01: on a CPU-only build calibrate() measures the CPU grid only and the
+    # On a CPU-only build calibrate() measures the CPU grid only and the
     # returned dict has NO gpu and NO transfer key, so the policy treats the GPU
     # as unavailable. This is the OFF-build contract (the dominant gate). On an ON
     # build the keys are present instead -- assert that branch too so the test is
@@ -699,18 +855,18 @@ def test_cpu_only_calibrate(tmp_path, monkeypatch):
         assert "transfer" not in result, "CPU-only calibrate must omit the transfer key"
 
 
-# --- DISP-02: cache write, reuse, and the GPU-distinguishing signature ---------
+# --- cache write, reuse, and the GPU-distinguishing signature ---------
 
 
 def test_writes_cache(tmp_path, monkeypatch):
-    # DISP-02: a fresh calibrate() writes a valid schema-versioned JSON under the
+    # A fresh calibrate() writes a valid schema-versioned JSON under the
     # PEREGRINE_CACHE_DIR path. The written file parses as JSON, carries the policy
     # SCHEMA and the running machine signature, and round-trips through
     # policy._load_cache to a non-None dict (the read/write contract closes here).
     monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     result = calibrate.calibrate(force=True, budget_seconds=5.0)
 
-    path = policy._cache_path()
+    path = policy._cache_path(result["signature"])
     assert os.path.isfile(path), "calibrate must write the cache file"
     with open(path) as f:
         on_disk = json.load(f)
@@ -724,7 +880,7 @@ def test_writes_cache(tmp_path, monkeypatch):
 
 
 def test_cache_reuse(tmp_path, monkeypatch):
-    # DISP-02: a second force=False call reuses the cache without re-measuring --
+    # A second force=False call reuses the cache without re-measuring --
     # the second-run-uses-cache contract. Prove it two ways: the cache file's
     # mtime is unchanged across the second call (no rewrite happened), and the
     # second call returns the same content as the first. A force=True call by
@@ -732,7 +888,7 @@ def test_cache_reuse(tmp_path, monkeypatch):
     # mtime check is non-vacuous.
     monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
     first = calibrate.calibrate(force=True, budget_seconds=5.0)
-    path = policy._cache_path()
+    path = policy._cache_path(first["signature"])
     mtime_after_first = os.stat(path).st_mtime_ns
 
     second = calibrate.calibrate(force=False, budget_seconds=5.0)
@@ -752,7 +908,7 @@ def test_cache_reuse(tmp_path, monkeypatch):
 
 
 def test_signature_distinct(tmp_path, monkeypatch):
-    # DISP-02: the machine signature a CPU-only run produces (gpu=none, driver=n/a)
+    # The machine signature a CPU-only run produces (gpu=none, driver=n/a)
     # differs from a GPU-run signature on the SAME CPU. On the CPU-only build the
     # helper emits the none/n/a GPU+driver components, so swapping in a real GPU
     # name yields a strictly different string -- a CPU-only cache can never be
@@ -783,22 +939,22 @@ def test_signature_distinct(tmp_path, monkeypatch):
         )
 
 
-# --- DISP-03 (write half): the atomic, crash-safe cache write ------------------
+# --- the write half of the fail-safe cache: the atomic, crash-safe cache write ------------------
 
 
 def test_atomic_write(tmp_path, monkeypatch):
-    # DISP-03 write half: after calibrate() writes the cache there is no leftover
+    # The write half of the fail-safe cache: after calibrate() writes the cache there is no leftover
     # *.tmp file in the cache dir and the target is a complete, parseable JSON.
     # The write goes to a temp file in the same dir then os.replace -- a crash
     # mid-write leaves the old file or the new, never a half-written one, and the
     # temp is unlinked on any failure so none is ever left behind on success.
     monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
-    calibrate.calibrate(force=True, budget_seconds=5.0)
+    result = calibrate.calibrate(force=True, budget_seconds=5.0)
 
     leftover = [f for f in os.listdir(str(tmp_path)) if f.endswith(".tmp")]
     assert leftover == [], f"no temp file may survive a write, found {leftover}"
 
-    path = policy._cache_path()
+    path = policy._cache_path(result["signature"])
     assert os.path.isfile(path)
     with open(path) as f:
         # a complete write parses cleanly; a half-write would raise here
@@ -809,3 +965,424 @@ def test_atomic_write(tmp_path, monkeypatch):
     calibrate.calibrate(force=True, budget_seconds=5.0)
     leftover_again = [f for f in os.listdir(str(tmp_path)) if f.endswith(".tmp")]
     assert leftover_again == [], "atomic overwrite must not leave a temp file"
+
+
+# --- per-process routing memos and the reset hook ---------------------------
+#
+# The auto router keeps the device verdict, the machine signature, and the loaded
+# calibration for the session, so a dispatch after the first does no file system
+# work, no registry read, no NVML load, and no CUDA call. The device and NVML are
+# stubbed through the package's own attributes so these run on every build.
+
+_FAKE_GPU = "Fake GPU 9000"
+_FAKE_DRIVER = "999.01"
+
+
+def _stub_gpu_machine(monkeypatch):
+    """Make the package see a usable GPU; return the NVML call log."""
+    nvml_calls = []
+    monkeypatch.setattr(pg, "has_cuda", lambda: True)
+    monkeypatch.setattr(
+        pg, "_cuda_device_probe", lambda: {"present": True, "name": _FAKE_GPU}
+    )
+    monkeypatch.setattr(
+        calibrate,
+        "_nvml_driver_version",
+        lambda: nvml_calls.append(1) or _FAKE_DRIVER,
+    )
+    pg._reset_routing_state()
+    return nvml_calls
+
+
+def test_auto_dispatch_memoizes_calibration(tmp_path, monkeypatch):
+    import builtins
+
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
+    nvml_calls = _stub_gpu_machine(monkeypatch)
+    sig = f"{calibrate._cpu_brand()}|{_FAKE_GPU}|{_FAKE_DRIVER}|{pg.__version__}"
+    payload = synthetic_calibration()
+    payload["signature"] = sig
+    path = policy._cache_path(sig)
+    _write_cache_file(path, payload)
+
+    loads = []
+    real_load = policy._load_cache
+    monkeypatch.setattr(
+        policy, "_load_cache", lambda p, s: loads.append((p, s)) or real_load(p, s)
+    )
+    a = np.ones((8, 8), dtype=np.float32)
+
+    # first auto dispatch: one signature build, one cache read
+    assert_matmul_close(pg.matmul(a, a), a @ a, a, a)
+    assert loads == [(path, sig)]
+    assert len(nvml_calls) == 1
+    assert pg._routing_calibration == payload
+
+    # second auto dispatch: nothing touches the file system or NVML
+    opened, stats = [], []
+    real_open, real_stat = builtins.open, os.stat
+    monkeypatch.setattr(
+        builtins, "open", lambda *x, **k: opened.append(x) or real_open(*x, **k)
+    )
+    monkeypatch.setattr(os, "stat", lambda *x, **k: stats.append(x) or real_stat(*x, **k))
+    assert_matmul_close(pg.matmul(a, a), a @ a, a, a)
+    assert loads == [(path, sig)]
+    assert len(nvml_calls) == 1
+    assert opened == [] and stats == []
+
+
+def test_no_usable_cache_is_memoized(tmp_path, monkeypatch):
+    # A missing cache is an answer too: the router must not retry the read on
+    # every dispatch of a machine that was never calibrated.
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
+    _stub_gpu_machine(monkeypatch)
+    loads = []
+    real_load = policy._load_cache
+    monkeypatch.setattr(
+        policy, "_load_cache", lambda p, s: loads.append(p) or real_load(p, s)
+    )
+    a = np.ones((8, 8), dtype=np.float32)
+    pg.matmul(a, a)
+    pg.matmul(a, a)
+    assert len(loads) == 1
+    assert pg._routing_calibration is None
+
+
+def test_reset_and_set_backend_invalidate(tmp_path, monkeypatch):
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
+    nvml_calls = _stub_gpu_machine(monkeypatch)
+    loads = []
+    real_load = policy._load_cache
+    monkeypatch.setattr(
+        policy, "_load_cache", lambda p, s: loads.append(p) or real_load(p, s)
+    )
+    a = np.ones((8, 8), dtype=np.float32)
+    pg.matmul(a, a)
+    assert (len(loads), len(nvml_calls)) == (1, 1)
+
+    # the reset hook drops the calibration and the signature
+    pg._reset_routing_state()
+    assert pg._routing_calibration is pg._UNSET
+    pg.matmul(a, a)
+    assert (len(loads), len(nvml_calls)) == (2, 2)
+
+    # set_backend drops the calibration only; the machine did not change
+    pg.set_backend("auto")
+    assert pg._routing_calibration is pg._UNSET
+    pg.matmul(a, a)
+    assert (len(loads), len(nvml_calls)) == (3, 2)
+
+
+def test_reset_clears_cuda_reason():
+    # has_cuda() answers from a memo after the first call; the reset hook is the
+    # only way back to a fresh probe.
+    pg.has_cuda()
+    assert pg._cuda_unavailable_reason.cache_info().currsize == 1
+    pg._reset_routing_state()
+    assert pg._cuda_unavailable_reason.cache_info().currsize == 0
+
+
+def test_calibrate_replaces_memo(tmp_path, monkeypatch):
+    # calibrate() hands the router what it just wrote, so the next dispatch
+    # neither rereads the file nor routes on the calibration it replaced.
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        calibrate,
+        "_measure_grid",
+        lambda budget, start, cuda: {16: (1e-6, 2e-6, 1e-5, 1e-4)},
+    )
+    monkeypatch.setattr(
+        calibrate,
+        "_measure_transfer",
+        lambda sizes: {"h2d_gbps": 10.0, "d2h_gbps": 10.0, "fixed_overhead_s": 1e-5},
+    )
+    monkeypatch.setattr(pg, "_routing_calibration", {"stale": True})
+    result = calibrate.calibrate(force=True, budget_seconds=5.0)
+    assert pg._routing_calibration is result
+
+    # force=False on a valid cache installs the cache it returns
+    monkeypatch.setattr(pg, "_routing_calibration", pg._UNSET)
+    again = calibrate.calibrate(force=False)
+    assert again == result
+    assert pg._routing_calibration is again
+
+    loads = []
+    monkeypatch.setattr(policy, "_load_cache", lambda p, s: loads.append(p))
+    monkeypatch.setattr(pg, "has_cuda", lambda: True)
+    a = np.ones((8, 8), dtype=np.float32)
+    pg.matmul(a, a)
+    assert loads == []
+
+
+# --- the machine signature: probe name, NVML driver, no subprocess ----------
+
+
+def test_signature_from_probe_and_nvml(monkeypatch):
+    # The GPU name comes from the probe (which never builds the CUDA context)
+    # and the driver from NVML; _cuda_device_info and any subprocess are off
+    # limits, so both are made to fail loudly here.
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("the signature must not call this")
+
+    nvml_calls = _stub_gpu_machine(monkeypatch)
+    monkeypatch.setattr(pg._core, "_cuda_device_info", _forbidden, raising=False)
+    monkeypatch.setattr(subprocess, "run", _forbidden)
+    monkeypatch.setattr(subprocess, "Popen", _forbidden)
+
+    sig = calibrate._machine_signature()
+    assert sig == f"{calibrate._cpu_brand()}|{_FAKE_GPU}|{_FAKE_DRIVER}|{pg.__version__}"
+    # memoized: the second call reads nothing
+    assert calibrate._machine_signature() == sig
+    assert len(nvml_calls) == 1
+
+
+class _FakeNvml:
+    """Stands in for the NVML library; records the calls the reader makes."""
+
+    def __init__(self, init_rc=0, version_rc=0, version=b"610.47"):
+        self.calls = []
+        self._init_rc = init_rc
+        self._version_rc = version_rc
+        self._version = version
+
+    def nvmlInit_v2(self):
+        self.calls.append("init")
+        return self._init_rc
+
+    def nvmlSystemGetDriverVersion(self, buf, length):
+        self.calls.append("version")
+        if self._version_rc == 0:
+            buf.value = self._version
+        return self._version_rc
+
+    def nvmlShutdown(self):
+        self.calls.append("shutdown")
+        return 0
+
+
+def test_nvml_driver_version(monkeypatch):
+    fake = _FakeNvml()
+    monkeypatch.setattr(calibrate, "_load_nvml", lambda: fake)
+    assert calibrate._nvml_driver_version() == "610.47"
+    assert fake.calls == ["init", "version", "shutdown"]
+
+
+def test_nvml_failure_gives_na(monkeypatch):
+    def _missing():
+        raise OSError("nvml library not found")
+
+    monkeypatch.setattr(calibrate, "_load_nvml", _missing)
+    assert calibrate._nvml_driver_version() == "n/a"
+
+    # init failing: no query, and no shutdown of a session that never started
+    fake = _FakeNvml(init_rc=1)
+    monkeypatch.setattr(calibrate, "_load_nvml", lambda: fake)
+    assert calibrate._nvml_driver_version() == "n/a"
+    assert fake.calls == ["init"]
+
+    # the query failing still shuts NVML down
+    fake = _FakeNvml(version_rc=3)
+    monkeypatch.setattr(calibrate, "_load_nvml", lambda: fake)
+    assert calibrate._nvml_driver_version() == "n/a"
+    assert fake.calls == ["init", "version", "shutdown"]
+
+    # a library without the entry point is a failure too, never an exception
+    monkeypatch.setattr(calibrate, "_load_nvml", lambda: object())
+    assert calibrate._nvml_driver_version() == "n/a"
+
+
+def test_package_never_runs_nvidia_smi():
+    # No subprocess on any call path: the package source must not even import
+    # the module or name the tool (the tests may still use it).
+    pkg_dir = os.path.dirname(pg.__file__)
+    for name in os.listdir(pkg_dir):
+        if name.endswith(".py"):
+            with open(os.path.join(pkg_dir, name), encoding="utf-8") as f:
+                text = f.read()
+            assert "nvidia-smi" not in text, name
+            assert "import subprocess" not in text, name
+
+
+# --- forced cuda without a device, and routing after the runtime fallback ---
+
+_ENV_CUDA_NO_DEVICE_SCRIPT = """\
+import numpy as np
+
+import peregrine as pg
+
+# PEREGRINE_BACKEND=cuda with no usable device imports cleanly ...
+assert pg._backend == "cuda", repr(pg._backend)
+assert not pg.has_cuda()
+try:
+    pg.set_backend("cuda")
+except RuntimeError as exc:
+    expected = str(exc)
+else:
+    raise AssertionError("set_backend('cuda') accepted with no usable device")
+assert expected.startswith("cuda backend requested but "), expected
+
+# ... and the first host matmul raises the same RuntimeError set_backend does
+a = np.ones((4, 4), dtype=np.float32)
+try:
+    pg.matmul(a, a)
+except RuntimeError as exc:
+    assert str(exc) == expected, (str(exc), expected)
+else:
+    raise AssertionError("host matmul ran with no usable cuda device")
+print("FORCED_CUDA_OK")
+"""
+
+
+def test_env_cuda_without_device(tmp_path):
+    # CUDA_VISIBLE_DEVICES=-1 hides every device, so the same child exercises
+    # "no build" on a CPU-only build and "no device" on a CUDA build.
+    env = dict(
+        os.environ,
+        PEREGRINE_BACKEND="cuda",
+        CUDA_VISIBLE_DEVICES="-1",
+        PEREGRINE_CACHE_DIR=str(tmp_path),
+    )
+    p = subprocess.run(
+        [sys.executable, "-c", _ENV_CUDA_NO_DEVICE_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "FORCED_CUDA_OK" in p.stdout, (p.stdout, p.stderr)
+
+
+def test_forced_cuda_without_device_in_process(monkeypatch):
+    # The same contract without a child, for the NameError this replaced: the
+    # CPU-only build has no device entries at all.
+    monkeypatch.setattr(pg, "_backend", "cuda")
+    monkeypatch.setattr(pg, "_cuda_unavailable_reason", lambda: "no device")
+    a = np.ones((4, 4), dtype=np.float32)
+    with pytest.raises(RuntimeError) as ei:
+        pg.matmul(a, a)
+    assert str(ei.value) == "cuda backend requested but no device"
+
+
+def test_auto_routing_stops_after_cuda_fallback(monkeypatch):
+    # Once a device op has failed and warned, auto mode keeps every later host
+    # product on the CPU instead of handing it to the failing device again.
+    monkeypatch.setattr(pg, "has_cuda", lambda: True)
+    monkeypatch.setattr(pg, "_cuda_fallback_warned", False)
+    # a calibration under which even an 8x8 host f32 product goes to the GPU
+    table = synthetic_calibration()
+    table["cpu"]["float32"] = [[n, 1.0] for n in _GRID]
+    table["transfer"]["fixed_overhead_s"] = 0.0
+    monkeypatch.setattr(pg, "_routing_calibration", table)
+    a = np.ones((8, 8), dtype=np.float32)
+    assert pg._host_backend_for(a, a) == "cuda"
+
+    uploads = []
+
+    def _failing_staged(*args):
+        uploads.append(args)
+        raise RuntimeError("cudaErrorLaunchFailure at fake.cu:1")
+
+    monkeypatch.setattr(pg, "_gemm_host_native", _failing_staged, raising=False)
+    with pytest.warns(RuntimeWarning, match="falling back to cpu for this session"):
+        got = pg.matmul(a, a)
+    assert_matmul_close(got, a @ a, a, a)
+    assert len(uploads) == 1
+
+    assert pg._host_backend_for(a, a) == "cpu"
+    assert_matmul_close(pg.matmul(a, a), a @ a, a, a)
+    assert len(uploads) == 1
+
+
+# --- what calibrate() measures: the native CPU path, the grid, the statistic ---
+
+
+def test_cpu_series_bypasses_router(tmp_path, monkeypatch):
+    # The CPU series times the native kernel with the backend forced to cpu,
+    # never pg.matmul's router, and the caller's backend comes back afterwards.
+    monkeypatch.setenv("PEREGRINE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(pg, "_backend", "cuda")
+
+    def _router(*args):
+        raise AssertionError("calibration must not consult the auto router")
+
+    seen = []
+    real_native = pg._matmul_cpu
+
+    def _native(a, b):
+        seen.append(pg._backend)
+        return real_native(a, b)
+
+    monkeypatch.setattr(pg, "_host_backend_for", _router)
+    monkeypatch.setattr(pg, "_matmul_cpu", _native)
+    calibrate.calibrate(force=True, budget_seconds=0)
+    assert seen and set(seen) == {"cpu"}
+    assert pg._backend == "cuda"
+
+
+def test_min_time_takes_minimum(monkeypatch):
+    # warmup 1 then reps of 5, 2, 9 ns: the minimum, never the median (5)
+    ticks = iter([0, 5, 10, 12, 20, 29])
+    monkeypatch.setattr(calibrate.time, "perf_counter_ns", lambda: next(ticks))
+    calls = []
+    assert calibrate._min_time(lambda: calls.append(1), reps=3, warmup=1) == 2e-9
+    assert len(calls) == 4
+
+
+def test_grid_refines_each_crossover(monkeypatch):
+    # cpu ~ n^3 and staged ~ fixed + a cheaper n^3 trade places once, between 32
+    # and 64; that bracket gains three geometric midpoints and no other does.
+    warms = []
+    monkeypatch.setattr(calibrate, "_time_cpu", lambda n, dtype: 1e-9 * n**3)
+
+    def _gpu(n, warm):
+        warms.append(warm)
+        return 1e-6, 1e-4 + 1e-11 * n**3
+
+    monkeypatch.setattr(calibrate, "_time_gpu", _gpu)
+    points = calibrate._measure_grid(1e9, time.perf_counter(), cuda=True)
+    mids = calibrate._refine_sizes(32, 64)
+    assert mids == [38, 45, 54]
+    assert sorted(points) == sorted([*calibrate._GRID, *mids])
+    # the long warmup runs once, before the first size; every other size re-warms
+    assert warms[0] == calibrate._FIRST_WARM
+    assert set(warms[1:]) == {calibrate._REWARM}
+
+    # no GPU: the coarse grid only
+    points = calibrate._measure_grid(1e9, time.perf_counter(), cuda=False)
+    assert sorted(points) == list(calibrate._GRID)
+
+
+def test_grid_budget_stops_after_first_size(monkeypatch):
+    # A spent budget still yields a valid one-point grid and refines nothing.
+    monkeypatch.setattr(calibrate, "_time_cpu", lambda n, dtype: 1e-9 * n**3)
+    monkeypatch.setattr(calibrate, "_time_gpu", lambda n, warm: (1e-6, 1e-4))
+    points = calibrate._measure_grid(0.0, time.perf_counter(), cuda=True)
+    assert list(points) == [calibrate._GRID[0]]
+
+
+def test_gpu_warm_stops_when_batches_agree(monkeypatch):
+    # One fake second per batch. Per-GEMM batch times 10, 5, 5.1 ms: the third
+    # agrees with the second within 5 percent after the 2 s minimum, so it stops.
+    clock = iter(range(100))
+    monkeypatch.setattr(calibrate.time, "perf_counter", lambda: float(next(clock)))
+    batches = iter([10.0, 5.0, 5.1, 5.0, 5.0])
+    calls = []
+
+    def _timed(xa, xb, reps, warmups):
+        calls.append(reps)
+        return next(batches)
+
+    monkeypatch.setattr(pg._core, "_cuda_time_matmul", _timed, raising=False)
+    calibrate._gpu_warm(None, None, 2.0, 50.0)
+    assert len(calls) == 3
+
+    # never settling: the maximum ends it
+    clock = iter(range(100))
+    monkeypatch.setattr(calibrate.time, "perf_counter", lambda: float(next(clock)))
+    flapping = iter([10.0, 5.0] * 50)
+    monkeypatch.setattr(
+        pg._core, "_cuda_time_matmul", lambda *a: next(flapping), raising=False
+    )
+    calibrate._gpu_warm(None, None, 2.0, 6.0)
+    assert next(clock) == 7

@@ -1,4 +1,4 @@
-"""Apples-to-apples matmul benchmark: ndarray in, ndarray out, both sides.
+"""Apples-to-apples matmul benchmark and the shared measurement core.
 
 Methodology, in order of importance:
 1. Inputs are already-constructed contiguous ndarrays. No list conversion is
@@ -11,6 +11,12 @@ Methodology, in order of importance:
 4. Every benchmarked op is verified against NumPy in the same run. A fast
    wrong kernel scores zero.
 
+The second half of this module is the measurement protocol every published
+number comes from (interleaved ABBA sampling, shared batch size, per-sample
+bitwise verification, the CV gate, clock discards, pinned threads, and the run
+manifest). benchmarks/bench_suite.py drives it over the cell matrix; the quick
+sequential `run` below stays as a smoke check.
+
 Usage:
     python benchmarks/bench_matmul.py --sizes 256 512 1024 --dtype float64
 """
@@ -18,39 +24,51 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import ctypes
 import datetime
 import json
+import math
 import os
 import platform
+import random
+import re
 import statistics
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
 import peregrine as pg
 
+# OpenMP reads OMP_NUM_THREADS once, when its runtime initializes, so the value
+# that counts is the one present when this process started, not whatever a
+# later caller writes into os.environ.
+_START_OMP_NUM_THREADS = os.environ.get("OMP_NUM_THREADS")
+
 # The tolerance contract lives in one place, tests/conftest.py. Routing the
-# per-run verification through assert_matmul_close keeps the bench on the single
-# sanctioned toleranced path; an inline rtol here is exactly what bench-protocol
-# rule 14 and the single-path rule forbid (a bench that loosens tolerance to
-# pass is a bench that lies).
+# per-run verification through its helpers keeps every bench on the single
+# sanctioned toleranced path; a bench that carries its own rtol can loosen it
+# until a wrong kernel passes.
 _TESTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests")
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
-from conftest import assert_matmul_close
+from conftest import assert_matmul_close  # noqa: E402
 
 try:
-    from threadpoolctl import threadpool_info
+    from threadpoolctl import threadpool_info, threadpool_limits
 except ImportError:
     threadpool_info = None
+    threadpool_limits = None
 
 
 def _blas_identity() -> str:
-    # The comparator BLAS identity comes from threadpoolctl's blas entry, the
-    # same source bench-protocol rule 9 names. scipy-openblas surfaces here as
-    # its internal_api plus version; no separate probe.
+    # threadpoolctl's blas entry is the one place that names the BLAS NumPy
+    # actually loaded; scipy-openblas surfaces here as its internal_api plus
+    # version, so no separate probe is needed.
     if threadpool_info is None:
         return "unknown"
     for d in threadpool_info():
@@ -162,11 +180,10 @@ def _measure_once(fn, reps: int, warmup: int) -> dict:
         fn()
         times.append((time.perf_counter_ns() - t0) / 1e9)
     median = statistics.median(times)
-    # Coefficient of variation, stdev over median. bench-protocol rule 6 gates a
-    # series at CV > 5 percent; this body reports it as a readout so a noisy run
-    # is visible at the console, while _bench's opt-in cv_gate wrapper owns the
-    # rerun-after-cooldown machinery. stdev needs two samples and a non-zero
-    # median.
+    # Coefficient of variation, stdev over median, reported as a readout so a
+    # noisy run is visible at the console; _bench's opt-in cv_gate wrapper owns
+    # the rerun-after-cooldown machinery. stdev needs two samples and a
+    # non-zero median.
     cv = (
         statistics.stdev(times) / median
         if reps >= 2 and median > 0
@@ -193,31 +210,28 @@ def _bench(
     cooldown_s: float = 30,
     cooldown_fn=time.sleep,
 ) -> dict:
-    # The single shared timing core. The DEFAULT path (cv_gate False) returns
-    # _measure_once unchanged, so every existing reuser -- bench_fused's
-    # `from bench_matmul import _bench`, scaling.py, sweep_blocking.py,
-    # calibrate.py -- calls it positionally and sees a byte-identical dict shape
-    # (median_s, p25_s, p75_s, min_s, cv, reps). They are untouched by this gate.
+    # The sequential timing layer the older scripts (bench_fused, bench_gpu,
+    # scaling, sweep_blocking, calibrate) call positionally. The DEFAULT path
+    # (cv_gate False) returns _measure_once unchanged, so they see a stable dict
+    # shape (median_s, p25_s, p75_s, min_s, cv, reps).
     result = _measure_once(fn, reps, warmup)
     if not cv_gate:
         return result
-    # bench-protocol rule 6: a series whose CV exceeds the threshold is
-    # invalidated and rerun after a cooldown (rule 10: >=30s between heavy
-    # series); after a bounded number of reruns a still-noisy series is recorded
-    # rather than dropped. cooldown_fn is injectable (default time.sleep) so a
-    # unit test stubs it to a no-op and never waits 30 real seconds.
+    # A series whose CV exceeds the threshold is rerun after a cooldown, at
+    # least 30 s between heavy series on this laptop; after a bounded number of
+    # reruns a still-noisy series is recorded rather than dropped. cooldown_fn
+    # is injectable (default time.sleep) so a unit test stubs it to a no-op and
+    # never waits 30 real seconds.
     reruns = 0
     while result["cv"] > cv_threshold and reruns < max_reruns:
         cooldown_fn(cooldown_s)
         result = _measure_once(fn, reps, warmup)
         reruns += 1
-    # rule 6/9/11: a high_cv series is STILL verified. The floor (min_s) is the
-    # honest headline statistic regardless of CV; high_cv documents the residual
-    # noise rather than hiding it behind a footnote, and the series is never
-    # stripped -- 07-03's load_series must accept the high_cv+verified pair (the
-    # AV-noisy CPU sweep on this machine is high_cv every run). The gate exists
-    # so a noisy MEDIAN is never silently published, not to "fix" the
-    # AV-vs-OpenMP barrier noise that is structural here.
+    # A high_cv series is still verified: the noise flag documents the
+    # residual instead of hiding it, and the series is never stripped, because
+    # the antivirus-vs-OpenMP barrier noise on this machine makes the CPU sweep
+    # high_cv every run. The gate exists so a noisy median is never silently
+    # published.
     result["high_cv"] = result["cv"] > cv_threshold
     result["reruns"] = reruns
     result["verified"] = True
@@ -225,17 +239,15 @@ def _bench(
 
 
 def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
-    # The device-resident GPU f32 series (GPU-08). Gated on has_cuda() so a
-    # CPU-only build or a machine without a usable device simply omits it and the
-    # CPU bench above still runs. Timing CONSUMES pg._core._cuda_time_matmul (the
-    # cudaEvent-timed warm GEMM created in 04-05): operands are device-resident,
-    # the timed region is the GEMM only (no H2D/D2H), so this measures device work,
-    # not a wall-clock around an async launch (which would report nonsense). The
-    # transfer happens ONCE, outside the timed region; cold and warm are both
-    # event-timed (cold = warmups=0/reps=1 before the clocks warm, warm = the
-    # protocol warmups/reps result). verified=true is published only after the
-    # single sanctioned toleranced path (assert_matmul_close) passes -- a bench
-    # that loosens tolerance or times a transfer is a bench that lies.
+    # The device-resident GPU f32 series. Gated on has_cuda() so a CPU-only build
+    # or a machine without a usable device simply omits it and the CPU bench
+    # above still runs. Timing uses pg._core._cuda_time_matmul, the
+    # cudaEvent-timed warm GEMM: operands are device-resident and the timed
+    # region is the GEMM only (no H2D/D2H), so this measures device work, not a
+    # wall-clock around an async launch. The transfer happens ONCE, outside the
+    # timed region; cold and warm are both event-timed (cold = warmups=0/reps=1
+    # before the clocks warm, warm = the warmups/reps result). verified=true is
+    # published only after assert_matmul_close passes.
     if not pg.has_cuda():
         return []
     series = []
@@ -256,16 +268,16 @@ def _gpu_series(sizes: list[int], reps: int, warmup: int) -> list[dict]:
 
         gflop = 2 * n**3 / 1e9
         # Cold: a single event-timed call before the clocks warm (low-clock first
-        # launch after idle). Warm: the protocol warmups/reps event-timed mean.
+        # launch after idle). Warm: the warmups/reps event-timed mean.
         # Both numbers come from cudaEvent pairs inside _cuda_time_matmul, never
         # wall-clock; the timed region is transfer-free.
         cold_ms = pg._core._cuda_time_matmul(xa, xb, 1, 0)
         warm_ms = pg._core._cuda_time_matmul(xa, xb, reps, warmup)
         warm_gflops = gflop / (warm_ms / 1e3)
         # NumPy CPU f32 at the same n, on the wall-clock path (a CPU GEMM is
-        # synchronous, so perf_counter is the honest timer here). This is the
-        # GPU-08 denominator: warm device-resident f32 GFLOP/s vs NumPy CPU f32
-        # GFLOP/s, an f32-vs-f32 ratio independent of the CPU series --dtype.
+        # synchronous, so perf_counter is the honest timer here). The ratio is
+        # warm device-resident f32 GFLOP/s over NumPy CPU f32 GFLOP/s, an
+        # f32-vs-f32 ratio independent of the CPU series --dtype.
         numpy_t = _bench(lambda: a @ b, reps, warmup)
         numpy_gflops = gflop / numpy_t["median_s"]
         series.append(
@@ -306,7 +318,7 @@ def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
         ref = a @ b
         got = pg.matmul(a, b)
         # Verify on the single sanctioned toleranced path before any time is
-        # recorded (bench-protocol rule 11: fast and wrong is just wrong).
+        # recorded: fast and wrong is just wrong.
         assert_matmul_close(got, ref, a, b)
 
         gflop = 2 * n**3 / 1e9
@@ -320,15 +332,14 @@ def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
             "pg_gflops": gflop / ours["median_s"],
             "numpy_gflops": gflop / numpy_t["median_s"],
             "speedup_vs_numpy": numpy_t["median_s"] / ours["median_s"],
-            # The floor (min) ratio is the headline statistic on this AV-noisy
-            # machine (the median is dragged by AV-vs-OpenMP barrier preemption,
-            # Pitfall 2); recorded alongside the median speedup above so a
-            # consumer quotes the honest floor, not the inflated median.
+            # The floor (min) ratio sits beside the median ratio because the
+            # median on this machine is dragged by antivirus preemption of an
+            # OpenMP worker at the barrier; the floor is the least-contaminated
+            # estimate.
             "speedup_floor": numpy_t["min_s"] / ours["min_s"],
             # True because assert_matmul_close passed above before any time was
-            # recorded (rule 11). The shared load_series validator (07-01) requires
-            # a stored verified flag on every case so the saved CPU series is
-            # publishable; the bench never writes a verified-false series.
+            # recorded. report.py's loader requires a stored verified flag on
+            # every case; the bench never writes a verified-false series.
             "verified": True,
         }
         results["cases"].append(case)
@@ -338,7 +349,7 @@ def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
             f"  speedup {case['speedup_vs_numpy']:.2f}x"
             f"  cv {ours['cv']*100:4.1f}%/{numpy_t['cv']*100:4.1f}%"
         )
-    # The device-resident GPU f32 series (GPU-08) runs over the same size grid,
+    # The device-resident GPU f32 series runs over the same size grid,
     # event-timed and transfer-free; omitted cleanly on a CPU-only build or a
     # machine without a usable device. Reported under its own key so the CPU
     # cases above are never conflated with device-resident GPU numbers.
@@ -348,13 +359,628 @@ def run(sizes: list[int], dtype: str, reps: int, warmup: int) -> dict:
     return results
 
 
+# ---------------------------------------------------------------------------
+# The measurement protocol.
+#
+# A cell is one (op, dtype, shape, layout, variant, threads, seed) point with
+# two or three contenders. Everything below exists so that a ratio written by
+# run_cell can be trusted: same inputs, same batch size K and the same loop
+# code for every contender, interleaved ABBA blocks so drift lands on both
+# sides, every sample's output checked bitwise outside the timed region, a CV
+# gate that reruns and finally closes a cell as noisy instead of averaging it,
+# and a CPU clock reading that can discard samples taken off-frequency.
+# ---------------------------------------------------------------------------
+
+PEREGRINE = "peregrine"
+
+
+class VerifyFailed(Exception):
+    """An output differed bitwise from its first output, or the oracle failed."""
+
+
+@dataclass
+class Contender:
+    name: str
+    # One call of the operation; returns its output.
+    fn: Callable[[], object]
+    # Device contenders time themselves with cudaEvents: timer(k) returns the
+    # per-call seconds of k back-to-back calls, and fn is then only the untimed
+    # verification path.
+    timer: Callable[[int], float] | None = None
+    to_host: Callable[[object], np.ndarray] = np.asarray
+    # Drives the GPU, so its rewarm lasts Protocol.gpu_rewarm_s.
+    gpu: bool = False
+
+
+@dataclass
+class Protocol:
+    samples: int = 30
+    warmups: int = 5
+    block: int = 5
+    batch_target_s: float = 200e-6
+    switch_gap_s: float = 0.3
+    # Untimed running of the incoming contender before it is sampled, measured
+    # in time rather than samples; see _rewarm.
+    rewarm_s: float = 0.2
+    # The display GPU leaves P0 after one to a few seconds without work, and
+    # climbs back gradually: after 8 s idle a 2048 float32 device GEMM took 31.8
+    # ms on the first call, 4.75 ms at 0.2 s, 3.07 at 2 s, and 2.78 (steady) at
+    # 2.5 s of continuous work; 2 s idle already sent it to 17.6 ms. A GPU
+    # contender therefore rewarms this long at every switch.
+    gpu_rewarm_s: float = 3.0
+    cv_limit: float = 0.05
+    max_strikes: int = 3
+    strike_cooldown_s: float = 30.0
+    fresh_cooldown_s: float = 120.0
+    clock_floor: float | None = None
+    clock_ceiling: float | None = None
+    clock_group_s: float = 0.05
+    discard_limit: float = 0.20
+    # "last" checks each batch's last call; "all" keeps and checks every call.
+    # Keeping K results alive moves the timing it is meant to verify: paired
+    # on this machine, +50 to +177 percent per call for allocating contenders
+    # at 64 to 256 KB outputs and K of 5 to 22 (fresh memory every call), and
+    # -7 to +8 percent in opposite directions for the two libraries at outputs
+    # under 1 KB. With K == 1 the two modes are the same loop.
+    verify_mode: str = "last"
+
+
+def abba_order(names: list[str], cell_id: str) -> list[str]:
+    # Seeding from the cell id (str seeding hashes with sha512, independent of
+    # PYTHONHASHSEED) makes the start reproducible per cell while still spreading
+    # first place across contenders over the matrix.
+    order = list(names)
+    random.Random(cell_id).shuffle(order)
+    return order
+
+
+def abba_blocks(order: list[str], rounds: int) -> list[str]:
+    # Mirrored rounds: A B | B A | A B ..., so a slow drift in clock or
+    # temperature cannot favor whoever always runs first. With three or more
+    # contenders the base order also rotates every two rounds (A B C | C B A |
+    # B C A | A C B | ...): mirroring alone would keep the middle contender in
+    # the middle, always following another contender and never itself.
+    seq: list[str] = []
+    n = len(order)
+    for r in range(rounds):
+        k = (r // 2) % n if n > 2 else 0
+        base = order[k:] + order[:k]
+        seq.extend(base if r % 2 == 0 else base[::-1])
+    return seq
+
+
+def batch_size(per_call_s: dict, target_s: float) -> int:
+    # Sized from the FASTEST contender so even its samples reach the target;
+    # slower contenders simply take longer per sample with the same K.
+    fastest = min(per_call_s.values())
+    if fastest >= target_s:
+        return 1
+    # The epsilon keeps an exact quotient such as 200e-6 / 1e-6 from rounding
+    # up one call on float noise.
+    return math.ceil(target_s / fastest - 1e-9)
+
+
+def bitwise_equal(got, ref) -> bool:
+    got = np.asarray(got)
+    ref = np.asarray(ref)
+    return (
+        got.dtype == ref.dtype
+        and got.shape == ref.shape
+        and bool(np.array_equal(got, ref, equal_nan=True))
+    )
+
+
+def _batch_all(fn, k, slots, now):
+    # Every call's result is stored by index so all of them can be verified
+    # after the sample; the stores are part of the identical loop each
+    # contender runs.
+    t0 = now()
+    for i in range(k):
+        slots[i] = fn()
+    return now() - t0
+
+
+def _batch_last(fn, k, slots, now):
+    # Only the last result survives the loop; earlier results are freed inside
+    # the timed region exactly as in a plain user loop.
+    t0 = now()
+    for _ in range(k):
+        r = fn()
+    t1 = now()
+    slots[0] = r
+    return t1 - t0
+
+
+_LOOPS = {"all": _batch_all, "last": _batch_last}
+
+
+def _sample(c: Contender, k: int, mode: str, now) -> tuple[float, list]:
+    # Returns (per-call seconds, outputs to verify).
+    if c.timer is not None:
+        return c.timer(k), [c.fn()]
+    slots = [None] * (k if mode == "all" else 1)
+    ns = _LOOPS[mode](c.fn, k, slots, now)
+    return ns / 1e9 / k, slots
+
+
+def _rewarm_s(c: Contender, proto: Protocol) -> float:
+    return max(proto.rewarm_s, proto.gpu_rewarm_s) if c.gpu else proto.rewarm_s
+
+
+def _rewarm(c: Contender, k: int, mode: str, now, seconds: float, at_least: int) -> None:
+    # Cores left idle through a switch gap fall to low clocks and take on the
+    # order of 100 ms to ramp back. In the first v3.0.0 baseline here, 6-thread
+    # matmul 512 read 21 ms right after a gap and settled at 4.5 ms over about
+    # 60 ms, and single-thread NumPy axpby 32x32 ran 4x slow for about 150 ms,
+    # so a warmup counted in samples (5 x 200 us) never reached steady clocks.
+    t_end = now() + int(seconds * 1e9)
+    for i in range(1 << 20):
+        if i >= at_least and now() >= t_end:
+            break
+        if c.timer is not None:
+            c.timer(k)
+        else:
+            _sample(c, k, mode, now)
+
+
+def _verify(c: Contender, outs: list, ref: np.ndarray) -> None:
+    # Out-buffer contenders return the same object every call, so identical
+    # objects are checked once: that is the buffer state after the sample.
+    seen = set()
+    for o in outs:
+        if id(o) in seen:
+            continue
+        seen.add(id(o))
+        if not bitwise_equal(c.to_host(o), ref):
+            raise VerifyFailed(
+                f"{c.name}: a sample output differs bitwise from its first output"
+            )
+
+
+def summarize(samples: list[float]) -> dict:
+    arr = np.asarray(samples, dtype=np.float64)
+    if arr.size == 0:
+        return {"samples_s": [], "n_samples": 0}
+    q1, med, q3 = np.percentile(arr, [25, 50, 75])
+    cv = statistics.stdev(samples) / med if arr.size >= 2 and med > 0 else float("nan")
+    return {
+        "samples_s": [float(s) for s in samples],
+        "median_s": float(med),
+        "q1_s": float(q1),
+        "q3_s": float(q3),
+        "min_s": float(arr.min()),
+        "cv": float(cv),
+        "n_samples": int(arr.size),
+    }
+
+
+def _out_of_band(reading: float, proto: Protocol) -> bool:
+    if proto.clock_floor is not None and reading < proto.clock_floor:
+        return True
+    return proto.clock_ceiling is not None and reading > proto.clock_ceiling
+
+
+def measure_cell(
+    cell_id: str,
+    contenders: list[Contender],
+    check_first: Callable[[dict], None],
+    proto: Protocol,
+    *,
+    refs: dict,
+    sleep=time.sleep,
+    clock=None,
+    now=time.perf_counter_ns,
+    log=print,
+) -> dict:
+    """One attempt at a cell. Raises VerifyFailed; returns stats otherwise."""
+    names = [c.name for c in contenders]
+    by = {c.name: c for c in contenders}
+    mode = proto.verify_mode
+
+    # The first output of each contender is its bitwise reference for every
+    # later sample, kept across CV reruns so a rerun cannot quietly change what
+    # "correct" means for the cell.
+    if not refs:
+        for c in contenders:
+            refs[c.name] = np.array(c.to_host(c.fn()), copy=True)
+        try:
+            check_first(refs)
+        except AssertionError as e:
+            raise VerifyFailed(f"oracle: {e}") from e
+
+    per_call = {}
+    for c in contenders:
+        # Warm before the pilot so K is sized from steady-clock per-call times;
+        # a cold pilot sizes K too small and warm samples fall short of target.
+        _rewarm(c, 1, mode, now, proto.rewarm_s, 1)
+        k = 1
+        while True:
+            pc, _ = _sample(c, k, mode, now)
+            if pc * k >= proto.batch_target_s or k >= 1 << 16:
+                break
+            k *= 2
+        per_call[c.name] = pc
+    K = batch_size(per_call, proto.batch_target_s)
+
+    order = abba_order(names, cell_id)
+    # A rate counter read over less than ~50 ms says little, so short samples
+    # are grouped and read together; a block holds whole groups.
+    group = {
+        n: max(1, math.ceil(proto.clock_group_s / max(per_call[n] * K, 1e-9)))
+        if clock is not None
+        else 1
+        for n in names
+    }
+    block = max(g * math.ceil(proto.block / g) for g in group.values())
+    rounds = max(2, math.ceil(proto.samples / block))
+    rounds += rounds % 2
+    planned = rounds * block * len(names)
+
+    for n in order:
+        _rewarm(by[n], K, mode, now, _rewarm_s(by[n], proto), proto.warmups)
+    last = order[-1]
+
+    samples = {n: [] for n in names}
+    discards = {n: 0 for n in names}
+    readings = {n: [] for n in names}
+    clock_noisy = False
+    for n in abba_blocks(order, rounds):
+        if clock_noisy:
+            break
+        c = by[n]
+        if n != last:
+            # Idle gap at every switch so the previous library's spinning
+            # worker threads have released the cores before the next one runs.
+            sleep(proto.switch_gap_s)
+            last = n
+            # The GPU also drops to idle clocks while a CPU contender runs (the
+            # first event-timed chain after 3 s idle read 21 percent slow), so
+            # a device contender always gets at least one untimed sample.
+            _rewarm(c, K, mode, now, _rewarm_s(c, proto), 1 if c.timer is not None else 0)
+        taken = 0
+        while taken < block:
+            g = min(group[n], block - taken)
+            if clock is not None:
+                clock.start()
+            got = []
+            for _ in range(g):
+                pc, outs = _sample(c, K, mode, now)
+                _verify(c, outs, refs[n])
+                got.append(pc)
+            reading = clock.stop() if clock is not None else None
+            if reading is not None and _out_of_band(reading, proto):
+                discards[n] += g
+                log(f"  discard {g} {n} sample(s): clock {reading:.1f}%")
+                if sum(discards.values()) > proto.discard_limit * planned:
+                    clock_noisy = True
+                    break
+                continue
+            samples[n].extend(got)
+            readings[n].append(reading)
+            taken += g
+
+    stats = {}
+    for n in names:
+        s = summarize(samples[n])
+        s["discards"] = discards[n]
+        if clock is not None:
+            s["clock_pct"] = readings[n]
+        stats[n] = s
+    return {
+        "batch_k": K,
+        "warmups": proto.warmups,
+        "block": block,
+        "rounds": rounds,
+        "order": order,
+        # Recorded as "all" whenever every call was in fact checked.
+        "verify_mode": "all" if K == 1 else mode,
+        "contenders": stats,
+        "clock_noisy": clock_noisy,
+    }
+
+
+def _close(m: dict, status: str, strikes: int, attempts: list, reason=None) -> dict:
+    out = dict(m)
+    out.pop("clock_noisy", None)
+    out["status"] = status
+    out["verified"] = True
+    out["strikes"] = strikes
+    out["attempts"] = attempts
+    if reason:
+        out["reason"] = reason
+    if status == "ok" and PEREGRINE in out["contenders"]:
+        pg_med = out["contenders"][PEREGRINE]["median_s"]
+        ratio = {
+            n: s["median_s"] / pg_med
+            for n, s in out["contenders"].items()
+            if n != PEREGRINE
+        }
+        if ratio:
+            out["ratio"] = ratio
+    return out
+
+
+def run_cell(
+    cell_id: str,
+    contenders: list[Contender],
+    check_first: Callable[[dict], None],
+    proto: Protocol,
+    *,
+    sleep=time.sleep,
+    clock=None,
+    now=time.perf_counter_ns,
+    fresh: Callable[[], dict] | None = None,
+    log=print,
+) -> dict:
+    """A cell through the CV gate: up to max_strikes attempts, then one fresh
+    process, then "noisy". Never averages attempts together."""
+    refs: dict = {}
+    attempts: list = []
+    strikes = 0
+    m = None
+    while True:
+        try:
+            m = measure_cell(
+                cell_id, contenders, check_first, proto,
+                refs=refs, sleep=sleep, clock=clock, now=now, log=log,
+            )
+        except VerifyFailed as e:
+            return {
+                "status": "verify_failed",
+                "verified": False,
+                "reason": str(e),
+                "strikes": strikes,
+                "attempts": attempts,
+            }
+        cvs = {n: s.get("cv") for n, s in m["contenders"].items()}
+        attempts.append({"cv": cvs, "discards": {n: s["discards"] for n, s in m["contenders"].items()}})
+        if m["clock_noisy"]:
+            return _close(m, "noisy", strikes, attempts, "clock discards above the limit")
+        # A NaN CV (one sample, or a zero median) fails the comparison, so it
+        # strikes rather than passing silently.
+        if all(cv is not None and cv <= proto.cv_limit for cv in cvs.values()):
+            return _close(m, "ok", strikes, attempts)
+        strikes += 1
+        log(f"  strike {strikes}: cv {', '.join(f'{n} {v:.3f}' for n, v in cvs.items())}")
+        if strikes >= proto.max_strikes:
+            break
+        sleep(proto.strike_cooldown_s)
+    if fresh is not None:
+        sleep(proto.fresh_cooldown_s)
+        try:
+            child = fresh()
+        except RuntimeError as e:
+            return _close(m, "noisy", strikes, attempts, f"fresh process failed: {e}")
+        child = dict(child)
+        child["strikes"] = strikes + child.get("strikes", 0)
+        child["attempts"] = attempts + child.get("attempts", [])
+        child["fresh_process"] = True
+        return child
+    return _close(m, "noisy", strikes, attempts, "cv above the limit on every attempt")
+
+
+class PdhClock:
+    """`% Processor Performance` of all logical processors, via pdh.dll.
+
+    The counter is a rate between two collects: start() and stop() bracket an
+    interval and stop() returns the percentage of nominal frequency over it
+    (above 100 under turbo, hence NOCAP100). The classic \\Processor object is
+    absent on this machine; \\Processor Information is the one that exists.
+    """
+
+    PATH = r"\Processor Information(_Total)\% Processor Performance"
+    PDH_FMT_DOUBLE_NOCAP100 = 0x8200
+
+    def __init__(self):
+        self.available = False
+        self.reason = ""
+        if os.name != "nt":
+            self.reason = "PDH is Windows-only; no clock discards on this OS"
+            return
+        try:
+            from ctypes import wintypes
+
+            self._pdh = ctypes.WinDLL("pdh.dll")
+            self._query = ctypes.c_void_p()
+            self._counter = ctypes.c_void_p()
+            rc = self._pdh.PdhOpenQueryW(None, None, ctypes.byref(self._query))
+            if rc == 0:
+                rc = self._pdh.PdhAddEnglishCounterW(
+                    self._query, self.PATH, None, ctypes.byref(self._counter)
+                )
+            if rc != 0:
+                self.reason = f"PDH counter unavailable (0x{rc & 0xFFFFFFFF:08x})"
+                return
+
+            class _Value(ctypes.Structure):
+                _fields_ = [("CStatus", wintypes.DWORD), ("doubleValue", ctypes.c_double)]
+
+            self._value_t = _Value
+            self._dword = wintypes.DWORD
+            self._pdh.PdhCollectQueryData(self._query)
+            self.available = True
+        except OSError as e:
+            self.reason = f"PDH unavailable: {e}"
+
+    def start(self) -> None:
+        self._pdh.PdhCollectQueryData(self._query)
+
+    def stop(self) -> float | None:
+        self._pdh.PdhCollectQueryData(self._query)
+        v = self._value_t()
+        kind = self._dword()
+        rc = self._pdh.PdhGetFormattedCounterValue(
+            self._counter, self.PDH_FMT_DOUBLE_NOCAP100, ctypes.byref(kind), ctypes.byref(v)
+        )
+        # An unreadable interval is recorded as None and never discards.
+        if rc != 0 or v.CStatus not in (0, 1):
+            return None
+        return float(v.doubleValue)
+
+
+def _pools(user_api: str) -> list[dict]:
+    if threadpool_info is None:
+        return []
+    return [d for d in threadpool_info() if d.get("user_api") == user_api]
+
+
+def assert_threads(n: int) -> dict:
+    """Pin peregrine to n threads where possible and prove both sides run n."""
+    if threadpool_info is None:
+        raise RuntimeError("threadpoolctl is required to pin and verify thread counts")
+    if hasattr(pg, "set_num_threads"):
+        pg.set_num_threads(n)
+        source = "pg.set_num_threads"
+    else:
+        # Without a setter the only lever is OMP_NUM_THREADS before startup.
+        if _START_OMP_NUM_THREADS != str(n):
+            raise RuntimeError(
+                f"this peregrine build has no set_num_threads, so the process must "
+                f"start with OMP_NUM_THREADS={n}; it started with "
+                f"OMP_NUM_THREADS={_START_OMP_NUM_THREADS!r}. Rerun this selection "
+                f"as its own invocation with OMP_NUM_THREADS={n} exported."
+            )
+        source = "OMP_NUM_THREADS"
+    blas = [d.get("num_threads") for d in _pools("blas")]
+    omp = [d.get("num_threads") for d in _pools("openmp")]
+    if not blas or any(t != n for t in blas):
+        raise RuntimeError(f"BLAS pools run {blas} threads, expected {n}")
+    if hasattr(pg, "get_num_threads"):
+        # A call runs min(setting, OpenMP's limit) threads, so OpenMP's limit
+        # only has to admit n.
+        pg_threads = min([int(pg.get_num_threads()), *omp])
+        mismatch = pg_threads != n
+    elif omp:
+        pg_threads = omp[0]
+        mismatch = pg_threads != n or any(t != n for t in omp)
+    else:
+        raise RuntimeError("no OpenMP pool is loaded, so peregrine's thread count cannot be verified")
+    if mismatch:
+        raise RuntimeError(f"peregrine runs {pg_threads} threads (OpenMP pools {omp}), expected {n}")
+    return {"blas": blas, "openmp": omp, "peregrine": pg_threads, "source": source}
+
+
+@contextlib.contextmanager
+def pinned_threads(n: int):
+    if threadpool_limits is None:
+        raise RuntimeError("threadpoolctl is required to pin and verify thread counts")
+    with threadpool_limits(n, user_api="blas"):
+        yield assert_threads(n)
+
+
+def _home_pattern() -> re.Pattern | None:
+    home = os.path.expanduser("~")
+    if not home or home == "~":
+        return None
+    parts = [re.escape(p) for p in re.split(r"[\\/]+", home) if p]
+    if not parts:
+        return None
+    lead = r"[\\/]" if home[0] in "\\/" else ""
+    return re.compile(lead + r"[\\/]+".join(parts), re.IGNORECASE)
+
+
+def redact_paths(obj, pattern: re.Pattern | None = None):
+    """Replace the home directory in every string with ~, recursively."""
+    pattern = pattern if pattern is not None else _home_pattern()
+    if pattern is None:
+        return obj
+    if isinstance(obj, str):
+        return pattern.sub("~", obj)
+    if isinstance(obj, dict):
+        return {k: redact_paths(v, pattern) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [redact_paths(v, pattern) for v in obj]
+    return obj
+
+
+def _cpu_brand() -> str:
+    try:
+        if os.name == "nt":
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as k:
+                return str(winreg.QueryValueEx(k, "ProcessorNameString")[0]).strip()
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or "unknown"
+
+
+def _git_state(path: str) -> dict:
+    # Tracked files only: an untracked notes folder must not mark every run
+    # dirty, while any edit to a tracked source file does.
+    def git(*args):
+        p = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=15)
+        return p.stdout.strip() if p.returncode == 0 else None
+
+    try:
+        commit = git("rev-parse", "HEAD")
+        status = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.SubprocessError):
+        commit = status = None
+    return {
+        "commit": commit or "unknown",
+        "dirty": None if status is None else bool(status),
+    }
+
+
+def protocol_manifest(*, argv: list[str], series_seed: int | None, clock, extra=None) -> dict:
+    """The run manifest: machine, toolchain, libraries, threads, source state."""
+    info = _machine_manifest()
+    blas = _pools("blas")
+    omp = _pools("openmp")
+    build = getattr(pg._core, "_build_info", None)
+    build = build() if callable(build) else {}
+    info.update(
+        {
+            # A label, never the hostname: results files get committed.
+            "machine": os.environ.get("PEREGRINE_BENCH_MACHINE", "unnamed"),
+            "os_build": platform.platform(),
+            "cpu_brand": _cpu_brand(),
+            "power_plan": info["power_profile"],
+            "compiler": build.get("compiler", "unknown"),
+            "compiler_flags": build.get("flags", "unknown"),
+            # threadpoolctl names the loaded runtime when it recognizes it;
+            # otherwise the build's _OPENMP value is the best record there is.
+            "openmp_runtime": (
+                os.path.basename(omp[0]["filepath"]) if omp and omp[0].get("filepath")
+                else f"_OPENMP={build['openmp']}" if build.get("openmp") else "unknown"
+            ),
+            "openblas_version": blas[0].get("version") if blas else "unknown",
+            "blas_core_type": blas[0].get("architecture") if blas else "unknown",
+            "blas_threads": blas[0].get("num_threads") if blas else None,
+            "peregrine_threads": (
+                int(pg.get_num_threads()) if hasattr(pg, "get_num_threads")
+                else (omp[0].get("num_threads") if omp else None)
+            ),
+            "omp_num_threads_at_start": _START_OMP_NUM_THREADS,
+            "peregrine_version": pg.__version__,
+            "source_tree": _git_state(os.path.dirname(os.path.abspath(pg.__file__))),
+            "harness_tree": _git_state(os.path.dirname(os.path.abspath(__file__))),
+            "datetime": datetime.datetime.now().astimezone().isoformat(),
+            "series_order_seed": series_seed,
+            "cli": list(argv),
+            "clock_counter": PdhClock.PATH if clock is not None and clock.available else None,
+            "clock_counter_note": "" if clock is None else clock.reason,
+        }
+    )
+    if extra:
+        info.update(extra)
+    return redact_paths(info)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--sizes", type=int, nargs="+", default=[64, 256, 512, 1024])
     p.add_argument("--dtype", choices=["float32", "float64"], default="float64")
-    # Protocol floors (bench-protocol rule 5): at least 5 warmup, at least 30
-    # measured reps. The old 3/15 defaults are below the floor and STATE.md
-    # flags numbers from them as not quotable.
+    # At least 5 warmup and 30 measured reps by default; numbers from fewer
+    # reps are a smoke check, never a result.
     p.add_argument("--reps", type=int, default=30)
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--save", type=str, default=None)
