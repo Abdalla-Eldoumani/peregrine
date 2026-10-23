@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core==1.1.1", "nanobind==3.1.0", "numpy>=2.0"]
+requires = ["scikit-build-core==1.1.1", "nanobind==3.1.0", "numpy>=2.5.4"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -37,7 +37,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Software Development :: Libraries",
 ]
-dependencies = ["numpy>=2.0,<3", "platformdirs>=4.3"]
+dependencies = ["numpy>=2.5.4,<3", "platformdirs>=4.3"]
 
 [project.urls]
 Homepage = "https://github.com/Abdalla-Eldoumani/peregrine"
