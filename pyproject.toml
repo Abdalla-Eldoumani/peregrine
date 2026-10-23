@@ -37,7 +37,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Software Development :: Libraries",
 ]
-dependencies = ["numpy>=2.0,<3", "platformdirs>=4.3"]
+dependencies = ["numpy>=2.0,<3", "platformdirs>=4.13.5"]
 
 [project.urls]
 Homepage = "https://github.com/Abdalla-Eldoumani/peregrine"
