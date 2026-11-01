@@ -46,7 +46,7 @@ Issues = "https://github.com/Abdalla-Eldoumani/peregrine/issues"
 Changelog = "https://github.com/Abdalla-Eldoumani/peregrine/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-test = ["pytest==9.1.1", "hypothesis==6.170.5", "threadpoolctl==3.7.0"]
+test = ["pytest==9.1.1", "hypothesis==6.170.13", "threadpoolctl==3.7.0"]
 bench = ["threadpoolctl==3.7.0", "matplotlib==3.11.2"]
 
 [tool.scikit-build]
